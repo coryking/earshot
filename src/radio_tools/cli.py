@@ -10,14 +10,16 @@ from typing import Annotated
 
 import typer
 from pydantic import BaseModel
+from scipy.io import wavfile
 from scipy.signal import resample_poly
 
 from .analysis import inspect as analyze
 from .analysis import load_audio, plot_audio
+from .digital import DMRResult, FMResult, dmr_audio, iq_fm
 
 app = typer.Typer(
     no_args_is_help=True,
-    help="Inspect demodulated SDR audio. Exit codes: 0 success (including no decode), 1 operational failure, 2 usage error.",
+    help="Analyze SDR audio, channelize IQ, and probe digital radio. Exit codes: 0 success (including no decode), 1 operational failure, 2 usage error.",
 )
 Json = Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON.")]
 Seconds = Annotated[
@@ -298,6 +300,128 @@ def paging(
             result.model_dump_json()
             if as_json
             else f"{result.status}\n{result.output}\n" + "\n".join(result.notes)
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        fail(e)
+
+
+def prepare_wav(output: Path, yes: bool):
+    if output.suffix.lower() != ".wav":
+        raise ValueError("Use a .wav output path.")
+    if output.exists():
+        raise ValueError(f"Output already exists: {output}. Choose a new path.")
+    if not yes:
+        raise typer.BadParameter("Writing requires --yes.")
+
+
+def save_wav(output: Path, rate: int, pcm):
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("xb") as stream:
+        wavfile.write(stream, rate, pcm)
+
+
+@app.command("iq-fm")
+def iq_fm_command(
+    file: str,
+    output: Annotated[Path, typer.Option("--output", "-o", help="New 48000 Hz FM audio WAV.")],
+    offset_hz: Annotated[
+        float | None, typer.Option(help="Target minus capture center, Hz.")
+    ] = None,
+    center_hz: Annotated[
+        float | None, typer.Option(help="Capture center in Hz; pair with --target-hz.")
+    ] = None,
+    target_hz: Annotated[
+        float | None, typer.Option(help="Target channel in Hz; pair with --center-hz.")
+    ] = None,
+    seconds: Annotated[float, typer.Option(min=0.001, max=60)] = 10,
+    bandwidth_hz: Annotated[
+        float,
+        typer.Option(
+            min=1000, max=40000, help="Full channel bandwidth; low-pass cutoff is half this."
+        ),
+    ] = 12500,
+    yes: Annotated[bool, typer.Option("--yes", help="Allow writing new output.")] = False,
+    as_json: Json = False,
+):
+    """Channelize int16 I/Q WAV and FM-demodulate. Example: --offset-hz -100000 --yes."""
+    if offset_hz is None:
+        if center_hz is None or target_hz is None:
+            raise typer.BadParameter(
+                "Supply --offset-hz (including 0), or both --center-hz and --target-hz."
+            )
+        offset_hz = target_hz - center_hz
+    elif center_hz is not None or target_hz is not None:
+        raise typer.BadParameter("Use --offset-hz or --center-hz with --target-hz, not both.")
+    try:
+        prepare_wav(output, yes)
+        with source(file) as path:
+            rate, analyzed, pcm = iq_fm(path, seconds, offset_hz, bandwidth_hz)
+        save_wav(output, 48000, pcm)
+        result = FMResult(
+            input=file,
+            output=str(output.resolve()),
+            input_rate_hz=rate,
+            offset_hz=offset_hz,
+            channel_bandwidth_hz=bandwidth_hz,
+            analyzed_s=analyzed,
+            output_samples=len(pcm),
+            notes=[
+                "Complex mixing, resampling to 50 kHz, 161-tap channel FIR, FM phase discriminator, then 48 kHz audio.",
+                "FM output is discriminator audio; protocol and intelligibility remain unverified.",
+            ],
+        )
+        typer.echo(result.model_dump_json() if as_json else result.output)
+    except (OSError, ValueError) as e:
+        fail(e)
+
+
+@app.command("dmr")
+def dmr_command(
+    file: str,
+    output: Annotated[Path, typer.Option("--output", "-o", help="New 8000 Hz decoded PCM WAV.")],
+    slot: Annotated[int, typer.Option(min=1, max=2, help="DMR timeslot to synthesize.")] = 1,
+    decoder: Annotated[
+        str | None, typer.Option(help="dsdccx executable; also RADIO_DSDCC or PATH.")
+    ] = None,
+    seconds: Seconds = 30,
+    channel: Channel = None,
+    yes: Annotated[bool, typer.Option("--yes", help="Allow writing new output.")] = False,
+    as_json: Json = False,
+):
+    """Synthesize a DMR voice slot from 48 kHz audio using optional DSDcc + mbelib."""
+    candidate = decoder or os.environ.get("RADIO_DSDCC") or shutil.which("dsdccx")
+    local = Path(__file__).resolve().parents[2] / ".tools/bin/dsdccx"
+    binary = (
+        shutil.which(candidate)
+        if candidate
+        else (str(local) if local.is_file() and os.access(local, os.X_OK) else None)
+    )
+    if not binary:
+        fail("dsdccx not found. Supply --decoder /path/to/dsdccx; see README for optional build.")
+    try:
+        prepare_wav(output, yes)
+        with source(file) as path:
+            analyzed, pcm, diagnostics = dmr_audio(path, binary, slot, seconds, channel)
+        save_wav(output, 8000, pcm)
+        result = DMRResult(
+            input=file,
+            output=str(output.resolve()),
+            decoder=binary,
+            slot=slot,
+            analyzed_s=analyzed,
+            output_samples=len(pcm),
+            output_duration_s=len(pcm) / 8000,
+            status="audio_emitted" if len(pcm) else "no_audio",
+            diagnostics=diagnostics,
+            notes=[
+                "Emitted PCM does not establish intelligible speech or encryption status.",
+                "No audio is inconclusive; this slot may carry data or the capture may not decode. Output contains only emitted audio, without input-timeline alignment.",
+            ],
+        )
+        typer.echo(
+            result.model_dump_json()
+            if as_json
+            else f"{result.status}: {result.output} ({result.output_duration_s:.3f}s)"
         )
     except (OSError, ValueError, subprocess.TimeoutExpired) as e:
         fail(e)
