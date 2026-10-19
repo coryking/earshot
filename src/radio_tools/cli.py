@@ -16,6 +16,7 @@ from scipy.signal import resample_poly
 from .analysis import inspect as analyze
 from .analysis import load_audio, plot_audio
 from .digital import DMRResult, FMResult, dmr_audio, iq_fm
+from .survey import plot_survey, survey_iq
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -424,4 +425,68 @@ def dmr_command(
             else f"{result.status}: {result.output} ({result.output_duration_s:.3f}s)"
         )
     except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        fail(e)
+
+
+@app.command("iq-survey")
+def iq_survey_command(
+    file: str,
+    center_hz: Annotated[
+        float | None,
+        typer.Option(help="Capture center in Hz; otherwise filename metadata if available."),
+    ] = None,
+    seconds: Annotated[
+        float, typer.Option(min=0.001, max=120, help="Span to sparsely sample from start.")
+    ] = 30,
+    fft_size: Annotated[
+        int, typer.Option(min=1024, max=65536, help="Power-of-two FFT size.")
+    ] = 16384,
+    windows: Annotated[
+        int, typer.Option(min=4, max=512, help="Maximum sampled FFT windows.")
+    ] = 240,
+    limit: Annotated[
+        int, typer.Option(min=1, max=100, help="Maximum candidate regions in output.")
+    ] = 20,
+    output: Annotated[
+        Path | None, typer.Option("--output", "-o", help="Optional new PSD/waterfall PNG.")
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", help="Allow writing new plot output.")] = False,
+    as_json: Json = False,
+):
+    """Survey wideband int16 IQ with bounded memory. Example: radio iq-survey capture.wav --json."""
+    try:
+        if output:
+            if output.suffix.lower() != ".png" or output.exists():
+                raise ValueError(
+                    "Choose a new .png output path; existing files are never overwritten."
+                )
+            if not yes:
+                raise typer.BadParameter("Writing a plot requires --yes.")
+        with source(file) as path:
+            data = survey_iq(path, seconds, center_hz, fft_size, windows, limit)
+        if file == "-":
+            data.result.path = "-"
+        if output:
+            plot_survey(data, output)
+        if as_json:
+            typer.echo(data.result.model_dump_json())
+        else:
+            r = data.result
+            typer.echo(
+                f"{r.sample_rate_hz} samples/s | {r.surveyed_span_s:.3f}s span | {r.sampled_duration_s:.3f}s sampled | {r.bin_width_hz:.1f} Hz/bin"
+            )
+            for c in r.candidates:
+                frequency = (
+                    f"{c.frequency_hz / 1e6:.6f} MHz"
+                    if c.frequency_hz
+                    else f"{c.offset_hz:+.0f} Hz"
+                )
+                typer.echo(
+                    f"{frequency}\t{c.kind}\t{c.width_hz:.0f} Hz wide\t{c.sampled_occupancy:.0%} sampled occupancy\t{','.join(c.flags)}"
+                )
+            typer.echo(
+                "Candidates are heuristic observations; protocol unknown. Use --json for methods and limits.",
+                err=True,
+            )
+    except (OSError, ValueError) as e:
         fail(e)

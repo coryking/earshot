@@ -141,6 +141,52 @@ The final library filename above is for macOS; Linux builds use `libmbe.so`.
 The recorded revisions reproduce the tested source. Upstream documentation:
 [DSDcc](https://github.com/f4exb/dsdcc), [mbelib](https://github.com/szechyjs/mbelib).
 
+### Wideband IQ survey
+
+Survey a recording before choosing channels to extract:
+
+```sh
+uv run radio iq-survey recordings/baseband_454217000Hz_capture.wav --json
+uv run radio iq-survey recordings/baseband_454217000Hz_capture.wav \
+  --seconds 60 --fft-size 32768 --windows 320 --limit 30 \
+  -o output/survey.png --yes --json
+```
+
+`iq-survey` memory-maps a two-channel int16 IQ WAV and reads bounded FFT windows
+spread evenly across the selected span. It defaults to 240 windows over the
+first 30 seconds. The limits are 120 seconds, 512 windows, 65,536 FFT bins and
+100 reported candidates. The default power matrix is about 16 MB; its maximum
+is 128 MB, with additional working arrays. It does not load the entire capture
+or create a derived spectrum dataset. Center frequency comes from `--center-hz`
+or filename metadata; without either, results contain frequency offsets only.
+
+The optional PNG shows mean sampled PSD, an estimated local floor and a sparse
+waterfall on matching frequency axes. Density is dBFS/Hz relative to the signed
+16-bit container: `I+jQ` divided by 32768, with unit complex magnitude at 0 dBFS.
+The Hann PSD integrates to mean sampled signal power. These are not calibrated
+RF dBm readings. Direct Pluto recordings can store raw 12-bit ADC values in the
+16-bit container, while SDR++ can scale them differently; levels from those
+paths are not directly comparable.
+
+The local floor is a 100 kHz frequency median of each bin's temporal median
+power divided by `ln(2)`, which estimates stationary white-noise power. Candidate
+bins need mean power at least 8 dB above that floor and at least 5% occupancy
+in the sampled windows. Adjacent detections separated by up to two FFT bins
+are joined. Regions no wider than the larger of 1500 Hz or four FFT bins are
+labelled `narrow_carrier`; wider ones are `occupied_region`. Separate broad-hump
+candidates need 12 dB over a global floor and a contiguous width of at least
+25 kHz or 4% of the captured span, whichever is larger. They may overlap smaller
+candidates and may reflect receiver passband shape.
+
+Each region's occupancy is the largest per-bin occupancy in that region, not
+a measurement of total channel airtime. Narrow center/DC features and capture
+edges receive artifact flags; wider regions crossing the capture center are
+flagged separately. Candidate midpoints are extraction starting points rather
+than exact channel assignments. The detector can split one transmission into
+several regions, miss weak or brief bursts, or report receiver spurs and leakage.
+Colored noise, dense occupancy and a nearly noiseless synthetic waveform can
+distort its floor estimate. Every candidate remains unidentified until checked.
+
 ### Building the paging decoder
 
 The current Mac checkout has a local multimon-ng build. To reproduce it on a
