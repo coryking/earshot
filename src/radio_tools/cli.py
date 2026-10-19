@@ -16,12 +16,14 @@ from scipy.signal import resample_poly
 from .analysis import inspect as analyze
 from .analysis import load_audio, plot_audio
 from .digital import DMRResult, FMResult, dmr_audio, iq_fm
+from .pluto import app as pluto_app
 from .survey import plot_survey, survey_iq
 
 app = typer.Typer(
     no_args_is_help=True,
     help="Analyze SDR audio, channelize IQ, and probe digital radio. Exit codes: 0 success (including no decode), 1 operational failure, 2 usage error.",
 )
+app.add_typer(pluto_app, name="pluto")
 Json = Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON.")]
 Seconds = Annotated[
     float,

@@ -3,13 +3,26 @@ import json
 import numpy as np
 import pytest
 from scipy.io import wavfile
-from scipy.signal import welch
+from scipy.signal import resample_poly, welch
 from typer.testing import CliRunner
 
 from radio_tools.cli import app
-from radio_tools.digital import iq_fm
+from radio_tools.digital import channelize_iq, iq_fm
 
 runner = CliRunner()
+
+
+def test_chunked_channelization_matches_whole_resampling():
+    random = np.random.default_rng(23)
+    raw = random.integers(-20000, 20000, (300017, 2), dtype=np.int16)
+    rate, offset = 1250000, -100000
+    x = raw[:, 0].astype(np.complex64)
+    x.imag = raw[:, 1]
+    x *= np.exp(-2j * np.pi * offset * np.arange(len(raw)) / rate)
+    expected = resample_poly(x, 1, 25)
+    actual = channelize_iq(raw, rate, len(raw), offset, chunk_size=65536)
+    assert len(actual) == len(expected)
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=0.01)
 
 
 @pytest.fixture

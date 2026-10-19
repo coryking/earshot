@@ -98,7 +98,10 @@ It mixes the target to zero, resamples to 50 kHz, applies a 161-tap low-pass
 FIR at 6250 Hz, takes the complex phase difference, removes mean DC, then
 resamples to 48 kHz. `--bandwidth-hz` changes twice the low-pass cutoff.
 The full channel plus a 2500 Hz transition guard must fit inside the capture.
-Processing still needs memory proportional to the selected IQ duration.
+Mixing and resampling use overlapped blocks of about one million input samples
+instead of allocating the full IQ span. Rational resampling-grid alignment can
+enlarge blocks for unusual sample rates. Only the smaller 50 kHz channel is
+retained for the selected duration.
 Output gain uses a nominal 5 kHz FM deviation; filter startup and resampling
 edges remain in the output.
 
@@ -186,6 +189,40 @@ than exact channel assignments. The detector can split one transmission into
 several regions, miss weak or brief bursts, or report receiver spurs and leakage.
 Colored noise, dense occupancy and a nearly noiseless synthetic waveform can
 distort its floor estimate. Every candidate remains unidentified until checked.
+
+### Direct Pluto capture
+
+`radio pluto capture` records receive-only IQ through libiio 0.x without the
+SDR++ UI. Close SDR++ before capturing so only one process owns the receiver.
+The default URI is `ip:pluto.local`; pass `--uri` for another libiio URI, including
+the current USB URI. USB URIs can change after reconnection.
+
+```sh
+uv run radio pluto capture --center 454217000 --rate 5000000 --seconds 10 \
+  --output recordings/baseband_454217000Hz_direct.wav --dry-run --json
+uv run radio pluto capture --center 454217000 --rate 5000000 --seconds 10 \
+  --output recordings/baseband_454217000Hz_direct.wav --yes --json
+```
+
+The preview checks bounded file size and free space without opening hardware.
+Capture requires `--yes`, refuses existing WAV/sidecar paths, restores the
+original receive rate, bandwidth, LO and gain mode on success or failure, and
+writes metadata to `PATH.wav.json`. It preserves gain mode unless requested.
+RX bandwidth defaults to the requested rate, capped at 56 MHz. No transmit
+stream or transmit LO is opened.
+
+On this Mac, the library defaults to SDR++'s bundled
+`/Applications/SDR++.app/Contents/Frameworks/iio`; its bundled libusb is loaded
+first. Default loading was verified without `DYLD_LIBRARY_PATH`. Other systems
+can use an installed libiio 0.x library or `--library /path/to/library`.
+
+Streaming is limited by the USB/backend throughput. The sidecar reports sample
+duration, wall duration and throughput, and explicitly leaves continuity and
+dropped-sample counts unknown. A single snapshot (`--single-buffer`) is capped
+at 128 MiB and separates hardware sample duration from USB transfer time; for
+example, `--rate 20000000 --seconds 0.25 --single-buffer` captures a 0.25-second
+span, not a long-duration survey. These captures keep raw ADC values in a
+signed 16-bit WAV container, normally with 12 valid bits.
 
 ### Building the paging decoder
 

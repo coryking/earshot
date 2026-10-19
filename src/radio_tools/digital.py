@@ -24,6 +24,27 @@ class FMResult(BaseModel):
     notes: list[str]
 
 
+def channelize_iq(raw, rate, count, offset_hz, chunk_size=1000000):
+    """Mix/resample overlapped, rational-grid-aligned blocks without allocating full IQ."""
+    divisor = gcd(rate, 50000)
+    up, down = 50000 // divisor, rate // divisor
+    step = max(down, (chunk_size // down) * down)
+    padding = down * max(1, (16 + up - 1) // up)
+    chunks = []
+    for start in range(0, count, step):
+        stop = min(count, start + step)
+        context_start = max(0, start - padding)
+        context_stop = min(count, stop + padding)
+        x = raw[context_start:context_stop, 0].astype(np.complex64)
+        x.imag = raw[context_start:context_stop, 1]
+        x *= np.exp(-2j * np.pi * offset_hz * np.arange(context_start, context_stop) / rate)
+        y = resample_poly(x, up, down)
+        trim_start = (start - context_start) * up // down
+        length = ((stop - start) * up + down - 1) // down
+        chunks.append(y[trim_start : trim_start + length].copy())
+    return np.concatenate(chunks)
+
+
 def iq_fm(path: Path, seconds: float, offset_hz: float, bandwidth_hz: float = 12500):
     if not np.isfinite(seconds) or not 0.001 <= seconds <= 60:
         raise ValueError("IQ duration must be between 0.001 and 60 seconds.")
@@ -44,14 +65,7 @@ def iq_fm(path: Path, seconds: float, offset_hz: float, bandwidth_hz: float = 12
     count = min(len(raw), int(seconds * rate))
     if count < max(2, rate // 1000):
         raise ValueError("IQ WAV must contain at least 1 ms of samples.")
-    x = raw[:count, 0].astype(np.complex64)
-    x.imag = raw[:count, 1]
-    # Bound the oscillator allocation as well as the mapped input window.
-    for start in range(0, count, 1000000):
-        stop = min(count, start + 1000000)
-        x[start:stop] *= np.exp(-2j * np.pi * offset_hz * np.arange(start, stop) / rate)
-    divisor = gcd(rate, 50000)
-    y = resample_poly(x, 50000 // divisor, rate // divisor)
+    y = channelize_iq(raw, rate, count, offset_hz)
     y = lfilter(firwin(161, bandwidth_hz / 2, fs=50000), [1.0], y)
     fm = np.angle(y[1:] * np.conj(y[:-1]))
     fm -= np.mean(fm)
