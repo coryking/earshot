@@ -1,14 +1,4 @@
-import { z } from "zod";
-const packetSchema = z.object({
-  type: z.literal("audio"),
-  pcm: z.string(),
-  channel_id: z.string(),
-  sequence: z.number(),
-  generation: z.number(),
-  source_generation: z.number(),
-  rate_hz: z.number(),
-  ingress_age_ms: z.number(),
-});
+import { AudioWire } from "./audio-wire";
 export type PlaybackState = {
   playing: boolean;
   error: string | null;
@@ -16,6 +6,7 @@ export type PlaybackState = {
 };
 /** Schedules fresh streamed PCM only. No recording, replay, or segment history. */
 export class LivePlayer {
+  private wire = new AudioWire();
   private context: AudioContext | null = null;
   private socket: WebSocket | null = null;
   private channel: string | null = null;
@@ -44,16 +35,26 @@ export class LivePlayer {
       `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/listen`,
     );
     this.socket = socket;
+    socket.binaryType = "arraybuffer";
     socket.onmessage = (event) => {
-      let raw: unknown;
-      try {
-        raw = JSON.parse(String(event.data));
-      } catch {
-        return;
+      if (typeof event.data === "string") {
+        try {
+          if (JSON.parse(event.data)?.type === "gap") {
+            this.wire.reset();
+            this.flush();
+            return;
+          }
+        } catch {
+          /* invalid messages are discarded by the wire decoder */
+        }
       }
-      const result = packetSchema.safeParse(raw);
-      if (!result.success) return;
-      const packet = result.data;
+      if (
+        typeof event.data !== "string" &&
+        !(event.data instanceof ArrayBuffer)
+      )
+        return;
+      const packet = this.wire.read(event.data);
+      if (!packet) return;
       if (
         packet.channel_id !== this.channel ||
         packet.source_generation !== this.sourceGeneration ||
@@ -65,12 +66,12 @@ export class LivePlayer {
         this.flush();
         this.decoderGeneration = packet.generation;
       }
-      const bytes = Uint8Array.from(atob(packet.pcm), (c) => c.charCodeAt(0));
+      const bytes = packet.bytes;
       if (bytes.length % 2) return;
       const samples = bytes.length / 2,
         buffer = this.context.createBuffer(1, samples, packet.rate_hz),
         out = buffer.getChannelData(0),
-        view = new DataView(bytes.buffer);
+        view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
       for (let i = 0; i < samples; i++)
         out[i] = view.getInt16(i * 2, true) / 32768;
       const now = this.context.currentTime;
@@ -131,6 +132,7 @@ export class LivePlayer {
   }
   pause() {
     this.channel = null;
+    this.wire.reset();
     const socket = this.socket;
     this.socket = null;
     socket?.close();
