@@ -311,10 +311,41 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
         cost,
     })
 }
+/// One logical target competing for the bounded codec budget.
+struct Candidate {
+    logical: u64,
+    selected: bool,
+    /// The source is actually delivering IQ for this target's physical stream.
+    forwarded: bool,
+    rf_active: bool,
+    cost: usize,
+}
+/// Pick the logical targets that get codec instances. The pinned listener comes
+/// first (its IQ is requested even if the confirming CONFIG is still in flight),
+/// then streams with forwarded IQ (RF-active before quiet), then lower frequency.
+/// A stream whose IQ the source does not forward can never be decoded, so it
+/// never takes budget, however RF-active its metadata looks.
+fn admit(mut candidates: Vec<Candidate>, budget: usize) -> Vec<u64> {
+    candidates.retain(|c| c.selected || c.forwarded);
+    candidates.sort_by_key(|c| (!c.selected, !c.forwarded, !c.rf_active, c.logical));
+    let mut remaining = budget;
+    let mut admitted = Vec::new();
+    for c in candidates {
+        if c.cost <= remaining {
+            admitted.push(c.logical);
+            remaining -= c.cost;
+        }
+    }
+    admitted
+}
+/// Streams that delivered IQ this recently count as forwarded even when the
+/// source's CONFIG does not say (older producers, or a pin acknowledged later).
+const IQ_RECENT: Duration = Duration::from_secs(2);
 fn schedule(
     app: &App,
     configs: &HashMap<u64, Value>,
     workers: &mut HashMap<u64, Worker>,
+    iq_seen: &HashMap<u32, Instant>,
 ) -> Result<()> {
     let e = app.inner.lock().unwrap();
     let selected = selected_logical(&e);
@@ -334,30 +365,37 @@ fn schedule(
             cfg["protocol"] = json!(protocol);
         }
     }
-    let mut streams: Vec<_> = effective.iter().collect();
-    streams.sort_by(|(a, _), (b, _)| {
-        let priority = |s: &&u64| {
-            let active = e.channels.values().any(|c| {
-                c["frequency_hz"].as_f64().map(|v| v.round() as u64) == Some(**s)
-                    && c["rf_active"] == true
-            });
-            (Some(**s) != selected, !active, **s)
-        };
-        priority(a).cmp(&priority(b))
-    });
+    let candidates: Vec<Candidate> = effective
+        .iter()
+        .map(|(&logical, cfg)| {
+            let physical = cfg["stream_id"].as_u64().unwrap_or(0) as u32;
+            // CONFIG's `iq_forwarded`/`pinned` is the source forwarding mask; a source
+            // that does not publish it is assumed to forward everything it declares.
+            let declared = cfg["iq_forwarded"].as_bool().unwrap_or(true) || cfg["pinned"] == true;
+            let received = iq_seen
+                .get(&physical)
+                .is_some_and(|t| t.elapsed() < IQ_RECENT);
+            Candidate {
+                logical,
+                selected: Some(logical) == selected,
+                forwarded: declared || received,
+                rf_active: e.channels.values().any(|c| {
+                    c["frequency_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
+                        && c["rf_active"] == true
+                }),
+                cost: workers
+                    .get(&logical)
+                    .map(|w| w.cost.load(Ordering::Relaxed))
+                    .unwrap_or_else(|| modes(cfg).len()),
+            }
+        })
+        .collect();
+    let metadata_only = candidates
+        .iter()
+        .filter(|c| !c.selected && !c.forwarded)
+        .count();
     drop(e);
-    let mut remaining = app.max_decoders;
-    let mut admitted = Vec::new();
-    for (&stream, cfg) in streams {
-        let cost = workers
-            .get(&stream)
-            .map(|w| w.cost.load(Ordering::Relaxed))
-            .unwrap_or_else(|| modes(cfg).len());
-        if cost <= remaining {
-            admitted.push(stream);
-            remaining -= cost;
-        }
-    }
+    let admitted = admit(candidates, app.max_decoders);
     workers.retain(|key, _| admitted.contains(key));
     for stream in admitted {
         if let std::collections::hash_map::Entry::Vacant(e) = workers.entry(stream) {
@@ -380,6 +418,7 @@ fn schedule(
             .sum::<usize>()
     );
     e.source["skipped_streams"] = json!(configs.len() - workers.len());
+    e.source["metadata_only_streams"] = json!(metadata_only);
     for c in e.channels.values_mut() {
         let logical = c["frequency_hz"]
             .as_f64()
@@ -426,6 +465,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
     let mut scheduled = Instant::now();
     let mut transport_sequences = HashMap::new();
     let mut pending_gaps = HashSet::new();
+    let mut iq_seen: HashMap<u32, Instant> = HashMap::new();
 
     loop {
         let mut frame = match Frame::read(&mut input) {
@@ -473,6 +513,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                 configs.clear();
                 transport_sequences.clear();
                 pending_gaps.clear();
+                iq_seen.clear();
             }
             let mut e = app.inner.lock().unwrap();
             e.source = config.clone();
@@ -562,7 +603,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
             let _ = app.events.send(
                 json!({"type":"source_config","generation":frame.generation,"source":config}),
             );
-            schedule(&app, &configs, &mut workers)?;
+            schedule(&app, &configs, &mut workers, &iq_seen)?;
             transport_sequences.insert(frame.stream_id, frame.sequence);
             config_generation = Some(frame.generation);
             continue;
@@ -591,7 +632,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
             }
         }
         if scheduled.elapsed() > Duration::from_millis(100) {
-            schedule(&app, &configs, &mut workers)?;
+            schedule(&app, &configs, &mut workers, &iq_seen)?;
             scheduled = Instant::now();
         }
         match frame.kind {
@@ -608,6 +649,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     .first_sample
                     .checked_add(frame.payload.len() as u64 / 4)
                     .context("IQ sample counter overflow")?;
+                iq_seen.insert(frame.stream_id, Instant::now());
                 let shared = Arc::new(frame);
                 let mut missed = false;
                 for worker in workers.values().filter(|w| w.stream == shared.stream_id) {
@@ -791,22 +833,58 @@ mod tests {
         streams.push(json!({"stream_id":50,"center_hz":454200000u64,"protocol":"Unknown","iq_forwarded":true,"pinned":false}));
         json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,"streams":streams,"psd":{"unit":"dBFS"}}).to_string().into_bytes()
     }
+    /// Feeds `data`, then blocks until released, so a test can observe the live
+    /// scheduler state before end-of-stream marks the source disconnected.
+    struct HeldOpen {
+        data: std::io::Cursor<Vec<u8>>,
+        release: mpsc::Receiver<()>,
+    }
+    impl Read for HeldOpen {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.data.read(buf)?;
+            if n == 0 {
+                let _ = self.release.recv();
+            }
+            Ok(n)
+        }
+    }
     #[test]
     fn forwarded_stream_is_admitted_ahead_of_metadata_only_lower_ids() {
         // An unknown stream costs three codec instances, so a budget of three admits one.
         let app = App::new(3);
         let mut bytes = Vec::new();
-        frame(4, 1, 0, 0, 0, forwarding_configuration()).write(&mut bytes).unwrap();
-        ingest(&bytes[..], app.clone()).unwrap();
-        let e = app.inner.lock().unwrap();
-        let admitted: Vec<u64> = e
-            .channels
-            .values()
-            .filter(|c| c["decoder_admitted"] == true)
-            .map(|c| c["stream_id"].as_u64().unwrap())
-            .collect();
+        frame(4, 1, 0, 0, 0, forwarding_configuration())
+            .write(&mut bytes)
+            .unwrap();
+        let (release, rx) = mpsc::channel();
+        let input = HeldOpen {
+            data: std::io::Cursor::new(bytes),
+            release: rx,
+        };
+        let runner = {
+            let app = app.clone();
+            thread::spawn(move || ingest(input, app))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let admitted = loop {
+            let admitted: Vec<u64> = {
+                let e = app.inner.lock().unwrap();
+                e.channels
+                    .values()
+                    .filter(|c| c["decoder_admitted"] == true)
+                    .map(|c| c["stream_id"].as_u64().unwrap())
+                    .collect()
+            };
+            if !admitted.is_empty() || Instant::now() > deadline {
+                break admitted;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        let metadata_only = app.inner.lock().unwrap().source["metadata_only_streams"].clone();
+        release.send(()).unwrap();
+        runner.join().unwrap().unwrap();
         assert_eq!(admitted, vec![50], "forwarded stream must hold the decoder budget");
-        assert_eq!(e.source["metadata_only_streams"], 4);
+        assert_eq!(metadata_only, 4);
     }
     #[test]
     fn rf_active_metadata_only_streams_do_not_starve_forwarded_stream() {

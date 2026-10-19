@@ -55,8 +55,12 @@ unmute audio. Data-only channels are not promoted to voice by an empty codec
 output.
 
 `--max-decoders 8` limits actual codec instances. Unknown RF streams cost three
-instances; known DMR streams cost two and NXDN streams cost one. The selected
-stream is scheduled first, followed by RF-active streams. Each stream has a
+instances; known DMR streams cost two and NXDN streams cost one. Admission order is
+the pinned stream, then streams the source actually forwards IQ for (CONFIG
+`iq_forwarded`/`pinned`, or IQ received in the last 2 s; RF-active before quiet), then
+lower frequency. Metadata-only streams never take decoder budget, however RF-active
+their activity looks (`source.metadata_only_streams` counts them). A source that does
+not publish `iq_forwarded` is assumed to forward every stream it declares. Each stream has a
 four-packet input queue; overflow is counted and resets DSP and codec state on
 the next accepted packet. Catalog entries survive silence, retuning, and source
 loss. `available`/`decoder_admitted` describe the bounded decode budget;
@@ -118,12 +122,7 @@ The embedded codec and 25 ksps IQ-to-WebSocket fixture paths passed. The actual
 on-Pluto producer has not been connected to this host: integration was stopped
 for the session transfer before acquisition began. Native servers are stopped.
 
-Before live integration, prioritize physical streams actually forwarding IQ (or
-the producer's forwarding mask) when assigning the codec budget. The current
-scheduler prioritizes the selected target and RF-active catalog entries; a
-forwarded stream can otherwise be skipped while lower-numbered metadata-only
-streams occupy the pool. CONFIG protocol hints or a deliberate initial target
-selection are alternative ways to establish the first live decoder.
+Decoder admission now honors the source forwarding mask (see Streaming contract).
 
 Remaining acceptance: multi-target 100 ksps adjacent-channel rejection and live
 producer-to-host binary audio; source stop ACK and actual RF/FIR/clock restoration
