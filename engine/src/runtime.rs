@@ -29,17 +29,19 @@ fn now() -> f64 {
 pub struct App {
     pub(crate) inner: Arc<Mutex<Engine>>,
     pub(crate) audio: broadcast::Sender<Audio>,
+    pub(crate) events: broadcast::Sender<Value>,
     pub(crate) max_decoders: usize,
 }
 #[derive(Clone)]
 pub(crate) struct Audio {
     pub(crate) meta: Value,
     pub(crate) pcm: Vec<u8>,
+    pub(crate) created: Instant,
 }
 pub(crate) struct Engine {
     pub(crate) source: Value,
     pub(crate) channels: HashMap<String, Value>,
-    worker_epochs: HashMap<u32, u64>,
+    worker_epochs: HashMap<u64, u64>,
     pub(crate) selected_at: Instant,
     pub(crate) control: Option<mpsc::SyncSender<Value>>,
     pub(crate) selected: Option<String>,
@@ -57,6 +59,7 @@ pub(crate) struct Engine {
 impl App {
     pub fn new(max_decoders: usize) -> Self {
         let (audio, _) = broadcast::channel(16);
+        let (events, _) = broadcast::channel(256);
         Self {
             inner: Arc::new(Mutex::new(Engine {
                 source: json!({}),
@@ -77,6 +80,7 @@ impl App {
                 active: false,
             })),
             audio,
+            events,
             max_decoders,
         }
     }
@@ -93,6 +97,7 @@ impl App {
         e.listener["error"] = json!(e.error);
         e.listener["status"] = json!("error");
         e.listener["state"] = json!("error");
+        let _=self.events.send(json!({"type":"source_state","state":"error","error":e.error,"generation":e.generation}));
         for c in e.channels.values_mut() {
             c["available"] = json!(false);
             c["decoder_admitted"] = json!(false);
@@ -102,20 +107,21 @@ impl App {
     }
 }
 struct Work {
-    frame: Frame,
+    frame: Arc<Frame>,
     received: Instant,
 }
 struct Worker {
     sender: mpsc::SyncSender<Work>,
+    stream: u32,
     queued: Arc<AtomicUsize>,
     cost: Arc<AtomicUsize>,
 }
-fn selected_stream(e: &Engine) -> Option<u32> {
+fn selected_logical(e: &Engine) -> Option<u64> {
     e.selected
         .as_deref()
         .and_then(|id| e.channels.get(id))
-        .and_then(|c| c["stream_id"].as_u64())
-        .map(|v| v as u32)
+        .and_then(|c| c["frequency_hz"].as_f64())
+        .map(|v| v.round() as u64)
 }
 fn channel_id(frequency: f64, protocol: &str, slot: u8) -> String {
     format!("{frequency:.0}-{protocol}-{slot}")
@@ -131,12 +137,13 @@ fn modes(cfg: &Value) -> Vec<(&'static str, u8)> {
     }
 }
 static WORKER_EPOCH: AtomicU64 = AtomicU64::new(1);
-fn worker(app: App, stream: u32, cfg: Value) -> Result<Worker> {
+fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
+    let stream = cfg["stream_id"].as_u64().context("stream_id missing")? as u32;
     let epoch = WORKER_EPOCH.fetch_add(1, Ordering::Relaxed);
     {
         let mut e = app.inner.lock().unwrap();
-        e.worker_epochs.insert(stream, epoch);
-        if selected_stream(&e) == Some(stream) {
+        e.worker_epochs.insert(logical, epoch);
+        if selected_logical(&e) == Some(logical) {
             e.decoder_generation += 1;
         }
     }
@@ -157,13 +164,25 @@ fn worker(app: App, stream: u32, cfg: Value) -> Result<Worker> {
         let mut rate = 0;
         while let Ok(work) = rx.recv() {
             worker_queued.fetch_sub(1, Ordering::Relaxed);
-            let frame = work.frame;
+            let frame = &work.frame;
+            let mut first_sample = frame.first_sample;
+            let mut payload = frame.payload.as_slice();
+            if generation == Some(frame.generation) && frame.flags & (DISCONTINUITY | OVERFLOW) == 0
+                && let Some(previous) = expected_sample
+                    && first_sample < previous {
+                        let trim = ((previous - first_sample) as usize).min(payload.len() / 4);
+                        payload = &payload[trim * 4..];
+                        first_sample += trim as u64;
+                        if payload.is_empty() {
+                            continue;
+                        }
+                    }
             let frequency = cfg["target_hz"].as_f64().unwrap_or(frame.center_hz as f64);
             let gap = generation.is_some()
                 && (generation != Some(frame.generation)
                     || frame.rate != rate
                     || frame.flags & (DISCONTINUITY | OVERFLOW | START) != 0
-                    || expected_sample.is_some_and(|v| v != frame.first_sample));
+                    || expected_sample.is_some_and(|v| v != first_sample));
             if gap || decoders.is_empty() {
                 decoders = modes
                     .iter()
@@ -184,16 +203,20 @@ fn worker(app: App, stream: u32, cfg: Value) -> Result<Worker> {
                 saw_preroll = false;
                 let mut e = app.inner.lock().unwrap();
                 if gap {
-                    e.drops += 1;
-                    if selected_stream(&e) == Some(stream) {
+                    if frame.flags & START != 0 && frame.flags & (DISCONTINUITY | OVERFLOW) == 0 {
+                        e.source["intentional_gate_restarts"] =
+                            json!(e.source["intentional_gate_restarts"].as_u64().unwrap_or(0) + 1);
+                    } else {
+                        e.drops += 1;
+                    }
+                    if selected_logical(&e) == Some(logical) {
                         e.decoder_generation += 1;
                     }
                 }
             }
 
-            expected_sample = Some(frame.first_sample + frame.payload.len() as u64 / 4);
-            let iq: Vec<_> = frame
-                .payload
+            expected_sample = Some(first_sample + payload.len() as u64 / 4);
+            let iq: Vec<_> = payload
                 .chunks_exact(4)
                 .map(|b| {
                     Complex32::new(
@@ -217,21 +240,38 @@ fn worker(app: App, stream: u32, cfg: Value) -> Result<Worker> {
                 let mut e = app.inner.lock().unwrap();
                 if frame.generation != e.generation
                     || !e.active
-                    || e.worker_epochs.get(&stream) != Some(&epoch)
+                    || e.worker_epochs.get(&logical) != Some(&epoch)
                 {
                     continue;
                 }
-                if confirmed && !audio.is_empty() {
+                let physical = e
+                    .channels
+                    .values()
+                    .find(|c| c["stream_id"] == stream && c["rf_active"] == true)
+                    .cloned();
+                let speech = speech && physical.is_some();
+                if confirmed && !audio.is_empty() && physical.is_some() {
                     protocol_evidence = Some(*protocol);
                     let entry = e
                         .channels
                         .entry(id.clone())
                         .or_insert_with(|| make_channel(stream, frequency, protocol, *slot));
+                    if let Some(physical) = &physical {
+                        for key in ["rf_active", "last_rf", "level_db"] {
+                            entry[key] = physical[key].clone();
+                        }
+                    }
                     entry["decoded"] = json!(true);
                     entry["kind"] = json!("voice");
                     entry["last_heard"] = json!(now());
                     entry["available"] = json!(true);
+                    let changed = entry["speech_active"] != speech;
                     entry["speech_active"] = json!(speech);
+                    if changed {
+                        let _ = app.events.send(
+                            json!({"type":"channel","generation":frame.generation,"channel":entry}),
+                        );
+                    }
                     entry["sequence"] = json!(entry["sequence"].as_u64().unwrap_or(0) + 1);
                     entry["audio_seconds"] = json!(
                         entry["audio_seconds"].as_f64().unwrap_or(0.) + audio.len() as f64 / 8000.
@@ -255,7 +295,7 @@ fn worker(app: App, stream: u32, cfg: Value) -> Result<Worker> {
                     let ingress = work.received.elapsed().as_secs_f64() * 1000.;
                     let bytes: Vec<u8> = audio.iter().flat_map(|v| v.to_le_bytes()).collect();
                     e.listener = json!({"status":"listening","state":"listening","channel_id":id,"voice_active":true,"generation":decoder_generation,"source_generation":source_generation,"sequence":sequence,"audio_chunks":sequence,"last_audio_at":now(),"ingress_age_ms":ingress,"ingress_age_basis":"host ingress receipt; device speech alignment unknown","dropped_blocks":e.drops,"input_dropped":e.drops,"queue_blocks":0,"error":null});
-                    let _=app.audio.send(Audio{meta:json!({"type":"audio","encoding":"s16le","channels":1,"rate_hz":8000,"samples":audio.len(),"channel_id":id,"generation":decoder_generation,"source_generation":source_generation,"sequence":sequence,"ingress_age_ms":ingress,"ingress_age_basis":"host ingress receipt; device speech alignment unknown"}),pcm:bytes});
+                    let _=app.audio.send(Audio{meta:json!({"type":"audio","encoding":"s16le","channels":1,"rate_hz":8000,"samples":audio.len(),"channel_id":id,"generation":decoder_generation,"source_generation":source_generation,"sequence":sequence,"ingress_age_ms":ingress,"ingress_age_basis":"host ingress receipt; device speech alignment unknown"}),pcm:bytes,created:Instant::now()});
                 }
             }
             if let Some(protocol) = protocol_evidence {
@@ -266,29 +306,29 @@ fn worker(app: App, stream: u32, cfg: Value) -> Result<Worker> {
     });
     Ok(Worker {
         sender: tx,
+        stream,
         queued,
         cost,
     })
 }
 fn schedule(
     app: &App,
-    configs: &HashMap<u32, Value>,
-    workers: &mut HashMap<u32, Worker>,
+    configs: &HashMap<u64, Value>,
+    workers: &mut HashMap<u64, Worker>,
 ) -> Result<()> {
     let e = app.inner.lock().unwrap();
-    let selected = e
-        .selected
-        .as_deref()
-        .and_then(|id| e.channels.get(id))
-        .and_then(|c| c["stream_id"].as_u64())
-        .map(|v| v as u32);
+    let selected = selected_logical(&e);
     let mut effective = configs.clone();
     for (&stream, cfg) in &mut effective {
         if cfg["protocol"].as_str().unwrap_or("Unknown") == "Unknown"
             && let Some(protocol) = e
                 .channels
                 .values()
-                .find(|c| c["stream_id"] == stream && c["in_range"] == true && c["decoded"] == true)
+                .find(|c| {
+                    c["frequency_hz"].as_f64().map(|v| v.round() as u64) == Some(stream)
+                        && c["in_range"] == true
+                        && c["decoded"] == true
+                })
                 .and_then(|c| c["protocol"].as_str())
         {
             cfg["protocol"] = json!(protocol);
@@ -296,11 +336,11 @@ fn schedule(
     }
     let mut streams: Vec<_> = effective.iter().collect();
     streams.sort_by(|(a, _), (b, _)| {
-        let priority = |s: &&u32| {
-            let active = e
-                .channels
-                .values()
-                .any(|c| c["stream_id"] == **s && c["rf_active"] == true);
+        let priority = |s: &&u64| {
+            let active = e.channels.values().any(|c| {
+                c["frequency_hz"].as_f64().map(|v| v.round() as u64) == Some(**s)
+                    && c["rf_active"] == true
+            });
             (Some(**s) != selected, !active, **s)
         };
         priority(a).cmp(&priority(b))
@@ -341,8 +381,11 @@ fn schedule(
     );
     e.source["skipped_streams"] = json!(configs.len() - workers.len());
     for c in e.channels.values_mut() {
-        let stream = c["stream_id"].as_u64().unwrap_or(u64::MAX) as u32;
-        c["available"] = json!(workers.contains_key(&stream) && c["in_range"] == true);
+        let logical = c["frequency_hz"]
+            .as_f64()
+            .map(|v| v.round() as u64)
+            .unwrap_or(0);
+        c["available"] = json!(workers.contains_key(&logical) && c["in_range"] == true);
         c["decoder_admitted"] = c["available"].clone();
     }
     Ok(())
@@ -383,12 +426,33 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
     let mut scheduled = Instant::now();
     let mut transport_sequences = HashMap::new();
     let mut pending_gaps = HashSet::new();
-    let mut consumed: HashMap<u32, u64> = HashMap::new();
+
     loop {
         let mut frame = match Frame::read(&mut input) {
             Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                app.error("RIQ source disconnected".into());
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+                ) =>
+            {
+                let stopped = app.inner.lock().unwrap().source["receiver_state"] == "stopped";
+                if stopped {
+                    let mut e = app.inner.lock().unwrap();
+                    e.active = false;
+                    e.control = None;
+                    e.worker_epochs.clear();
+                    e.source["active_decoders"] = json!(0);
+                    e.source["queue_depth"] = json!(0);
+                    for c in e.channels.values_mut() {
+                        c["available"] = json!(false);
+                        c["decoder_admitted"] = json!(false);
+                        c["speech_active"] = json!(false);
+                        c["rf_active"] = json!(false);
+                    }
+                } else {
+                    app.error(format!("RIQ source disconnected: {e}"));
+                }
                 return Ok(());
             }
             Err(e) => return Err(e.into()),
@@ -409,7 +473,6 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                 configs.clear();
                 transport_sequences.clear();
                 pending_gaps.clear();
-                consumed.clear();
             }
             let mut e = app.inner.lock().unwrap();
             e.source = config.clone();
@@ -429,45 +492,76 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     channel["speech_active"] = json!(false);
                 }
             }
-            for cfg in streams {
-                let stream = cfg["stream_id"].as_u64().context("stream_id missing")?;
+            for physical in streams {
+                let stream = physical["stream_id"]
+                    .as_u64()
+                    .context("stream_id missing")?;
                 anyhow::ensure!(stream <= u32::MAX as u64, "stream_id overflow");
                 let stream = stream as u32;
-                let frequency = cfg["target_hz"]
-                    .as_f64()
-                    .or_else(|| cfg["center_hz"].as_f64())
-                    .context("frequency missing")?;
-                let protocol = cfg["protocol"].as_str().unwrap_or("Unknown");
+                let targets = physical["targets"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_else(|| vec![physical.clone()]);
                 anyhow::ensure!(
-                    matches!(protocol, "Unknown" | "DMR" | "NXDN48"),
-                    "unsupported source protocol"
+                    targets.len() <= 64,
+                    "physical stream exceeds 64 logical targets"
                 );
-                if let Some(num) = cfg["sample_rate_num_hz"].as_f64() {
-                    let den = cfg["sample_rate_den"]
-                        .as_f64()
-                        .context("rational sample rate denominator missing")?;
-                    anyhow::ensure!(
-                        den > 0. && (16000.0..=192000.0).contains(&(num / den)),
-                        "invalid rational IQ sample rate"
+                for target in targets {
+                    let mut cfg = physical.clone();
+                    cfg.as_object_mut()
+                        .context("stream must be an object")?
+                        .remove("targets");
+                    cfg.as_object_mut().unwrap().extend(
+                        target
+                            .as_object()
+                            .context("target must be an object")?
+                            .clone(),
                     );
-                }
-                let slot = cfg["slot"].as_u64().unwrap_or(1) as u8;
-                let id = channel_id(frequency, protocol, slot);
-                let channel = e
-                    .channels
-                    .entry(id)
-                    .or_insert_with(|| make_channel(stream, frequency, protocol, slot));
-                channel["stream_id"] = json!(stream);
-                channel["in_range"] = json!(true);
-                for channel in e.channels.values_mut() {
-                    if channel["frequency_hz"] == frequency {
-                        channel["stream_id"] = json!(stream);
-                        channel["in_range"] = json!(true);
+                    cfg["stream_id"] = json!(stream);
+                    let frequency = cfg["target_hz"]
+                        .as_f64()
+                        .or_else(|| cfg["center_hz"].as_f64())
+                        .context("frequency missing")?;
+                    anyhow::ensure!(
+                        (70000000.0..=6000000000.0).contains(&frequency),
+                        "logical target out of receiver range"
+                    );
+                    cfg["target_hz"] = json!(frequency);
+                    let protocol = cfg["protocol"].as_str().unwrap_or("Unknown");
+                    anyhow::ensure!(
+                        matches!(protocol, "Unknown" | "DMR" | "NXDN48"),
+                        "unsupported source protocol"
+                    );
+                    if let Some(num) = cfg["sample_rate_num_hz"].as_f64() {
+                        let den = cfg["sample_rate_den"]
+                            .as_f64()
+                            .context("rational sample rate denominator missing")?;
+                        anyhow::ensure!(
+                            den > 0. && (16000.0..=192000.0).contains(&(num / den)),
+                            "invalid rational IQ sample rate"
+                        );
                     }
+                    let slot = cfg["slot"].as_u64().unwrap_or(1) as u8;
+                    let id = channel_id(frequency, protocol, slot);
+                    let channel = e
+                        .channels
+                        .entry(id)
+                        .or_insert_with(|| make_channel(stream, frequency, protocol, slot));
+                    channel["stream_id"] = json!(stream);
+                    channel["in_range"] = json!(true);
+                    for channel in e.channels.values_mut() {
+                        if channel["frequency_hz"] == frequency {
+                            channel["stream_id"] = json!(stream);
+                            channel["in_range"] = json!(true);
+                        }
+                    }
+                    configs.insert(frequency.round() as u64, cfg);
                 }
-                configs.insert(stream, cfg.clone());
             }
             drop(e);
+            let _ = app.events.send(
+                json!({"type":"source_config","generation":frame.generation,"source":config}),
+            );
             schedule(&app, &configs, &mut workers)?;
             transport_sequences.insert(frame.stream_id, frame.sequence);
             config_generation = Some(frame.generation);
@@ -489,9 +583,12 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
         {
             let mut e = app.inner.lock().unwrap();
             e.frames += 1;
-            e.source["source_position_s"] =
-                json!(frame.first_sample as f64 / frame.rate.max(1) as f64);
-            e.source["last_samples_at"] = json!(now());
+            if frame.rate > 0 && matches!(frame.kind, 1 | 2) {
+                let position = frame.first_sample as f64 / frame.rate as f64;
+                e.source["source_position_s"] =
+                    json!(position.max(e.source["source_position_s"].as_f64().unwrap_or(0.)));
+                e.source["last_samples_at"] = json!(now());
+            }
         }
         if scheduled.elapsed() > Duration::from_millis(100) {
             schedule(&app, &configs, &mut workers)?;
@@ -507,37 +604,29 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     frame.payload.len() / 4 <= (frame.rate / 10 + 1) as usize,
                     "IQ packets must be <=100ms"
                 );
-                if let Some(&previous) = consumed.get(&frame.stream_id)
-                    && frame.first_sample < previous
-                {
-                    let trim =
-                        ((previous - frame.first_sample) as usize).min(frame.payload.len() / 4);
-                    frame.payload.drain(..trim * 4);
-                    frame.first_sample += trim as u64;
-                    if frame.payload.is_empty() {
-                        continue;
-                    }
-                }
-                let stream_id = frame.stream_id;
-                let sample_end = frame
+                frame
                     .first_sample
                     .checked_add(frame.payload.len() as u64 / 4)
                     .context("IQ sample counter overflow")?;
-                if let Some(w) = workers.get(&frame.stream_id) {
-                    w.queued.fetch_add(1, Ordering::Relaxed);
-                    if w.sender
+                let shared = Arc::new(frame);
+                let mut missed = false;
+                for worker in workers.values().filter(|w| w.stream == shared.stream_id) {
+                    worker.queued.fetch_add(1, Ordering::Relaxed);
+                    if worker
+                        .sender
                         .try_send(Work {
-                            frame,
+                            frame: shared.clone(),
                             received: Instant::now(),
                         })
                         .is_err()
                     {
-                        w.queued.fetch_sub(1, Ordering::Relaxed);
-                        app.inner.lock().unwrap().drops += 1;
-                        pending_gaps.insert(stream_id);
-                    } else {
-                        consumed.insert(stream_id, sample_end);
+                        worker.queued.fetch_sub(1, Ordering::Relaxed);
+                        missed = true;
                     }
+                }
+                if missed {
+                    app.inner.lock().unwrap().drops += 1;
+                    pending_gaps.insert(shared.stream_id);
                 }
             }
             2 => {
@@ -561,6 +650,9 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     frame.first_sample as f64 / frame.rate.max(1) as f64,
                     row,
                 ));
+                let _ = app.events.send(
+                    json!({"type":"spectrum_available","generation":e.generation,"sequence":seq}),
+                );
                 while e.psd.len() > 120 {
                     e.psd.pop_front();
                 }
@@ -573,6 +665,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     .values_mut()
                     .filter(|c| c["stream_id"] == frame.stream_id)
                 {
+                    let changed = c["rf_active"] != activity["rf_active"];
                     c["rf_active"] = activity["rf_active"].clone();
                     c["level_db"] = activity["level_db"].clone();
                     if activity["rf_active"] == true {
@@ -580,21 +673,48 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     } else {
                         c["speech_active"] = json!(false);
                     }
+                    if changed {
+                        let _ = app.events.send(
+                            json!({"type":"channel","generation":frame.generation,"channel":c}),
+                        );
+                    }
                 }
             }
             5 => {
-                workers.remove(&frame.stream_id);
+                let gap: Value = serde_json::from_slice(&frame.payload)
+                    .unwrap_or_else(|_| json!({"reason":"unspecified"}));
+                if frame.stream_id == 0 {
+                    workers.clear();
+                } else {
+                    workers.retain(|_, worker| worker.stream != frame.stream_id);
+                }
                 let mut e = app.inner.lock().unwrap();
                 e.drops += 1;
-                e.decoder_generation += 1;
+                if frame.stream_id == 0 {
+                    e.worker_epochs.clear();
+                    e.decoder_generation += 1;
+                } else {
+                    e.worker_epochs
+                        .retain(|logical, _| workers.contains_key(logical));
+                    if e.selected
+                        .as_deref()
+                        .and_then(|id| e.channels.get(id))
+                        .is_some_and(|c| c["stream_id"] == frame.stream_id)
+                    {
+                        e.decoder_generation += 1;
+                    }
+                }
+                e.source["last_gap"] = gap.clone();
                 for c in e
                     .channels
                     .values_mut()
-                    .filter(|c| c["stream_id"] == frame.stream_id)
+                    .filter(|c| frame.stream_id == 0 || c["stream_id"] == frame.stream_id)
                 {
                     c["speech_active"] = json!(false);
                     c["available"] = json!(false);
+                    c["decoder_admitted"] = json!(false);
                 }
+                let _=app.events.send(json!({"type":"source_gap","generation":e.generation,"stream_id":frame.stream_id,"detail":gap}));
             }
             _ => {}
         }

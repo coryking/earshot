@@ -34,6 +34,11 @@ subprocesses.
 
 ## Streaming contract
 
+A physical coarse IQ stream may declare multiple logical `targets` in CONFIG.
+One shared IQ packet fans out to the admitted logical workers; each worker mixes
+and filters its target before FM. Existing one-target stream configurations work
+unchanged. The coarse 100 ksps profile has not yet had fixture or device acceptance.
+
 The fixed 64-byte little-endian RIQ1 header is specified in
 [`../offload/PROTOCOL.md`](../offload/PROTOCOL.md). Incoming payloads are bounded
 at 1 MiB; IQ packets are at most 100 ms, 16..192 ksps complex signed16. A
@@ -56,6 +61,9 @@ four-packet input queue; overflow is counted and resets DSP and codec state on
 the next accepted packet. Catalog entries survive silence, retuning, and source
 loss. `available`/`decoder_admitted` describe the bounded decode budget;
 `rf_active`, `decoded`, and `speech_active` remain separate.
+
+Confirmed protocols are cached; unused probes are dropped while the confirmed
+decoder keeps its state. RF-idle metadata suppresses audio immediately.
 
 PSD/activity ingestion runs independently of codec workers. `/api/spectrum?after=N`
 returns only new producer-measured rows, at most 60 per response. The producer's
@@ -80,7 +88,13 @@ browser's queued audio. Queues hold at most 16 chunks. Ingress age measures time
 since the host received the IQ packet; it is not an aligned speech timestamp.
 Pre-roll primes decoders and is withheld from browser audio, with a 360 ms tail
 quarantine after the live edge. Overlapping sample intervals are not decoded
-twice. There is no replay or clip route.
+twice. Audio older than 250 ms in the host's WebSocket queue is discarded; a
+blocked browser write closes after 250 ms. There is no replay or clip route.
+
+`WS /api/events` publishes source configuration, changed RF/voice state, explicit
+source gaps, and spectrum-availability sequence numbers. Its queue holds 256
+events; a lagging consumer gets a gap notification and fetches a fresh HTTP
+snapshot. Spectrum rows stay in the bounded delta endpoint.
 
 ## Verification
 
@@ -97,3 +111,21 @@ local test ingest socket. Real device acceptance still needs the on-device
 producer, measured RF/USB continuity, and a live browser check. The ARM prototype
 has a lower input-rate ceiling than the planned FPGA producer; the host reports
 that advertised capacity rather than treating every requested width as applied.
+
+## Checkpoint, 2026-10-19
+
+The embedded codec and 25 ksps IQ-to-WebSocket fixture paths passed. The actual
+on-Pluto producer has not been connected to this host: integration was stopped
+for the session transfer before acquisition began. Native servers are stopped.
+
+Before live integration, prioritize physical streams actually forwarding IQ (or
+the producer's forwarding mask) when assigning the codec budget. The current
+scheduler prioritizes the selected target and RF-active catalog entries; a
+forwarded stream can otherwise be skipped while lower-numbered metadata-only
+streams occupy the pool. CONFIG protocol hints or a deliberate initial target
+selection are alternative ways to establish the first live decoder.
+
+Remaining acceptance: multi-target 100 ksps adjacent-channel rejection and live
+producer-to-host binary audio; source stop ACK and actual RF/FIR/clock restoration
+with the host connected; sustained idle/noise behavior; frontend capability and
+waterfall checks. ARM throughput and the FPGA build remain producer work.

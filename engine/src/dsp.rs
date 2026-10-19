@@ -6,49 +6,90 @@ pub struct Resampler {
     next: f64,
     total: u64,
     history: Vec<Complex32>,
-    radius: usize,
+    radius: i64,
+    coefficients: Vec<Vec<f32>>,
 }
 impl Resampler {
     pub fn new(input: f64, output: f64) -> Self {
+        assert!(input.is_finite() && output.is_finite() && input > 0. && output > 0.);
+        let cutoff = (output.min(12500.) / input).min(1.) * 0.98;
+        let radius = (32. / cutoff).ceil() as i64;
+        let ratio = input / output;
+        let phases = (1..=1024)
+            .find(|n| {
+                let x = ratio * (*n as f64);
+                (x - x.round()).abs() < 1e-8
+            })
+            .unwrap_or(1024);
+        let coefficients = (0..phases)
+            .map(|phase| {
+                let fraction = phase as f64 / phases as f64;
+                let mut row: Vec<f32> = (-radius..=radius)
+                    .map(|index| {
+                        let x = index as f64 - fraction;
+                        let t = x * cutoff;
+                        let sinc = if t.abs() < 1e-10 {
+                            1.
+                        } else {
+                            (std::f64::consts::PI * t).sin() / (std::f64::consts::PI * t)
+                        };
+                        let window = if x.abs() <= radius as f64 {
+                            0.5 + 0.5 * (std::f64::consts::PI * x / radius as f64).cos()
+                        } else {
+                            0.
+                        };
+                        (sinc * window * cutoff) as f32
+                    })
+                    .collect();
+                let sum: f32 = row.iter().sum();
+                for v in &mut row {
+                    *v /= sum;
+                }
+                row
+            })
+            .collect();
         Self {
             input_rate: input,
             output_rate: output,
             next: 0.,
             total: 0,
             history: vec![],
-            radius: 32,
+            radius,
+            coefficients,
         }
     }
     pub fn push(&mut self, input: &[Complex32]) -> Vec<Complex32> {
         let start = self.total as i64 - self.history.len() as i64;
         self.history.extend_from_slice(input);
         self.total += input.len() as u64;
-        let mut output = vec![];
-        let cutoff = (self.output_rate.min(12500.) / self.input_rate).min(1.) * 0.98;
-        let radius = (self.radius as f64 / cutoff).ceil() as i64;
-        while self.next + (radius as f64) < (self.total as f64) {
-            let center = self.next.floor() as i64;
-            let mut acc = Complex32::new(0., 0.);
-            let mut norm = 0.;
-            for index in center - radius..=center + radius {
-                let x = index as f64 - self.next;
-                let t = x * cutoff;
-                let sinc = if t.abs() < 1e-10 {
-                    1.
-                } else {
-                    (std::f64::consts::PI * t).sin() / (std::f64::consts::PI * t)
-                };
-                let window = 0.5 + 0.5 * (std::f64::consts::PI * x / radius as f64).cos();
-                let w = (sinc * window * cutoff) as f32;
-                if index >= start && index >= 0 {
-                    acc += self.history[(index - start) as usize] * w;
-                }
-                norm += w;
+        let mut output = Vec::with_capacity(
+            (input.len() as f64 * self.output_rate / self.input_rate).ceil() as usize,
+        );
+        while self.next + (self.radius as f64) + 1. < (self.total as f64) {
+            let mut center = self.next.floor() as i64;
+            let phases = self.coefficients.len();
+            let mut phase = ((self.next - center as f64) * phases as f64).round() as usize;
+            if phase == phases {
+                phase = 0;
+                center += 1;
             }
-            output.push(acc / norm);
+            let first = (center - self.radius).max(start).max(0);
+            let last = (center + self.radius + 1).min(self.total as i64);
+            let row = &self.coefficients[phase];
+            let offset = (first - (center - self.radius)) as usize;
+            let mut acc = Complex32::new(0., 0.);
+            for (sample, weight) in self.history[(first - start) as usize..(last - start) as usize]
+                .iter()
+                .zip(&row[offset..offset + (last - first) as usize])
+            {
+                acc += *sample * *weight;
+            }
+            output.push(acc);
             self.next += self.input_rate / self.output_rate;
         }
-        let keep_from = (self.next.floor() as i64 - radius - 1).max(start).max(0);
+        let keep_from = (self.next.floor() as i64 - self.radius - 2)
+            .max(start)
+            .max(0);
         self.history.drain(..(keep_from - start) as usize);
         output
     }

@@ -111,9 +111,38 @@ async fn socket(mut socket: WebSocket, app: App) {
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     loop {
         tokio::select! {
-         audio=rx.recv()=>{match audio{Ok(a)=>{let current={let e=app.inner.lock().unwrap();e.active&&a.meta["generation"]==e.decoder_generation&&a.meta["source_generation"]==e.generation&&a.meta["channel_id"].as_str()==e.selected.as_deref()};if current&&(socket.send(Message::Text(a.meta.to_string().into())).await.is_err()||socket.send(Message::Binary(a.pcm.into())).await.is_err()){break;}},Err(broadcast::error::RecvError::Lagged(n))=>{if socket.send(Message::Text(json!({"type":"gap","dropped_chunks":n}).to_string().into())).await.is_err(){break;}},Err(_)=>break}},
-         _=tick.tick()=>{let value={let e=app.inner.lock().unwrap();json!({"type":"heartbeat","generation":e.decoder_generation,"source_generation":e.generation,"channel_id":e.selected})};if socket.send(Message::Text(value.to_string().into())).await.is_err(){break;}},
-         msg=socket.recv()=>{if matches!(msg,None|Some(Err(_))|Some(Ok(Message::Close(_)))){break;}}
+                audio=rx.recv()=>{match audio{Ok(a)=>{let current={let e=app.inner.lock().unwrap();e.active&&a.meta["generation"]==e.decoder_generation&&a.meta["source_generation"]==e.generation&&a.meta["channel_id"].as_str()==e.selected.as_deref()};if current {
+        if a.created.elapsed()>Duration::from_millis(250){if socket.send(Message::Text(json!({"type":"gap","reason":"audio_expired"}).to_string().into())).await.is_err(){break;}continue;}
+        let sent=tokio::time::timeout(Duration::from_millis(250),async{socket.send(Message::Text(a.meta.to_string().into())).await?;socket.send(Message::Binary(a.pcm.into())).await}).await;
+        if !matches!(sent,Ok(Ok(()))){break;}
+        }},Err(broadcast::error::RecvError::Lagged(n))=>{rx=app.audio.subscribe();if socket.send(Message::Text(json!({"type":"gap","dropped_chunks":n}).to_string().into())).await.is_err(){break;}},Err(_)=>break}},
+                _=tick.tick()=>{let value={let e=app.inner.lock().unwrap();json!({"type":"heartbeat","generation":e.decoder_generation,"source_generation":e.generation,"channel_id":e.selected})};if socket.send(Message::Text(value.to_string().into())).await.is_err(){break;}},
+                msg=socket.recv()=>{if matches!(msg,None|Some(Err(_))|Some(Ok(Message::Close(_)))){break;}}
+               }
+    }
+}
+async fn event_ws(State(app): State<App>, ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.max_message_size(8192)
+        .on_upgrade(move |socket| event_socket(socket, app))
+}
+async fn event_socket(mut socket: WebSocket, app: App) {
+    let mut events = app.events.subscribe();
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        let outgoing = tokio::select! {
+        event=events.recv()=>{match event{Ok(value)=>value,Err(broadcast::error::RecvError::Lagged(n))=>{events=app.events.subscribe();json!({"type":"gap","dropped_events":n,"recover":"GET /api/status and /api/spectrum"})},Err(_)=>break}},
+        _=tick.tick()=>{let e=app.inner.lock().unwrap();json!({"type":"heartbeat","generation":e.decoder_generation,"source_generation":e.generation})},
+        input=socket.recv()=>{if matches!(input,None|Some(Err(_))|Some(Ok(Message::Close(_)))){break;}continue;}
+        };
+        if !matches!(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                socket.send(Message::Text(outgoing.to_string().into()))
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
+            break;
         }
     }
 }
@@ -251,6 +280,7 @@ pub fn router(app: App, web_dir: Option<PathBuf>) -> Router {
         .route("/api/source", post(configure_source))
         .route("/api/spectrum", get(spectrum))
         .route("/api/listen", get(ws))
+        .route("/api/events", get(event_ws))
         .with_state(app);
     if let Some(dir) = web_dir {
         router = router.fallback_service(tower_http::services::ServeDir::new(dir));
