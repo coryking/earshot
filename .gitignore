@@ -12,3 +12,25 @@ recordings/
 web/node_modules/
 web/dist/
 web/*.tsbuildinfo
+
+# Native builds and local receiver data never go to GitHub.
+**/target/
+**/build/
+*.flac
+*.mp3
+*.ogg
+*.pcm
+*.cfile
+*.cf32
+*.cs16
+*.cu8
+*.sigmf-data
+*.sigmf-meta
+*.bit
+*.frm
+*.dfu
+*.img
+*.bin
+.env
+.env.*
+!.env.example
