@@ -262,6 +262,78 @@ stay out of Git.
 
 ## Hardware
 
-- [ ] Get my ADALM-Pluto working.
+- [x] Receive IQ from ADALM-Pluto over USB with native libiio.
 
-Not started. Hardware setup and troubleshooting are for a later session.
+Continuous capture and receiver control readback were checked at 1.25, 2.5, 5 and
+6 MS/s. The receive console restores the prior RX controls when it stops.
+
+## Local radio monitor
+
+The receive console keeps a catalog of detected RF channels and decoded DMR slots
+and NXDN48 voice. **Monitor** pins one frequency and slot through silence; the
+other channels continue decoding in parallel. Control/data carriers
+do not count as voice. This version monitors fixed frequencies, not trunked
+systems or talkgroups.
+
+```sh
+uv sync
+npm ci --prefix web
+npm run build --prefix web
+# On this Mac, the installed SDR++ bundle supplies libiio and its dependencies:
+DYLD_LIBRARY_PATH=/Applications/SDR++.app/Contents/Frameworks uv run radio-monitor
+```
+
+Open <http://127.0.0.1:8765>. Connect **Pluto live** using its libiio URI (the
+current USB URI is editable in the console). **Receiver width** controls the actual
+RX sample rate and RF bandwidth: 1.25, 2.5, 5 or 6 MHz. **Apply width** restarts RX
+with readback and retains the catalog; channels outside the new span show out of
+range. Click **Monitor** or **Listen** once to arm audio for new transmissions.
+The console is live only. Historical files are available through the separate
+analysis CLI, not through the console.
+
+The source is receive-only and the server binds to loopback. No radio data is
+uploaded. Live reception stays open continuously while analysis runs on a bounded
+queue. The selected frequency and slot use a persistent channelizer and DSDcc
+processes. Validated voice PCM streams directly over a local WebSocket to browser
+WebAudio; selection and source changes flush queued sound. No historical audio
+is replayed. Rolling protocol evidence gates the audio so false sync and control
+frames do not unmute the speaker. The input-age display measures time since the
+latest decoder input block, not an aligned end-to-end speech latency.
+
+Background discovery independently surveys three-second IQ batches. Up to twelve
+occupied narrow channels per batch are probed for DMR/NXDN48 in three workers.
+New catalog voice requires protocol evidence and at least 0.4 seconds of emitted
+PCM; known streams accept shorter validated endings. This background discovery
+lag is displayed separately from the selected live stream. Emitted PCM is not
+proof of intelligible or unencrypted speech.
+
+The waterfall comes from actual IQ FFTs at up to eight rows per second, sent as
+incremental rows to the browser on a 200 ms poll. It labels nominal frequency and
+sample time. Power is relative to the int16 container, not calibrated RF dBm. USB
+sample
+continuity and dropped hardware buffers cannot be proven by this interface.
+Decoder latency and skipped analysis batches appear below the waterfall. When
+analysis cannot keep up, it drops the oldest queued batch instead of blocking
+reception. Catalog rows remain when quiet; activity means recently detected RF or
+recently validated decoded audio, rather than station identity.
+
+**Stop** closes reception and restores the original sample rate, bandwidth, RX LO,
+and gain mode, with readback checks. Receive/restoration failures appear in the
+console. Stop SDR++ before connecting so it does not contend for the same RX
+buffer. Closing the browser alone leaves the local service receiving; press Stop
+or terminate the service to release the receiver. Temporary analysis IQ is
+removed at shutdown; the console stores no voice playback history.
+
+`RADIO_DATA_ROOT=/path/to/amateur-radio` points a worktree server at another local
+checkout's `.tools/bin/dsdccx`.
+`RADIO_DSDCC=/path/to/dsdccx` overrides the decoder. No decoder binary is bundled.
+The backend API and its typed models are documented at `/docs`; frontend types
+are generated from `/openapi.json` with `npm run types --prefix web` while the
+server runs. Frontend development uses `npm run dev --prefix web` and proxies
+`/api` to port 8765.
+
+```sh
+uv run pytest
+npm test --prefix web
+npm run build --prefix web
+```

@@ -3,10 +3,20 @@ name = "amateur-radio-tools"
 version = "0.1.0"
 description = "Local, evidence-first analysis of SDR audio recordings"
 requires-python = ">=3.12"
-dependencies = ["numpy", "scipy", "matplotlib", "typer", "pydantic"]
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "typer",
+    "pydantic",
+    "fastapi>=0.149.0",
+    "uvicorn[standard]>=0.54.0",
+    "httpx>=0.28.1",
+]
 
 [project.scripts]
 radio = "radio_tools.cli:app"
+radio-monitor = "radio_tools.monitor:main"
 
 [build-system]
 requires = ["hatchling"]
