@@ -135,7 +135,6 @@ def main() -> int:
 
     try:
         rx.open()
-        touched = True
         set_rx(args.rate)
         ap_ = applied()
         manifest["applied_wide"] = ap_

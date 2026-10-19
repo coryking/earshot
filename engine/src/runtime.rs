@@ -781,6 +781,56 @@ mod tests {
         assert_eq!(e.psd.len(), 1);
         assert_eq!(e.source["psd"]["unit"], "dBFS");
     }
+
+    fn forwarding_configuration() -> Vec<u8> {
+        // Streams 1..=4 are metadata-only (lower IDs, lower frequencies); stream 50
+        // is the one the source actually forwards IQ for.
+        let mut streams: Vec<Value> = (1..=4)
+            .map(|id| json!({"stream_id":id,"center_hz":454000000u64+id*25000,"protocol":"Unknown","iq_forwarded":false,"pinned":false}))
+            .collect();
+        streams.push(json!({"stream_id":50,"center_hz":454200000u64,"protocol":"Unknown","iq_forwarded":true,"pinned":false}));
+        json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,"streams":streams,"psd":{"unit":"dBFS"}}).to_string().into_bytes()
+    }
+    #[test]
+    fn forwarded_stream_is_admitted_ahead_of_metadata_only_lower_ids() {
+        // An unknown stream costs three codec instances, so a budget of three admits one.
+        let app = App::new(3);
+        let mut bytes = Vec::new();
+        frame(4, 1, 0, 0, 0, forwarding_configuration()).write(&mut bytes).unwrap();
+        ingest(&bytes[..], app.clone()).unwrap();
+        let e = app.inner.lock().unwrap();
+        let admitted: Vec<u64> = e
+            .channels
+            .values()
+            .filter(|c| c["decoder_admitted"] == true)
+            .map(|c| c["stream_id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(admitted, vec![50], "forwarded stream must hold the decoder budget");
+        assert_eq!(e.source["metadata_only_streams"], 4);
+    }
+    #[test]
+    fn rf_active_metadata_only_streams_do_not_starve_forwarded_stream() {
+        let candidates = vec![
+            Candidate { logical: 1, selected: false, forwarded: false, rf_active: true, cost: 3 },
+            Candidate { logical: 2, selected: false, forwarded: false, rf_active: true, cost: 3 },
+            Candidate { logical: 50, selected: false, forwarded: true, rf_active: false, cost: 3 },
+        ];
+        assert_eq!(admit(candidates, 3), vec![50]);
+    }
+    #[test]
+    fn selected_stream_wins_then_forwarded_then_rf_active() {
+        let c = |logical, selected, forwarded, rf_active| Candidate { logical, selected, forwarded, rf_active, cost: 2 };
+        let candidates = vec![
+            c(10, false, true, false),
+            c(20, false, true, true),
+            c(30, true, false, false),
+            c(40, false, false, true),
+        ];
+        // Budget for three: selected (even before its pin is confirmed), then the
+        // forwarded RF-active stream, then the quiet forwarded stream; metadata-only
+        // streams never take a slot.
+        assert_eq!(admit(candidates, 6), vec![30, 20, 10]);
+    }
     #[test]
     fn catalog_survives_retune_without_reusing_channel_identity() {
         let app = App::new(3);
