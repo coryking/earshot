@@ -86,12 +86,16 @@ impl App {
         e.active = false;
         e.decoder_generation += 1;
         e.control = None;
+        e.worker_epochs.clear();
+        e.source["active_decoders"] = json!(0);
+        e.source["queue_depth"] = json!(0);
         e.listener["voice_active"] = json!(false);
         e.listener["error"] = json!(e.error);
         e.listener["status"] = json!("error");
         e.listener["state"] = json!("error");
         for c in e.channels.values_mut() {
             c["available"] = json!(false);
+            c["decoder_admitted"] = json!(false);
             c["rf_active"] = json!(false);
             c["speech_active"] = json!(false);
         }
@@ -104,7 +108,7 @@ struct Work {
 struct Worker {
     sender: mpsc::SyncSender<Work>,
     queued: Arc<AtomicUsize>,
-    cost: usize,
+    cost: Arc<AtomicUsize>,
 }
 fn selected_stream(e: &Engine) -> Option<u32> {
     e.selected
@@ -137,7 +141,8 @@ fn worker(app: App, stream: u32, cfg: Value) -> Result<Worker> {
         }
     }
     let modes = modes(&cfg);
-    let cost = modes.len();
+    let cost = Arc::new(AtomicUsize::new(modes.len()));
+    let worker_cost = cost.clone();
     let queued = Arc::new(AtomicUsize::new(0));
     let worker_queued = queued.clone();
     let (tx, rx) = mpsc::sync_channel::<Work>(4);
@@ -204,6 +209,7 @@ fn worker(app: App, stream: u32, cfg: Value) -> Result<Worker> {
             } else {
                 live_samples += pcm.len() as u64;
             }
+            let mut protocol_evidence = None;
             for (protocol, slot, decoder) in &mut decoders {
                 let (audio, confirmed) = decoder.push(&pcm);
                 let speech = confirmed && !audio.is_empty() && frame.flags & PREROLL == 0;
@@ -216,6 +222,7 @@ fn worker(app: App, stream: u32, cfg: Value) -> Result<Worker> {
                     continue;
                 }
                 if confirmed && !audio.is_empty() {
+                    protocol_evidence = Some(*protocol);
                     let entry = e
                         .channels
                         .entry(id.clone())
@@ -250,6 +257,10 @@ fn worker(app: App, stream: u32, cfg: Value) -> Result<Worker> {
                     e.listener = json!({"status":"listening","state":"listening","channel_id":id,"voice_active":true,"generation":decoder_generation,"source_generation":source_generation,"sequence":sequence,"audio_chunks":sequence,"last_audio_at":now(),"ingress_age_ms":ingress,"ingress_age_basis":"host ingress receipt; device speech alignment unknown","dropped_blocks":e.drops,"input_dropped":e.drops,"queue_blocks":0,"error":null});
                     let _=app.audio.send(Audio{meta:json!({"type":"audio","encoding":"s16le","channels":1,"rate_hz":8000,"samples":audio.len(),"channel_id":id,"generation":decoder_generation,"source_generation":source_generation,"sequence":sequence,"ingress_age_ms":ingress,"ingress_age_basis":"host ingress receipt; device speech alignment unknown"}),pcm:bytes});
                 }
+            }
+            if let Some(protocol) = protocol_evidence {
+                decoders.retain(|(p, _, _)| *p == protocol);
+                worker_cost.store(decoders.len(), Ordering::Relaxed);
             }
         }
     });
@@ -298,15 +309,16 @@ fn schedule(
     let mut remaining = app.max_decoders;
     let mut admitted = Vec::new();
     for (&stream, cfg) in streams {
-        let cost = modes(cfg).len();
+        let cost = workers
+            .get(&stream)
+            .map(|w| w.cost.load(Ordering::Relaxed))
+            .unwrap_or_else(|| modes(cfg).len());
         if cost <= remaining {
             admitted.push(stream);
             remaining -= cost;
         }
     }
-    workers.retain(|key, worker| {
-        admitted.contains(key) && worker.cost == modes(&effective[key]).len()
-    });
+    workers.retain(|key, _| admitted.contains(key));
     for stream in admitted {
         if let std::collections::hash_map::Entry::Vacant(e) = workers.entry(stream) {
             e.insert(worker(app.clone(), stream, effective[&stream].clone())?);
@@ -321,7 +333,12 @@ fn schedule(
             .map(|w| w.queued.load(Ordering::Relaxed))
             .sum::<usize>()
     );
-    e.source["active_decoders"] = json!(workers.values().map(|w| w.cost).sum::<usize>());
+    e.source["active_decoders"] = json!(
+        workers
+            .values()
+            .map(|w| w.cost.load(Ordering::Relaxed))
+            .sum::<usize>()
+    );
     e.source["skipped_streams"] = json!(configs.len() - workers.len());
     for c in e.channels.values_mut() {
         let stream = c["stream_id"].as_u64().unwrap_or(u64::MAX) as u32;
