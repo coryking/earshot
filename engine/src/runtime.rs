@@ -1201,6 +1201,99 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
     }
 }
 
+/// Slim copy of a channel entry for restart persistence.
+fn persisted_entry(c: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    for key in [
+        "id",
+        "protocol",
+        "slot",
+        "kind",
+        "frequency_hz",
+        "frequency_snapped",
+        "label",
+        "label_kind",
+        "label_detail",
+        "carrier_hz",
+        "carrier_snapped",
+        "decoded",
+        "audio_seconds",
+        "last_heard",
+        "last_rf",
+        "sequence",
+    ] {
+        out.insert(key.into(), c[key].clone());
+    }
+    Value::Object(out)
+}
+/// Put catalog entries saved by an earlier run back, marked out of range until a source
+/// declares them again.
+pub fn restore_catalog(app: &App) {
+    let mut e = app.inner.lock().unwrap();
+    let known: Vec<(String, Value)> = e.store.known.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (id, saved) in known {
+        let mut entry = make_channel_json(0, 0., saved["frequency_hz"].as_f64().unwrap_or(0.), false, saved["protocol"].as_str().unwrap_or("Unknown"), saved["slot"].as_u64().unwrap_or(1) as u8);
+        if let (Some(fields), Some(old)) = (entry.as_object_mut(), saved.as_object()) {
+            fields.extend(old.clone());
+        }
+        entry["id"] = json!(id.clone());
+        entry["in_range"] = json!(false);
+        entry["available"] = json!(false);
+        entry["logical_hz"] = Value::Null;
+        entry["persisted"] = json!(true);
+        e.channels.entry(id).or_insert(entry);
+    }
+}
+/// Background upkeep: close finished calls, accumulate activity history, persist.
+pub fn spawn_janitor(app: App) {
+    restore_catalog(&app);
+    thread::spawn(move || {
+        let mut last = Instant::now();
+        let mut last_save = Instant::now();
+        loop {
+            thread::sleep(Duration::from_millis(500));
+            let dt = last.elapsed().as_secs_f32();
+            last = Instant::now();
+            let at = now();
+            let mut e = app.inner.lock().unwrap();
+            let events = e.store.close_idle(at);
+            for event in events {
+                let _ = app.events.send(json!({"type":"call","phase":event.phase,"generation":e.generation,"call":event.call}));
+            }
+            let observed: Vec<(String, bool, bool, Option<Value>)> = e
+                .channels
+                .values()
+                .map(|c| {
+                    let keep = c["decoded"] == true || c["carrier_snapped"] == true;
+                    (
+                        c["id"].as_str().unwrap_or("").to_string(),
+                        c["rf_active"] == true,
+                        c["speech_active"] == true,
+                        keep.then(|| persisted_entry(c)),
+                    )
+                })
+                .collect();
+            for (id, rf, talk, entry) in observed {
+                e.store.add_activity(&id, at, if rf { dt } else { 0. }, if talk { dt } else { 0. });
+                if let Some(entry) = entry
+                    && e.store.known.get(&id) != Some(&entry)
+                {
+                    e.store.known.insert(id, entry);
+                    e.store.known_dirty = true;
+                }
+            }
+            if last_save.elapsed() > Duration::from_secs(10) {
+                e.store.save();
+                last_save = Instant::now();
+            }
+        }
+    });
+}
+/// Flush persistent state now (graceful shutdown).
+pub fn flush(app: &App) {
+    app.inner.lock().unwrap().store.save();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1903,97 +1996,4 @@ mod tests {
         assert_eq!(e.channels["454029200-Unknown-1"]["in_range"], false);
         assert_eq!(e.channels["452685500-Unknown-1"]["in_range"], true);
     }
-}
-
-/// Slim copy of a channel entry for restart persistence.
-fn persisted_entry(c: &Value) -> Value {
-    let mut out = serde_json::Map::new();
-    for key in [
-        "id",
-        "protocol",
-        "slot",
-        "kind",
-        "frequency_hz",
-        "frequency_snapped",
-        "label",
-        "label_kind",
-        "label_detail",
-        "carrier_hz",
-        "carrier_snapped",
-        "decoded",
-        "audio_seconds",
-        "last_heard",
-        "last_rf",
-        "sequence",
-    ] {
-        out.insert(key.into(), c[key].clone());
-    }
-    Value::Object(out)
-}
-/// Put catalog entries saved by an earlier run back, marked out of range until a source
-/// declares them again.
-pub fn restore_catalog(app: &App) {
-    let mut e = app.inner.lock().unwrap();
-    let known: Vec<(String, Value)> = e.store.known.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    for (id, saved) in known {
-        let mut entry = make_channel_json(0, 0., saved["frequency_hz"].as_f64().unwrap_or(0.), false, saved["protocol"].as_str().unwrap_or("Unknown"), saved["slot"].as_u64().unwrap_or(1) as u8);
-        if let (Some(fields), Some(old)) = (entry.as_object_mut(), saved.as_object()) {
-            fields.extend(old.clone());
-        }
-        entry["id"] = json!(id.clone());
-        entry["in_range"] = json!(false);
-        entry["available"] = json!(false);
-        entry["logical_hz"] = Value::Null;
-        entry["persisted"] = json!(true);
-        e.channels.entry(id).or_insert(entry);
-    }
-}
-/// Background upkeep: close finished calls, accumulate activity history, persist.
-pub fn spawn_janitor(app: App) {
-    restore_catalog(&app);
-    thread::spawn(move || {
-        let mut last = Instant::now();
-        let mut last_save = Instant::now();
-        loop {
-            thread::sleep(Duration::from_millis(500));
-            let dt = last.elapsed().as_secs_f32();
-            last = Instant::now();
-            let at = now();
-            let mut e = app.inner.lock().unwrap();
-            let events = e.store.close_idle(at);
-            for event in events {
-                let _ = app.events.send(json!({"type":"call","phase":event.phase,"generation":e.generation,"call":event.call}));
-            }
-            let observed: Vec<(String, bool, bool, Option<Value>)> = e
-                .channels
-                .values()
-                .map(|c| {
-                    let keep = c["decoded"] == true || c["carrier_snapped"] == true;
-                    (
-                        c["id"].as_str().unwrap_or("").to_string(),
-                        c["rf_active"] == true,
-                        c["speech_active"] == true,
-                        keep.then(|| persisted_entry(c)),
-                    )
-                })
-                .collect();
-            for (id, rf, talk, entry) in observed {
-                e.store.add_activity(&id, at, if rf { dt } else { 0. }, if talk { dt } else { 0. });
-                if let Some(entry) = entry
-                    && e.store.known.get(&id) != Some(&entry)
-                {
-                    e.store.known.insert(id, entry);
-                    e.store.known_dirty = true;
-                }
-            }
-            if last_save.elapsed() > Duration::from_secs(10) {
-                e.store.save();
-                last_save = Instant::now();
-            }
-        }
-    });
-}
-/// Flush persistent state now (graceful shutdown).
-pub fn flush(app: &App) {
-    app.inner.lock().unwrap().store.save();
 }
