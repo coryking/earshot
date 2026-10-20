@@ -162,7 +162,8 @@ decoder) and the encode branches of 0x08061074 / 0x08061340.
 - Every ported routine replays its firmware recordings exactly (`cargo test --lib ambe` with
   `.native-md380/vectors` present: 36-48 recorded calls per routine; the porting runs also
   checked several hundred extra calls per routine).
-- End to end the decoder is bit-exact: all 7,202 frames of the seven corpora (DMR fixture,
+- End to end the decoder is bit-exact: all 8,043 frames of the nine corpora (DMR fixture with and
+  without the bad-frame flag, decoder resets,
   four Harvard files, random and edge frames incl. flag bits) give the firmware's samples
   exactly (`tests/ambe.rs`, hashes; first-difference report when `.native-md380/expected/*.raw`
   from `ambe_oracle.py decode` is present).
