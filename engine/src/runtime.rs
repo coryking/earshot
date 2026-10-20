@@ -241,6 +241,25 @@ fn wanted_logicals(e: &Engine) -> HashSet<u64> {
         .map(|v| v.round() as u64)
         .collect()
 }
+/// Keep active listeners and the latest tune awaiting /api/monitor. Historical
+/// catalog entries remain selectable; reselecting one restores its fine target.
+pub(crate) fn retain_host_targets(e: &mut Engine, pending: Option<u64>) {
+    let wanted = wanted_logicals(e);
+    let mut advertised = HashSet::new();
+    for stream in e.source["streams"].as_array().into_iter().flatten() {
+        let targets = stream["targets"].as_array().cloned().unwrap_or_else(|| vec![stream.clone()]);
+        for target in targets {
+            if let Some(hz) = target["target_hz"].as_f64().or_else(|| target["center_hz"].as_f64())
+                .or_else(|| stream["center_hz"].as_f64())
+            {
+                advertised.insert(hz.round() as u64);
+            }
+        }
+    }
+    e.host_targets.retain(|hz| wanted.contains(hz) || pending == Some(*hz));
+    e.host_targets.extend(wanted.difference(&advertised).copied());
+    e.host_targets.extend(pending);
+}
 static PIN_REQUEST: AtomicU64 = AtomicU64::new(1);
 /// Make the source forward IQ for exactly the streams the wanted channels live on:
 /// pin new ones, unpin streams nobody wants any more. Idempotent.
@@ -352,8 +371,10 @@ pub(crate) fn target_slice(source: &Value, reading: f64) -> Option<Value> {
 
 /// Add host tuning requests to the normal logical-target pipeline. Called on CONFIG
 /// and the scheduler tick, so pin acknowledgements cannot erase fine tuning.
-fn merge_host_targets(app: &App, configs: &mut HashMap<u64, Value>) -> bool {
-    let mut changed = false;
+fn merge_host_targets(app: &App, base: &HashMap<u64, Value>, configs: &mut HashMap<u64, Value>) -> bool {
+    // Rebuild from the producer's logical targets so releasing a fine target also
+    // removes its DSP/meter configuration and restores an overridden bin center.
+    let mut next = base.clone();
     let mut e = app.engine();
     let targets: Vec<_> = e.host_targets.iter().copied().collect();
     for logical in targets {
@@ -376,12 +397,11 @@ fn merge_host_targets(app: &App, configs: &mut HashMap<u64, Value>) -> bool {
                 c["in_range"] = json!(true);
             }
         }
-        configs.retain(|key, _| *key == logical || app.display_frequency(*key as f64).0 != display);
-        changed |= configs.get(&logical) != Some(&cfg);
-        configs.insert(logical, cfg);
+        next.retain(|key, _| *key == logical || app.display_frequency(*key as f64).0 != display);
+        next.insert(logical, cfg);
     }
     let mut counts = HashMap::<u32, usize>::new();
-    for cfg in configs.values() {
+    for cfg in next.values() {
         *counts.entry(cfg["stream_id"].as_u64().unwrap_or(0) as u32).or_default() += 1;
     }
     for c in e.channels.values_mut() {
@@ -390,6 +410,8 @@ fn merge_host_targets(app: &App, configs: &mut HashMap<u64, Value>) -> bool {
             refresh_rf(c);
         }
     }
+    let changed = *configs != next;
+    *configs = next;
     changed
 }
 /// RIQ1 interleaved signed16 I/Q payload to complex samples.
@@ -970,6 +992,7 @@ pub fn attach_control(stream: &TcpStream, app: &App) -> Result<()> {
 pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
     let mut workers = HashMap::new();
     let mut configs = HashMap::new();
+    let mut base_configs = HashMap::new();
     let mut config_generation = None;
     let mut scheduled = Instant::now();
     let mut transport_sequences = HashMap::new();
@@ -1019,13 +1042,12 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                 .context("CONFIG requires streams")?;
             anyhow::ensure!(streams.len() <= 4096, "CONFIG exceeds 4096 streams");
             let changed = config_generation != Some(frame.generation);
+            configs.clear();
             if config["receiver_state"] == "stopped" {
                 workers.clear();
-                configs.clear();
             }
             if changed {
                 workers.clear();
-                configs.clear();
                 transport_sequences.clear();
                 pending_gaps.clear();
                 iq_seen.clear();
@@ -1147,7 +1169,8 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
             let _ = app.events.send(
                 json!({"type":"source_config","generation":frame.generation,"source":config}),
             );
-            merge_host_targets(&app, &mut configs);
+            base_configs = configs.clone();
+            merge_host_targets(&app, &base_configs, &mut configs);
             schedule(&app, &configs, &mut workers, &iq_seen)?;
             sync_pins(&mut app.engine());
             rebuild_meters(&configs, &mut meters);
@@ -1179,7 +1202,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
             }
         }
         if scheduled.elapsed() > Duration::from_millis(100) {
-            if merge_host_targets(&app, &mut configs) {
+            if merge_host_targets(&app, &base_configs, &mut configs) {
                 rebuild_meters(&configs, &mut meters);
             }
             schedule(&app, &configs, &mut workers, &iq_seen)?;
@@ -2357,6 +2380,28 @@ mod tests {
 mod fpga_tests {
     use super::*;
 
+    #[test]
+    fn releasing_a_fine_target_restores_the_producer_target_and_removes_its_meter_config() {
+        let app = App::new(8);
+        let coarse = 454000000;
+        let fine = 454000100;
+        let source = json!({"input_center_hz":coarse,"input_bandwidth_hz":20000000,
+            "streams":[{"stream_id":1,"center_hz":coarse,"target_hz":coarse,"rate_hz":100000}]});
+        let base = HashMap::from([(coarse, source["streams"][0].clone())]);
+        let mut configs = base.clone();
+        app.engine().source = source;
+        app.engine().host_targets.insert(fine);
+        assert!(merge_host_targets(&app, &base, &mut configs));
+        assert!(configs.contains_key(&fine));
+        assert!(!configs.contains_key(&coarse), "same display identity uses one target");
+        app.engine().host_targets.clear();
+        assert!(merge_host_targets(&app, &base, &mut configs));
+        assert_eq!(configs, base);
+        let mut meters = HashMap::new();
+        rebuild_meters(&configs, &mut meters);
+        assert_eq!(meters[&1].targets.iter().map(|t| t.logical).collect::<Vec<_>>(), vec![coarse]);
+    }
+
     fn producer_config() -> Value {
         json!({"input_center_hz":454216998,"input_rate_hz":25600000,"input_bandwidth_hz":20000000,
             "streams":(0..512).map(|k| json!({"stream_id":k+1,
@@ -2383,12 +2428,12 @@ mod fpga_tests {
             e.host_targets.insert(454029223);
         }
         let mut configs = HashMap::new();
-        assert!(merge_host_targets(&app, &mut configs));
-        assert!(!merge_host_targets(&app, &mut configs));
+        assert!(merge_host_targets(&app, &HashMap::new(), &mut configs));
+        assert!(!merge_host_targets(&app, &HashMap::new(), &mut configs));
         let mut refreshed = cfg;
         refreshed["streams"][508]["iq_forwarded"] = json!(true);
         app.engine().source = refreshed;
-        assert!(merge_host_targets(&app, &mut configs));
+        assert!(merge_host_targets(&app, &HashMap::new(), &mut configs));
         assert_eq!(configs[&454029223]["target_hz"], 454029223.);
         assert_eq!(configs[&454029223]["iq_forwarded"], true);
     }

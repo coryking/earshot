@@ -1,4 +1,4 @@
-use crate::runtime::{App, sync_pins};
+use crate::runtime::{App, retain_host_targets, sync_pins};
 use crate::store::AudioSource;
 use axum::{
     Json, Router,
@@ -87,6 +87,7 @@ async fn monitor(
         return Ok(Json(e.listener.clone()));
     }
     e.selected = m.channel_id;
+    retain_host_targets(&mut e, None);
     e.selected_at = Instant::now();
     e.decoder_generation += 1;
     sync_pins(&mut e);
@@ -121,9 +122,6 @@ async fn tune(State(app): State<App>, Json(request): Json<Value>) -> ApiResult {
     }
     let cfg = crate::runtime::target_slice(&e.source, reading as f64)
         .ok_or_else(|| api_error(StatusCode::UNPROCESSABLE_ENTITY, "Frequency is outside the receive window or no slice contains its channel"))?;
-    if e.host_targets.len() >= 64 && !e.host_targets.contains(&reading) {
-        return Err(api_error(StatusCode::UNPROCESSABLE_ENTITY, "At most 64 operator frequencies per engine session"));
-    }
     let display = app.display_frequency(reading as f64).0;
     e.host_targets.retain(|old| app.display_frequency(*old as f64).0 != display);
     e.host_targets.insert(reading);
@@ -135,6 +133,17 @@ async fn tune(State(app): State<App>, Json(request): Json<Value>) -> ApiResult {
     entry["logical_hz"] = json!(reading);
     entry["reading_hz"] = json!(reading);
     entry["in_range"] = json!(true);
+    // Identified siblings use the same nominal channel identity. Retarget them
+    // together so an explicit DMR-slot listener cannot keep the replaced offset.
+    for c in e.channels.values_mut() {
+        if c["logical_hz"].as_f64().is_some_and(|r| app.display_frequency(r).0 == display) {
+            c["logical_hz"] = json!(reading);
+            c["reading_hz"] = json!(reading);
+            c["stream_id"] = json!(stream);
+            c["in_range"] = json!(true);
+        }
+    }
+    retain_host_targets(&mut e, Some(reading));
     let channel = e.channels[&id].clone();
     drop(e);
     let _ = app.events.send(json!({"type":"channel","channel":channel}));
@@ -220,6 +229,7 @@ async fn ws(State(app): State<App>, Query(q): Query<Listen>, ws: WebSocketUpgrad
             return None;
         }
         e.listeners.insert(connection, id.clone());
+        retain_host_targets(&mut e, None);
         sync_pins(&mut e);
         Some(ListenerGuard { app: app.clone(), connection })
     });
@@ -241,6 +251,7 @@ impl Drop for ListenerGuard {
     fn drop(&mut self) {
         let mut e = self.app.engine();
         e.listeners.remove(&self.connection);
+        retain_host_targets(&mut e, None);
         sync_pins(&mut e);
     }
 }
@@ -400,8 +411,10 @@ async fn stop(State(app): State<App>) -> ApiResult {
         e.active = false;
         e.decoder_generation += 1;
         e.selected = None;
+        e.host_targets.clear();
         sync_pins(&mut e);
         e.listener["status"] = json!("stopped");
+        e.listener["channel_id"] = Value::Null;
         e.listener["state"] = json!("stopped");
         e.listener["voice_active"] = json!(false);
         e.source["capabilities"]["stop_supported"]
@@ -1140,6 +1153,55 @@ mod tests {
 mod fpga_tests {
     use super::*;
     use crate::runtime::AppConfig;
+
+    #[tokio::test]
+    async fn repeated_tuning_releases_targets_and_stopped_catalog_entries_can_be_reselected() {
+        let app = App::new(8);
+        {
+            let mut e = app.engine();
+            e.active = true;
+            e.source = json!({"input_center_hz":460000000,"input_bandwidth_hz":20000000,
+                "streams":(0..512).map(|k| json!({"stream_id":k+1,
+                    "center_hz":460000000i64 + if k<256 {k as i64} else {k as i64-512}*50000,
+                    "sample_rate_num_hz":25600000,"sample_rate_den":256})).collect::<Vec<_>>()});
+        }
+        let mut first_id = String::new();
+        for n in 0..80 {
+            let Json(channel) = tune(State(app.clone()), Json(json!({"frequency_hz":459012345+n*12500}))).await.unwrap();
+            let id = channel["id"].as_str().unwrap().to_string();
+            if n == 0 { first_id = id.clone(); }
+            assert!(app.engine().host_targets.len() <= 2, "current listener plus pending replacement");
+            let _ = monitor(State(app.clone()), Json(Monitor { channel_id: Some(id) })).await.unwrap();
+            assert_eq!(app.engine().host_targets.len(), 1);
+        }
+        let _ = monitor(State(app.clone()), Json(Monitor { channel_id: None })).await.unwrap();
+        assert!(app.engine().host_targets.is_empty());
+        assert!(app.engine().channels.contains_key(&first_id), "stopping preserves the catalog");
+        let _ = monitor(State(app.clone()), Json(Monitor { channel_id: Some(first_id.clone()) })).await.unwrap();
+        assert!(app.engine().host_targets.contains(&459012345), "reselecting restores fine tuning");
+        let dmr = {
+            let mut e = app.engine();
+            let stream = e.channels[&first_id]["stream_id"].as_u64().unwrap() as u32;
+            let channel = crate::runtime::make_channel(&app, stream, 459012345., "DMR", 2);
+            let id = channel["id"].as_str().unwrap().to_string();
+            e.channels.insert(id.clone(), channel);
+            e.listeners.insert(1, id.clone());
+            id
+        };
+        // Replacing a target within the same display-frequency identity is also bounded.
+        let _ = tune(State(app.clone()), Json(json!({"frequency_hz":459012400}))).await.unwrap();
+        assert_eq!(app.engine().host_targets.len(), 1);
+        assert!(app.engine().host_targets.contains(&459012400));
+        assert_eq!(app.engine().channels[&dmr]["logical_hz"], 459012400);
+        let _ = monitor(State(app.clone()), Json(Monitor { channel_id: None })).await.unwrap();
+        assert_eq!(app.engine().host_targets.len(), 1, "an explicit listener still owns its target");
+        drop(ListenerGuard { app: app.clone(), connection: 1 });
+        assert!(app.engine().host_targets.is_empty(), "last listener releases its target");
+        let _ = tune(State(app.clone()), Json(json!({"frequency_hz":459012345}))).await.unwrap();
+        let _ = stop(State(app.clone())).await.unwrap();
+        assert!(app.engine().host_targets.is_empty(), "receiver stop clears a pending tune too");
+        assert!(app.engine().listener["channel_id"].is_null());
+    }
 
     #[tokio::test]
     async fn operator_tuning_uses_reading_frame_and_rejects_outside_rf_filter() {
