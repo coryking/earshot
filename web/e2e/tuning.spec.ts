@@ -65,3 +65,21 @@ test("desktop dragging follows the pointer and stopped listening can resume", as
   await expect(frequency).toHaveValue(stopped);
   await expect(selection).toContainText("Playing FM signal audio");
 });
+
+test("landscape tuning and waterfall remain reachable after raw listening expands the panel", async ({ page, isMobile }) => {
+  test.skip(isMobile, "uses the desktop context at a short landscape size");
+  await page.setViewportSize({ width: 844, height: 390 });
+  await page.goto("/?demo");
+  const selection = page.getByRole("region", { name: "Live tuning" });
+  await selection.getByRole("textbox", { name: "Frequency (MHz)" }).fill("456.70000");
+  await selection.getByRole("button", { name: "Listen", exact: true }).click();
+  await expect(selection).toContainText("Playing FM signal audio");
+  const waterfall = page.locator('[data-waterfall="full"]');
+  await waterfall.scrollIntoViewIfNeeded();
+  await expect(waterfall).toBeInViewport({ ratio: 0.5 });
+  const stop = selection.getByRole("button", { name: "Stop listening", exact: true });
+  await stop.scrollIntoViewIfNeeded();
+  await expect(stop).toBeInViewport();
+  await stop.click();
+  await expect(selection).toContainText("Listening off");
+});
