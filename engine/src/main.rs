@@ -39,6 +39,13 @@ enum Command {
         /// Plain-name channel labels (engine/data/channel-labels.json).
         #[arg(long)]
         labels: Option<std::path::PathBuf>,
+        /// Directory for recent calls (WAV), activity history and the catalog; omitted means
+        /// memory only.
+        #[arg(long)]
+        state_dir: Option<std::path::PathBuf>,
+        /// Memory held for recent call audio (older audio is served from state-dir).
+        #[arg(long, default_value_t = 64)]
+        call_memory_mb: usize,
     },
     /// Offline fixture only: mono 48 kHz discriminator signed16 raw input; '-' for stdin.
     Probe {
@@ -110,6 +117,8 @@ async fn main() -> Result<()> {
             web_dir,
             freq_correction_ppm,
             labels,
+            state_dir,
+            call_memory_mb,
         } => {
             anyhow::ensure!(
                 (3..=64).contains(&max_decoders),
@@ -124,7 +133,15 @@ async fn main() -> Result<()> {
                     .with_context(|| format!("cannot load labels {}", path.display()))?,
                 None => Default::default(),
             };
-            let app = App::configured(max_decoders, freq_correction_ppm, labels);
+            let app = App::configured(radio_engine::runtime::AppConfig {
+                ppm: freq_correction_ppm,
+                labels,
+                state_dir,
+                call_memory_mb,
+                ..radio_engine::runtime::AppConfig::new(max_decoders)
+            });
+            radio_engine::runtime::spawn_janitor(app.clone());
+            let flush_app = app.clone();
             let ingest_app = app.clone();
             thread::spawn(move || {
                 let run = || -> Result<()> {
@@ -167,9 +184,15 @@ async fn main() -> Result<()> {
             );
             axum::serve(server, router)
                 .with_graceful_shutdown(async {
-                    let _ = tokio::signal::ctrl_c().await;
+                    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("SIGTERM handler");
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {},
+                        _ = term.recv() => {},
+                    }
                 })
                 .await?;
+            radio_engine::runtime::flush(&flush_app);
         }
     }
     Ok(())

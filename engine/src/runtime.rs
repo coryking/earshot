@@ -3,6 +3,7 @@ use crate::{
     dsp::{ChannelDsp, ChannelSpec, SliceMeter, TargetBand},
     fm::{FmAudio, Squelch},
     freq::{Calibration, Labels, label_fields, snap},
+    store::Store,
     wire::{DISCONTINUITY, Frame, OVERFLOW, PREROLL, START},
 };
 use anyhow::{Context, Result};
@@ -27,6 +28,27 @@ fn now() -> f64 {
         .unwrap()
         .as_secs_f64()
 }
+/// Everything `App` needs at startup.
+pub struct AppConfig {
+    pub max_decoders: usize,
+    /// ppm the Pluto reads high.
+    pub ppm: f64,
+    pub labels: Labels,
+    /// Where calls, activity and the catalog persist; `None` keeps them in memory only.
+    pub state_dir: Option<std::path::PathBuf>,
+    pub call_memory_mb: usize,
+}
+impl AppConfig {
+    pub fn new(max_decoders: usize) -> Self {
+        Self {
+            max_decoders,
+            ppm: 0.,
+            labels: Labels::default(),
+            state_dir: None,
+            call_memory_mb: 64,
+        }
+    }
+}
 #[derive(Clone)]
 pub struct App {
     pub(crate) inner: Arc<Mutex<Engine>>,
@@ -44,6 +66,7 @@ pub(crate) struct Audio {
     pub(crate) created: Instant,
 }
 pub(crate) struct Engine {
+    pub(crate) store: Store,
     pub(crate) source: Value,
     pub(crate) channels: HashMap<String, Value>,
     worker_epochs: HashMap<u64, u64>,
@@ -63,13 +86,21 @@ pub(crate) struct Engine {
 }
 impl App {
     pub fn new(max_decoders: usize) -> Self {
-        Self::configured(max_decoders, 0., Labels::default())
+        Self::configured(AppConfig::new(max_decoders))
     }
-    pub fn configured(max_decoders: usize, ppm: f64, labels: Labels) -> Self {
+    pub fn configured(config: AppConfig) -> Self {
+        let AppConfig {
+            max_decoders,
+            ppm,
+            labels,
+            state_dir,
+            call_memory_mb,
+        } = config;
         let (audio, _) = broadcast::channel(16);
         let (events, _) = broadcast::channel(256);
         Self {
             inner: Arc::new(Mutex::new(Engine {
+                store: Store::new(state_dir, call_memory_mb),
                 source: json!({}),
                 channels: HashMap::new(),
                 worker_epochs: HashMap::new(),
@@ -430,6 +461,35 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                 } else if let Some(entry) = e.channels.get_mut(&id) {
                     entry["speech_active"] = json!(false);
                     entry["available"] = json!(true);
+                }
+                if speech {
+                    // Every speaking channel is recorded as a call, not only the one being heard.
+                    let (call_frequency, label, level) = e
+                        .channels
+                        .get(&id)
+                        .map(|c| {
+                            (
+                                c["frequency_hz"].as_f64().unwrap_or(frequency),
+                                c["label"].clone(),
+                                c["level_db"].as_f64(),
+                            )
+                        })
+                        .unwrap_or((frequency, Value::Null, None));
+                    let events = e.store.record(
+                        &id,
+                        protocol,
+                        slot as u64,
+                        call_frequency,
+                        &label,
+                        level,
+                        &audio,
+                        now(),
+                    );
+                    for event in events {
+                        let _ = app.events.send(
+                            json!({"type":"call","phase":event.phase,"generation":frame.generation,"call":event.call}),
+                        );
+                    }
                 }
                 // A pin on an unconfirmed ("Unknown") channel follows whatever is heard at that
                 // frequency; audio is then labeled with the pinned id so the listener matches.
@@ -843,6 +903,9 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                         .or_insert_with(|| make_channel(&app, stream, frequency, protocol, slot));
                     channel["stream_id"] = json!(stream);
                     channel["in_range"] = json!(true);
+                    // A catalog entry restored from disk has no live stream until now.
+                    channel["logical_hz"] = json!(frequency);
+                    channel["reading_hz"] = json!(frequency);
                     for channel in e.channels.values_mut() {
                         if channel["logical_hz"] == frequency {
                             channel["stream_id"] = json!(stream);
@@ -1312,7 +1375,7 @@ mod tests {
         }
         out
     }
-    fn fm_session(voice: bool, pin_unknown: bool) -> (Option<Value>, Vec<String>, bool) {
+    fn fm_session(voice: bool, pin_unknown: bool) -> (Option<Value>, Vec<String>, bool, Vec<Value>) {
         let config = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,
             "streams":[{"stream_id":1,"center_hz":454000000u64,"target_hz":454000000u64,"rate_hz":25000,"protocol":"Unknown","iq_forwarded":true}],"psd":{"unit":"dBFS"}});
         let mut bytes = Vec::new();
@@ -1375,24 +1438,33 @@ mod tests {
         }
         let fm = app.inner.lock().unwrap().channels.get("454000000-FM-1").cloned();
         let digital = app.inner.lock().unwrap().channels.values().any(|c| c["protocol"] != "Unknown" && c["protocol"] != "FM" && c["decoded"] == true);
+        let calls = {
+            let mut e = app.inner.lock().unwrap();
+            e.store.close_idle(now() + 10.);
+            e.store.list(None, 10, None).0
+        };
         release.send(()).unwrap();
         runner.join().unwrap().unwrap();
-        (fm, audio_ids, digital)
+        (fm, audio_ids, digital, calls)
     }
     #[test]
     fn quiet_narrowband_fm_becomes_an_analog_voice_channel_and_noise_does_not() {
-        let (fm, _, digital) = fm_session(true, false);
+        let (fm, _, digital, calls) = fm_session(true, false);
+        // The speaking channel is recorded as a call even though nobody pinned it.
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0]["source"], "454000000-FM-1");
+        assert!(calls[0]["duration_s"].as_f64().unwrap() >= 0.8);
         let fm = fm.expect("analog voice entry");
         assert_eq!(fm["protocol"], "FM");
         assert_eq!(fm["kind"], "voice");
         assert!(fm["audio_seconds"].as_f64().unwrap() > 0.5, "{fm}");
         assert!(!digital, "analog voice must not be called digital");
-        let (fm, _, _) = fm_session(false, false);
-        assert!(fm.is_none(), "squelch opened on receiver noise");
+        let (fm, _, _, calls) = fm_session(false, false);
+        assert!(fm.is_none() && calls.is_empty(), "squelch opened on receiver noise");
     }
     #[test]
     fn pinning_an_unconfirmed_channel_streams_analog_audio_under_the_pinned_id() {
-        let (_, audio_ids, _) = fm_session(true, true);
+        let (_, audio_ids, _, _) = fm_session(true, true);
         assert!(!audio_ids.is_empty(), "no audio reached the listener");
         assert!(audio_ids.iter().all(|id| id == "454000000-Unknown-1"), "{audio_ids:?}");
     }
@@ -1401,7 +1473,7 @@ mod tests {
     #[test]
     fn measured_carrier_is_published_calibrated_snapped_and_labeled() {
         let labels = Labels::load(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/channel-labels.json")).unwrap();
-        let app = App::configured(8, 23.3, labels);
+        let app = App::configured(AppConfig { ppm: 23.3, labels, ..AppConfig::new(8) });
         let config = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,
             "streams":[{"stream_id":1,"center_hz":454217000u64,"target_hz":454217000u64,"rate_hz":25000,"protocol":"Unknown","iq_forwarded":true}],"psd":{"unit":"dBFS"}});
         let mut bytes = Vec::new();
@@ -1678,4 +1750,97 @@ mod tests {
         assert_eq!(e.channels["454029200-Unknown-1"]["in_range"], false);
         assert_eq!(e.channels["452685500-Unknown-1"]["in_range"], true);
     }
+}
+
+/// Slim copy of a channel entry for restart persistence.
+fn persisted_entry(c: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    for key in [
+        "id",
+        "protocol",
+        "slot",
+        "kind",
+        "frequency_hz",
+        "frequency_snapped",
+        "label",
+        "label_kind",
+        "label_detail",
+        "carrier_hz",
+        "carrier_snapped",
+        "decoded",
+        "audio_seconds",
+        "last_heard",
+        "last_rf",
+        "sequence",
+    ] {
+        out.insert(key.into(), c[key].clone());
+    }
+    Value::Object(out)
+}
+/// Put catalog entries saved by an earlier run back, marked out of range until a source
+/// declares them again.
+pub fn restore_catalog(app: &App) {
+    let mut e = app.inner.lock().unwrap();
+    let known: Vec<(String, Value)> = e.store.known.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (id, saved) in known {
+        let mut entry = make_channel_json(0, 0., saved["frequency_hz"].as_f64().unwrap_or(0.), false, saved["protocol"].as_str().unwrap_or("Unknown"), saved["slot"].as_u64().unwrap_or(1) as u8);
+        if let (Some(fields), Some(old)) = (entry.as_object_mut(), saved.as_object()) {
+            fields.extend(old.clone());
+        }
+        entry["id"] = json!(id.clone());
+        entry["in_range"] = json!(false);
+        entry["available"] = json!(false);
+        entry["logical_hz"] = Value::Null;
+        entry["persisted"] = json!(true);
+        e.channels.entry(id).or_insert(entry);
+    }
+}
+/// Background upkeep: close finished calls, accumulate activity history, persist.
+pub fn spawn_janitor(app: App) {
+    restore_catalog(&app);
+    thread::spawn(move || {
+        let mut last = Instant::now();
+        let mut last_save = Instant::now();
+        loop {
+            thread::sleep(Duration::from_millis(500));
+            let dt = last.elapsed().as_secs_f32();
+            last = Instant::now();
+            let at = now();
+            let mut e = app.inner.lock().unwrap();
+            let events = e.store.close_idle(at);
+            for event in events {
+                let _ = app.events.send(json!({"type":"call","phase":event.phase,"generation":e.generation,"call":event.call}));
+            }
+            let observed: Vec<(String, bool, bool, Option<Value>)> = e
+                .channels
+                .values()
+                .map(|c| {
+                    let keep = c["decoded"] == true || c["carrier_snapped"] == true;
+                    (
+                        c["id"].as_str().unwrap_or("").to_string(),
+                        c["rf_active"] == true,
+                        c["speech_active"] == true,
+                        keep.then(|| persisted_entry(c)),
+                    )
+                })
+                .collect();
+            for (id, rf, talk, entry) in observed {
+                e.store.add_activity(&id, at, if rf { dt } else { 0. }, if talk { dt } else { 0. });
+                if let Some(entry) = entry
+                    && e.store.known.get(&id) != Some(&entry)
+                {
+                    e.store.known.insert(id, entry);
+                    e.store.known_dirty = true;
+                }
+            }
+            if last_save.elapsed() > Duration::from_secs(10) {
+                e.store.save();
+                last_save = Instant::now();
+            }
+        }
+    });
+}
+/// Flush persistent state now (graceful shutdown).
+pub fn flush(app: &App) {
+    app.inner.lock().unwrap().store.save();
 }

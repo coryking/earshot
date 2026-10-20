@@ -2,10 +2,10 @@ use crate::runtime::App;
 use axum::{
     Json, Router,
     extract::{
-        Query, State, WebSocketUpgrade,
+        Path, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -16,6 +16,17 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::broadcast;
+/// A channel entry with the operator's edits (name, followed, muted, notes) attached.
+fn with_user(c: &Value, user: &std::collections::BTreeMap<String, Value>) -> Value {
+    let mut out = c.clone();
+    let edits = c["id"].as_str().and_then(|id| user.get(id));
+    out["user"] = edits.cloned().unwrap_or(Value::Null);
+    out["display_name"] = edits
+        .and_then(|u| u["name"].as_str())
+        .map(|n| json!(n))
+        .unwrap_or_else(|| c["label"].clone());
+    out
+}
 fn now_s() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -38,7 +49,7 @@ fn status_json(app: &App) -> Value {
     } else {
         0.
     };
-    json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":number(&e.source["input_center_hz"]),"rate_hz":number(&e.source["input_rate_hz"]),"bandwidth_hz":number(&e.source["input_bandwidth_hz"]),"generation":e.generation,"channels":e.channels.values().collect::<Vec<_>>(),"received_seconds":position,"source_position_s":position,"decode_latency_s":latency,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":number(&e.source["queue_depth"]),"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"calibration_ppm":app.calibration.ppm,"labels_loaded":app.labels.len(),"source":e.source})
+    json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":number(&e.source["input_center_hz"]),"rate_hz":number(&e.source["input_rate_hz"]),"bandwidth_hz":number(&e.source["input_bandwidth_hz"]),"generation":e.generation,"channels":e.channels.values().map(|c| with_user(c, &e.store.user)).collect::<Vec<_>>(),"received_seconds":position,"source_position_s":position,"decode_latency_s":latency,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":number(&e.source["queue_depth"]),"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"calibration_ppm":app.calibration.ppm,"labels_loaded":app.labels.len(),"source":e.source})
 }
 async fn status(State(app): State<App>) -> Json<Value> {
     Json(status_json(&app))
@@ -300,6 +311,160 @@ async fn stop(State(app): State<App>) -> ApiResult {
     }
 }
 
+#[derive(Deserialize)]
+struct CallsQuery {
+    before: Option<u64>,
+    limit: Option<usize>,
+    source: Option<String>,
+}
+/// Recent calls, newest first. `next_before` is the cursor for the next (older) page.
+async fn calls(State(app): State<App>, Query(q): Query<CallsQuery>) -> Json<Value> {
+    let e = app.inner.lock().unwrap();
+    let (calls, next) = e.store.list(q.before, q.limit.unwrap_or(50).clamp(1, 200), q.source.as_deref());
+    let in_progress = e.store.open_calls();
+    Json(json!({"calls":calls,"next_before":next,"in_progress":in_progress}))
+}
+async fn call_audio(State(app): State<App>, Path(id): Path<String>) -> impl IntoResponse {
+    let audio = id
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| app.inner.lock().unwrap().store.audio(n));
+    match audio {
+        Some(samples) => (
+            [
+                (header::CONTENT_TYPE, HeaderValue::from_static("audio/wav")),
+                (header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=86400")),
+            ],
+            crate::store::wav_bytes(&samples),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({"detail":"no audio for that call"}))).into_response(),
+    }
+}
+/// The persisted catalog: channels that were located, decoded or edited, with operator edits.
+async fn catalog(State(app): State<App>) -> Json<Value> {
+    let e = app.inner.lock().unwrap();
+    let mut entries: Vec<Value> = e
+        .channels
+        .values()
+        .filter(|c| {
+            c["decoded"] == true
+                || c["carrier_snapped"] == true
+                || c["id"].as_str().is_some_and(|id| e.store.user.contains_key(id))
+        })
+        .map(|c| {
+            let mut v = with_user(c, &e.store.user);
+            // `kind` is channel|talkgroup for the catalog (talkgroups arrive with trunking);
+            // the engine's own voice/data/unidentified classification moves to `channel_kind`.
+            v["channel_kind"] = c["kind"].clone();
+            v["kind"] = json!("channel");
+            v
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        let key = |v: &Value| v["last_heard"].as_f64().unwrap_or(0.);
+        key(b).total_cmp(&key(a))
+    });
+    Json(json!({"entries":entries,"count":entries.len()}))
+}
+async fn catalog_edit(State(app): State<App>, Path(id): Path<String>, Json(body): Json<Value>) -> ApiResult {
+    let mut e = app.inner.lock().unwrap();
+    if !e.channels.contains_key(&id) && !e.store.known.contains_key(&id) {
+        return Err(api_error(StatusCode::NOT_FOUND, "channel not in catalog"));
+    }
+    let object = body.as_object().ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "body must be an object"))?;
+    let mut edits = e.store.user.get(&id).cloned().unwrap_or_else(|| json!({}));
+    for (key, value) in object {
+        match (key.as_str(), value) {
+            ("name", Value::String(n)) if n.chars().count() <= 80 => edits["name"] = json!(n.trim()),
+            ("name", Value::Null) => {
+                edits.as_object_mut().map(|o| o.remove("name"));
+            }
+            ("notes", Value::String(n)) if n.chars().count() <= 500 => edits["notes"] = json!(n),
+            ("followed" | "muted", Value::Bool(b)) => edits[key] = json!(b),
+            _ => {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("cannot set {key}: allowed are name (<=80 chars or null), notes (<=500), followed, muted"),
+                ));
+            }
+        }
+    }
+    e.store.user.insert(id.clone(), edits);
+    e.store.user_dirty = true;
+    let current = e.channels.get(&id).cloned().unwrap_or_else(|| e.store.known[&id].clone());
+    Ok(Json(with_user(&current, &e.store.user)))
+}
+#[derive(Deserialize)]
+struct ActivityQuery {
+    window_s: Option<u64>,
+    bucket_s: Option<u64>,
+}
+/// Talk-seconds per bucket (block total and per source) with a same-time baseline.
+async fn activity(State(app): State<App>, Query(q): Query<ActivityQuery>) -> Json<Value> {
+    let e = app.inner.lock().unwrap();
+    Json(e.store.activity(now_s(), q.window_s.unwrap_or(86400), q.bucket_s.unwrap_or(300)))
+}
+#[derive(Deserialize)]
+struct SpectrumBin {
+    #[serde(default)]
+    after: u64,
+    limit: Option<usize>,
+}
+/// Compact spectrum rows, RSP1. 32-byte little-endian header: magic `RSP1`, version u16 (1),
+/// bins u16, rows u16, flags u16 (0), low_db f32, high_db f32, center_hz f64, span_hz f32.
+/// Then per row: seq u64, time f64 (producer seconds), bins x u8 where
+/// level = round(255 * (clamp(db, low, high) - low) / (high - low)). Rows with seq > `after`,
+/// oldest first. `X-Sequence` is the newest sequence number the engine holds.
+async fn spectrum_bin(State(app): State<App>, Query(q): Query<SpectrumBin>) -> impl IntoResponse {
+    let e = app.inner.lock().unwrap();
+    let unit = e.source["psd"]["unit"].as_str().unwrap_or("uncalibrated");
+    let (low, high) = display_range(unit, &e.psd);
+    let rows: Vec<_> = e.psd.iter().filter(|(n, _, _)| *n > q.after).take(q.limit.unwrap_or(60).clamp(1, 120)).collect();
+    let bins = rows.first().map_or(0, |r| r.2.len());
+    let mut out = Vec::with_capacity(32 + rows.len() * (16 + bins));
+    out.extend_from_slice(b"RSP1");
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&(bins as u16).to_le_bytes());
+    out.extend_from_slice(&(rows.len() as u16).to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(low as f32).to_le_bytes());
+    out.extend_from_slice(&(high as f32).to_le_bytes());
+    out.extend_from_slice(&e.source["input_center_hz"].as_f64().unwrap_or(0.).to_le_bytes());
+    out.extend_from_slice(&(e.source["input_bandwidth_hz"].as_f64().unwrap_or(0.) as f32).to_le_bytes());
+    for (seq, time, row) in &rows {
+        out.extend_from_slice(&seq.to_le_bytes());
+        out.extend_from_slice(&time.to_le_bytes());
+        out.extend(row.iter().map(|v| {
+            (255. * ((*v as f64).clamp(low, high) - low) / (high - low)).round() as u8
+        }));
+    }
+    (
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")),
+            (header::HeaderName::from_static("x-sequence"), HeaderValue::from(e.psd_seq)),
+        ],
+        out,
+    )
+}
+/// The block currently parked on. Changing it needs a producer that can retune live.
+async fn blocks(State(app): State<App>) -> Json<Value> {
+    let e = app.inner.lock().unwrap();
+    Json(json!({
+        "current": {
+            "center_hz": e.source["input_center_hz"],
+            "rate_hz": e.source["input_rate_hz"],
+            "bandwidth_hz": e.source["input_bandwidth_hz"],
+            "calibration_ppm": app.calibration.ppm,
+        },
+        "can_change": e.source["capabilities"]["configure_supported"] == true,
+        "presets": [],
+    }))
+}
+async fn set_block(State(app): State<App>, Json(config): Json<Value>) -> ApiResult {
+    configure_source(State(app), Json(config)).await
+}
+
 pub fn router(app: App, web_dir: Option<PathBuf>) -> Router {
     let mut router = Router::new()
         .route("/api/status", get(status))
@@ -308,6 +473,14 @@ pub fn router(app: App, web_dir: Option<PathBuf>) -> Router {
         .route("/api/stop", post(stop))
         .route("/api/source", post(configure_source))
         .route("/api/spectrum", get(spectrum))
+        .route("/api/spectrum.bin", get(spectrum_bin))
+        .route("/api/calls", get(calls))
+        .route("/api/calls/{id}/audio.wav", get(call_audio))
+        .route("/api/catalog", get(catalog))
+        .route("/api/catalog/{id}", axum::routing::put(catalog_edit))
+        .route("/api/activity", get(activity))
+        .route("/api/blocks", get(blocks))
+        .route("/api/blocks/current", post(set_block))
         .route("/api/listen", get(ws))
         .route("/api/events", get(event_ws))
         .with_state(app);
@@ -356,6 +529,112 @@ mod tests {
         assert!(low < -58. && low > -66., "low {low}");
         assert!(high > -12. && high < -5., "high {high}");
         assert_eq!(display_range("dBFS/Hz", &rows), (-125., -65.));
+    }
+    fn seeded_app() -> App {
+        let app = App::new(3);
+        {
+            let mut e = app.inner.lock().unwrap();
+            let ch = json!({"id":"454018750-DMR-2","protocol":"DMR","slot":2,"kind":"voice","decoded":true,
+                "frequency_hz":454018750.0,"label":"Day Wireless (business trunked)","last_heard":1.0,"carrier_snapped":true});
+            e.channels.insert("454018750-DMR-2".into(), ch);
+            let noise = json!({"id":"454054498-Unknown-1","protocol":"Unknown","kind":"unidentified","decoded":false});
+            e.channels.insert("454054498-Unknown-1".into(), noise);
+        }
+        app
+    }
+    #[tokio::test]
+    async fn calls_list_newest_first_and_serve_wav_audio() {
+        let app = seeded_app();
+        {
+            let mut e = app.inner.lock().unwrap();
+            for (i, id) in ["454018750-DMR-2", "454018750-DMR-1"].iter().enumerate() {
+                e.store.record(id, "DMR", 2, 454018750., &json!("Day Wireless"), Some(-30.), &vec![500i16; 16000], 100. + i as f64 * 50.);
+            }
+            e.store.close_idle(1000.);
+        }
+        let Json(list) = calls(State(app.clone()), Query(CallsQuery { before: None, limit: Some(10), source: None })).await;
+        let items = list["calls"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["source"], "454018750-DMR-1", "newest first");
+        assert_eq!(items[0]["audio_url"], "/api/calls/2/audio.wav");
+        assert_eq!(items[0]["duration_s"], 2.0);
+        assert!(items[0]["talker"].is_null() && items[0]["transcript"].is_null());
+        let response = call_audio(State(app.clone()), Path("2".into())).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "audio/wav");
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(&body[..4], b"RIFF");
+        assert_eq!(body.len(), 44 + 32000);
+        assert_eq!(call_audio(State(app), Path("99".into())).await.into_response().status(), StatusCode::NOT_FOUND);
+    }
+    #[tokio::test]
+    async fn catalog_lists_located_channels_and_applies_operator_edits() {
+        let app = seeded_app();
+        let Json(before) = catalog(State(app.clone())).await;
+        assert_eq!(before["count"], 1, "unconfirmed noise bins are not catalog entries");
+        assert_eq!(before["entries"][0]["display_name"], "Day Wireless (business trunked)");
+        let edited = catalog_edit(
+            State(app.clone()),
+            Path("454018750-DMR-2".into()),
+            Json(json!({"name":"Day Wireless dispatch","followed":true})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(edited.0["display_name"], "Day Wireless dispatch");
+        assert_eq!(edited.0["user"]["followed"], true);
+        let Json(after) = catalog(State(app.clone())).await;
+        assert_eq!(after["entries"][0]["display_name"], "Day Wireless dispatch");
+        assert_eq!(after["entries"][0]["kind"], "channel");
+        let status = status_json(&app);
+        assert_eq!(status["channels"][0]["user"].is_object() || status["channels"][1]["user"].is_object(), true);
+        let bad = catalog_edit(State(app.clone()), Path("454018750-DMR-2".into()), Json(json!({"frequency_hz":1}))).await;
+        assert_eq!(bad.unwrap_err().0, StatusCode::BAD_REQUEST);
+        let missing = catalog_edit(State(app), Path("nope".into()), Json(json!({"name":"x"}))).await;
+        assert_eq!(missing.unwrap_err().0, StatusCode::NOT_FOUND);
+    }
+    #[tokio::test]
+    async fn spectrum_bin_is_rsp1_with_levels_scaled_to_the_data_range() {
+        let app = App::new(3);
+        {
+            let mut e = app.inner.lock().unwrap();
+            e.source = json!({"input_center_hz":454216998,"input_bandwidth_hz":800000,"psd":{"unit":"dBFS"}});
+            for n in 1..=3u64 {
+                let row: Vec<f32> = (0..64).map(|k| if k == 10 { -12. } else { -60. }).collect();
+                e.psd.push_back((n, n as f64, row));
+                e.psd_seq = n;
+            }
+        }
+        let response = spectrum_bin(State(app), Query(SpectrumBin { after: 1, limit: None })).await.into_response();
+        assert_eq!(response.headers()["x-sequence"], "3");
+        let b = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(&b[..4], b"RSP1");
+        assert_eq!(u16::from_le_bytes([b[4], b[5]]), 1);
+        assert_eq!(u16::from_le_bytes([b[6], b[7]]), 64, "bins");
+        assert_eq!(u16::from_le_bytes([b[8], b[9]]), 2, "rows after seq 1");
+        let low = f32::from_le_bytes(b[12..16].try_into().unwrap());
+        let high = f32::from_le_bytes(b[16..20].try_into().unwrap());
+        assert!(low < -58. && high > -12. - 0.1);
+        assert_eq!(f64::from_le_bytes(b[20..28].try_into().unwrap()), 454216998.);
+        assert_eq!(b.len(), 32 + 2 * (16 + 64));
+        let row = &b[32..32 + 16 + 64];
+        assert_eq!(u64::from_le_bytes(row[..8].try_into().unwrap()), 2);
+        assert!(row[16 + 10] > 240, "the peak bin sits at the top of the range");
+        assert!(row[16] < 20, "floor bins sit at the bottom");
+    }
+    #[tokio::test]
+    async fn activity_reports_buckets_and_blocks_reflects_the_source() {
+        let app = App::new(3);
+        {
+            let mut e = app.inner.lock().unwrap();
+            e.store.add_activity("a", now_s(), 20., 12.);
+            e.source = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,"capabilities":{"configure_supported":false}});
+        }
+        let Json(report) = activity(State(app.clone()), Query(ActivityQuery { window_s: Some(3600), bucket_s: Some(300) })).await;
+        let total: f64 = report["total"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum();
+        assert_eq!(total, 12.);
+        let Json(block) = blocks(State(app)).await;
+        assert_eq!(block["current"]["center_hz"], 454216998);
+        assert_eq!(block["can_change"], false);
     }
     #[tokio::test]
     async fn missing_source_controls_never_report_applied() {
