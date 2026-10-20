@@ -3,6 +3,7 @@ import type { EngineChannel } from "@/api/engine";
 import type { WireCatalogEntry } from "@/api/needs";
 import { healthOf, numberName, rankSources, toSources } from "./adapt";
 import { STARTER_CATALOG } from "./starter";
+import { prefs, prefsStore } from "@/state/prefs";
 import type { Activity } from "./model";
 import { busyness, headline } from "./summary";
 
@@ -183,5 +184,29 @@ describe("headline", () => {
     expect(busyness(activity, now).level).toBe("busier");
     expect(headline([], activity, listening, now).context).toBe("Busier than usual for a Monday evening.");
     expect(busyness({ ...activity, block: new Array(12).fill(5) }, now).level).toBe("quieter");
+  });
+});
+
+describe("health and preferences", () => {
+  const base = { mode: "live", state: "receiving", generation: 1, channels: [] } as unknown as Parameters<typeof healthOf>[0];
+
+  it("says plainly whether the radio is working", () => {
+    expect(healthOf(base, true).state).toBe("listening");
+    expect(healthOf(base, false)).toMatchObject({ state: "offline", detail: expect.stringMatching(/Reconnecting/) });
+    expect(healthOf({ ...base!, state: "stopped", mode: "disconnected" }, true).state).toBe("paused");
+    expect(healthOf({ ...base!, state: "error", mode: "disconnected", error: "RIQ source disconnected" }, true)).toMatchObject({
+      state: "offline",
+      raw: "RIQ source disconnected",
+    });
+  });
+
+  it("keeps follow and mute exclusive, and carries them over when a source is renamed", () => {
+    prefs.toggleFollow("a");
+    prefs.toggleMute("a");
+    expect(prefsStore.get()).toMatchObject({ followed: [], muted: ["a"] });
+    prefs.toggleFollow("a");
+    expect(prefsStore.get()).toMatchObject({ followed: ["a"], muted: [] });
+    prefs.renameSource("a", "label-a");
+    expect(prefsStore.get().followed).toEqual(["label-a"]);
   });
 });

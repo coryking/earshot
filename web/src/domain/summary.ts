@@ -70,7 +70,7 @@ export function headline(
       : "Quiet so far.";
   }
 
-  const day = new Date(now).toLocaleDateString(undefined, { weekday: "long" });
+  const day = new Date(now).toLocaleDateString("en-US", { weekday: "long" });
   const when = `for a ${day} ${partOfDay(new Date(now))}`;
   const level = busyness(activity, now).level;
   const context =
