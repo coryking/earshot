@@ -88,10 +88,10 @@ export function LiveSelection() {
     <section aria-label="Live tuning" className="rounded-xl border border-border bg-card p-4">
       {state.kind === "live" ? (
         <>
-          <p className="mb-1 text-xs font-medium uppercase tracking-wide text-primary">Held channel</p>
+          <p className="mb-1 text-xs font-medium uppercase tracking-wide text-primary">{state.phase === "taken" ? "Channel changed elsewhere" : state.phase === "error" ? "Listening error" : "Held channel"}</p>
           <ChannelIdentity name={state.sourceName} frequencyHz={state.frequencyHz} mode={state.mode} slot={state.slot} className="text-lg text-heading" />
           <p className="mt-2 text-sm" role="status">{playerLine(state, null)}</p>
-          {(state.raw || state.phase === "waiting") && <p className="mt-1 text-sm text-muted-foreground">
+          {state.phase !== "taken" && state.phase !== "error" && (state.raw || state.phase === "waiting") && <p className="mt-1 text-sm text-muted-foreground">
             {state.raw ? "FM signal audio · unsquelched. Sound plays as soon as receiver samples arrive, including noise and digital signals." : source?.signal ? "Signal detected. Digital activity can be data or control traffic and remain silent. Voice plays only when decoded; Hear FM signal lets you hear the signal itself." : "Listening is on. Decoded voice will play automatically when a transmission arrives."}
           </p>}
           <div className="mt-3 flex flex-wrap gap-2">
@@ -104,7 +104,7 @@ export function LiveSelection() {
         <p className="font-medium text-heading" role="status">Listening off</p>
         {state.channelId && <p className="mt-1 text-xs font-medium uppercase tracking-wide">Last selection</p>}
         {state.frequencyHz !== null && <ChannelIdentity frequencyHz={state.frequencyHz} name={state.sourceName} mode={state.mode} slot={state.slot} />}
-        <p className="mt-1 text-sm text-muted-foreground">The waterfall keeps updating. Audio will not start automatically. Click or drag a signal, or enter a frequency and press Listen.</p>
+        <p className="mt-1 text-sm text-muted-foreground">Receiving is controlled separately in the header. Audio will not start automatically. Click or drag a signal, or enter a frequency and press Listen.</p>
         {state.channelId && <Button className="mt-3" variant="secondary" onClick={() => void player.resume()}>Resume listening</Button>}
       </>}
       {(state.raw || state.captureSeconds > 0) && <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
