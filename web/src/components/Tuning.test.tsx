@@ -76,6 +76,7 @@ it("offers original IQ separately from FM audio and preserves a stopped frequenc
     render(<Providers backend={backend}><IqCapture channelId={channel.id} frequencyHz={452675000} /></Providers>);
     const save = await screen.findByRole("button", { name: "Save IQ" });
     await waitFor(() => expect(save).toBeEnabled());
+    await user.click(screen.getByText("Details"));
     expect(screen.getByText(/452.61700–452.71700 MHz/)).toBeVisible();
     expect(screen.getByText("1.0 / 30 s")).toBeVisible();
     await user.click(save);

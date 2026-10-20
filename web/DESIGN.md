@@ -3,6 +3,35 @@
 Source of truth: [`../docs/PRODUCT.md`](../docs/PRODUCT.md). This file maps that
 spec onto screens, gestures and data. Where the two disagree, the spec wins.
 
+## Current workspace: spectrum exploration
+
+The household radio in PRODUCT.md remains the destination. During receiver and
+protocol discovery, Explore is the default workspace on every screen size.
+
+- The waterfall fills the workspace. A pointer or touch selects a frequency;
+  a single hover preview replaces persistent catalog-name overlays.
+- One tuning strip owns frequency entry, audio mode, playback status, mute and
+  volume. Receiving remains a separate shared receiver control in the header.
+- Channels opens a searchable frequency list. Selecting a row tunes and closes
+  it. Signal opens details about the selection; neither list occupies a
+  permanent column.
+- The band heading opens receiver-window navigation. Its values come from
+  receiver readback, including synthesizer rounding.
+- Save IQ sits below the waterfall with sampled bandwidth, buffered seconds
+  and rolling/paused state. The actual physical slice is shaded on the plot.
+  FM audio export is a separate action when audio has been buffered.
+- Signal details separate RF activity, protocol decoding and speech. Catalog
+  names are annotations, not decoder evidence. Non-audio results must be typed
+  messages or events, with text only when an actual text payload was decoded.
+  The engine does not yet expose the offline NXDN SCCH or Capacity Plus fields
+  documented in [the IQ analysis](../docs/iq-analysis.md); the frontend does not
+  pretend these are live results.
+
+## Household listener design (future workspace)
+
+The following describes the household flow, retained as the destination rather
+than a second set of controls around Explore.
+
 The listener is a spouse or a sibling: no radio vocabulary, on a phone,
 often one-handed, sometimes with the screen locked. Everything on the default
 screens is written for them. Radio terms (MHz, slot, DMR, gain) appear only as

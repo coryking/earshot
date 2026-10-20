@@ -6,21 +6,24 @@ test.beforeEach(async ({ page }) => {
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
 });
 
-test("home is titled by the area, pins who's talking, and plays with one tap", async ({ page }, info) => {
-  await expect(page.getByRole("heading", { level: 1 })).toHaveText(/Downtown business radio/);
-  const talking = page.getByRole("list", { name: "Recent activity" });
-  await expect(talking.getByRole("listitem").first()).toBeVisible();
-  await talking.getByRole("button", { name: /^Tune to / }).first().click();
-  const player = page.getByRole("region", { name: "Player" });
-  await expect(player).toContainText("Playing live voice", { timeout: 10_000 });
-  await expect(player).toContainText(/\d+\.\d+ MHz/);
-  // Re-selecting a channel must never silently turn its audio off.
-  await talking.getByRole("button", { name: /^Tune to / }).first().click();
-  await expect(player).toBeVisible();
-  await expect(page.getByRole("region", { name: "Live tuning" })).toContainText(/\d+\.\d+ MHz/);
-  await page.screenshot({ path: info.outputPath(`home-${info.project.name}.png`) });
-  await player.getByRole("button", { name: "Stop listening" }).click();
-  await expect(player).toHaveCount(0);
+async function choose(page: import("@playwright/test").Page, name = "Downtown ambassadors") {
+  await page.getByRole("button", { name: "Channels", exact: true }).click();
+  await page.getByRole("textbox", { name: "Search channels" }).fill(name);
+  await page.getByRole("list", { name: "Channel frequencies" }).getByRole("button", { name: /^Tune to / }).first().click();
+}
+
+test("exploration gives the spectrum space and tunes from a folded channel list", async ({ page }, info) => {
+  await expect(page.getByRole("button", { name: "Channels", exact: true })).toHaveAttribute("aria-expanded", "false");
+  await choose(page);
+  const tuning = page.getByRole("region", { name: "Live tuning" });
+  await expect(tuning).toContainText("Playing");
+  await expect(tuning.getByRole("textbox", { name: "Frequency (MHz)" })).toHaveValue("452.68550");
+  await expect(page.getByRole("region", { name: "Player" })).toHaveCount(0);
+  const waterfall = (await page.locator('[data-waterfall="full"]').boundingBox())!;
+  expect(waterfall.height).toBeGreaterThan(page.viewportSize()!.height * 0.5);
+  await page.screenshot({ path: info.outputPath(`explore-${info.project.name}.png`) });
+  await tuning.getByRole("button", { name: "Stop listening" }).click();
+  await expect(tuning).toContainText("Audio off");
 });
 
 test("Now keeps live tuning separate from the Catch up tab", async ({ page }) => {
@@ -49,7 +52,9 @@ for (const theme of ["dark", "light"]) {
   test(`axe: source sheet (${theme})`, async ({ page }) => {
     await page.evaluate((t) => localStorage.setItem("radio.prefs.v1", JSON.stringify({ theme: t })), theme);
     await page.goto("/?demo");
-    await page.getByRole("button", { name: "About Private business radio" }).first().click();
+    await choose(page, "Private business radio");
+    await page.getByRole("button", { name: "Signal", exact: true }).click();
+    await page.getByRole("button", { name: "About channel", exact: true }).click();
     await expect(page.getByRole("dialog")).toContainText("Encrypted");
     await expectAccessible(page, `source sheet (${theme})`);
   });
@@ -65,16 +70,14 @@ test("changing the listening area is deliberate", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Listening area: Upper business band/ })).toBeVisible();
 });
 
-test("keyboard: move, listen, mute and stop", async ({ page, isMobile }) => {
+test("keyboard: tune, mute, stop and search", async ({ page, isMobile }) => {
   test.skip(isMobile, "keyboard shortcuts are for desktop");
-  await page.keyboard.press("j");
-  await page.keyboard.press("Enter");
-  const player = page.getByRole("region", { name: "Player" });
-  await expect(player).toBeVisible();
+  await choose(page);
   await page.keyboard.press("m");
-  await expect(player.getByRole("button", { name: "Unmute speaker", exact: true })).toBeVisible();
+  const tuning = page.getByRole("region", { name: "Live tuning" });
+  await expect(tuning.getByRole("button", { name: "Unmute speaker", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(player).toHaveCount(0);
+  await expect(tuning).toContainText("Audio off");
   await page.keyboard.press("Control+k");
   await expect(page.getByPlaceholder("Channel or action…")).toBeVisible();
 });
@@ -86,32 +89,32 @@ test("catch up plays recorded calls down the list", async ({ page }) => {
 });
 
 test("speaker mute and zero volume retain the held frequency until Stop listening", async ({ page }) => {
-  await page.getByRole("list", { name: "Recent activity" }).getByRole("button", { name: /^Tune to / }).first().click();
-  const player = page.getByRole("region", { name: "Player" });
+  await choose(page);
+  const player = page.getByRole("region", { name: "Live tuning" });
   const tuning = page.getByRole("region", { name: "Live tuning" });
   const frequency = tuning.getByRole("textbox", { name: "Frequency (MHz)" });
   const held = await frequency.inputValue();
-  await expect(player).toContainText("Playing live voice");
+  await expect(player).toContainText("Playing");
   await player.getByRole("button", { name: "Mute speaker", exact: true }).click();
-  await expect(player).toContainText("Speaker muted");
+  await expect(player).toContainText("Muted");
   await expect(frequency).toHaveValue(held);
   await player.getByRole("button", { name: "Unmute speaker", exact: true }).click();
   const volume = player.getByRole("slider", { name: "Speaker volume" });
   await volume.focus();
   await volume.press("Home");
   await expect(volume).toHaveValue("0");
-  await expect(player).toContainText("Speaker muted");
+  await expect(player).toContainText("Muted");
   await player.getByRole("button", { name: "Unmute speaker", exact: true }).click();
   await expect(volume).not.toHaveValue("0");
   await expect(frequency).toHaveValue(held);
   await player.getByRole("button", { name: "Stop listening", exact: true }).click();
-  await expect(player).toHaveCount(0);
+  await expect(player).toContainText("Audio off");
   await expect(page.getByRole("button", { name: "Stop receiving", exact: true })).toBeEnabled();
 });
 
 test("receiver start and stop are distinct from listening", async ({ page }) => {
-  await page.getByRole("list", { name: "Recent activity" }).getByRole("button", { name: /^Tune to / }).first().click();
-  await expect(page.getByRole("region", { name: "Player" })).toBeVisible();
+  await choose(page);
+  await expect(page.getByRole("region", { name: "Live tuning" })).toContainText("Playing");
   await page.getByRole("button", { name: "Stop receiving", exact: true }).click();
   await expect(page.getByRole("button", { name: "Start receiving", exact: true })).toBeEnabled();
   await expect(page.getByRole("region", { name: "Player" })).toHaveCount(0);
@@ -120,38 +123,16 @@ test("receiver start and stop are distinct from listening", async ({ page }) => 
   await expect(page.getByRole("region", { name: "Player" })).toHaveCount(0);
 });
 
-test("phone: every row's main area listens and only the About button opens info", async ({ page, isMobile }) => {
+test("phone: channel rows are tap targets and signal details are separate", async ({ page, isMobile }) => {
   test.skip(!isMobile, "tap targets are checked at phone width");
-  const list = page.getByRole("list", { name: "Channels" });
-  await expect(list.locator("[data-source-row]").nth(3)).toBeVisible();
-  const rows = list.locator(":scope > li");
-  const count = await rows.count();
-  for (let i = 0; i < count; i++) {
-    const main = rows.nth(i).locator("[data-source-row]");
-    const about = rows.nth(i).locator("[data-about]");
-    const a = (await main.boundingBox())!;
-    const b = (await about.boundingBox())!;
-    expect(a.height, `row ${i} height`).toBeGreaterThanOrEqual(44);
-    expect(b.width, `row ${i} about width`).toBeGreaterThanOrEqual(44);
-    expect(b.height, `row ${i} about height`).toBeGreaterThanOrEqual(44);
-    expect(a.x + a.width, `row ${i}: listen and about don't overlap`).toBeLessThanOrEqual(b.x + 0.5);
-    // The listen area covers the row from the left edge to the About button.
-    expect(a.x).toBeLessThanOrEqual(1);
-    expect(a.width / 390).toBeGreaterThan(0.8);
-  }
-  // Taps anywhere on the main area listen, never open a sheet: left, middle, and just left of About.
-  const player = page.getByRole("region", { name: "Player" });
-  for (const [i, x] of [
-    [1, 8],
-    [2, 180],
-    [3, 330],
-  ] as const) {
-    const main = rows.nth(i).locator("[data-source-row]");
-    await main.tap({ position: { x, y: 20 } });
-    await expect(player).toBeVisible();
-    await expect(page.getByRole("dialog")).toHaveCount(0);
-    await expect(rows.nth(i)).toHaveAttribute("data-source-id", /.+/);
-  }
-  await rows.nth(1).locator("[data-about]").tap();
-  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.getByRole("button", { name: "Channels", exact: true }).click();
+  const row = page.getByRole("list", { name: "Channel frequencies" }).getByRole("button", { name: /^Tune to / }).first();
+  const bounds = (await row.boundingBox())!;
+  expect(bounds.height).toBeGreaterThanOrEqual(44);
+  expect(bounds.width).toBeGreaterThan(250);
+  await row.tap();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Channels", exact: true })).toHaveAttribute("aria-expanded", "false");
+  await page.getByRole("button", { name: "Signal", exact: true }).tap();
+  await expect(page.getByRole("complementary", { name: "Signal details" })).toBeVisible();
 });

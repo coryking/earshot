@@ -162,7 +162,7 @@ export function Waterfall({ variant, sources, talking, activeSourceId, tunedFreq
       ref={box}
       className={cn(
         "relative overflow-hidden bg-[#0f1a2b] select-none",
-        "min-h-0 flex-1", interactive && "touch-none",
+        "min-h-0 flex-1", interactive && "touch-none cursor-crosshair",
       )}
       onPointerDown={interactive ? (e) => {
         if (e.button !== 0) return;
@@ -227,7 +227,7 @@ export function Waterfall({ variant, sources, talking, activeSourceId, tunedFreq
           />
         ))}
       {captureRange && low !== null && meta.spanHz && (
-        <span aria-label="IQ capture range" className="pointer-events-none absolute inset-y-0 border-x border-[#5eb8c9]/90 bg-[#5eb8c9]/15"
+        <span aria-hidden data-iq-range className="pointer-events-none absolute inset-y-0 border-x border-[#5eb8c9]/90 bg-[#5eb8c9]/15"
           style={{ left: `${Math.max(0, (captureRange.centerHz - captureRange.spanHz / 2 - low) / meta.spanHz) * 100}%`,
             width: `${Math.max(0, Math.min(low + meta.spanHz, captureRange.centerHz + captureRange.spanHz / 2) - Math.max(low, captureRange.centerHz - captureRange.spanHz / 2)) / meta.spanHz * 100}%` }} />
       )}

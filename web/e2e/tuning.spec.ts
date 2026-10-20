@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 test("desktop waterfall previews a nearby channel and Shift bypasses snapping", async ({ page, isMobile }) => {
-  test.skip(isMobile, "the portrait strip is not interactive");
+  test.skip(isMobile, "pointer coordinates are checked on desktop");
   await page.goto("/?demo");
   const waterfall = page.locator('[data-waterfall="full"]');
   await expect(waterfall).toHaveAttribute("aria-label", /451\.2 to 457\.2/);
@@ -13,8 +13,7 @@ test("desktop waterfall previews a nearby channel and Shift bypasses snapping", 
   await expect(waterfall.getByText("Snap to", { exact: false })).toContainText("Downtown ambassadors");
   await waterfall.click({ position: { x, y } });
   const selection = page.getByRole("region", { name: "Live tuning" });
-  await expect(selection).toContainText("Downtown ambassadors");
-  await expect(selection).toContainText("452.6855 MHz");
+  await expect(selection.getByRole("textbox", { name: "Frequency (MHz)" })).toHaveValue("452.68550");
   const selectedRect = (await waterfall.boundingBox())!;
   await waterfall.click({ position: { x, y: selectedRect.height * 0.5 }, modifiers: ["Shift"] });
   await expect(page.getByRole("dialog")).toHaveCount(0);
@@ -24,7 +23,7 @@ test("desktop waterfall previews a nearby channel and Shift bypasses snapping", 
 });
 
 test("desktop unnamed signals tune inline and retain a raw capture after stopping", async ({ page, isMobile }) => {
-  test.skip(isMobile, "the portrait strip is not interactive");
+  test.skip(isMobile, "pointer coordinates are checked on desktop");
   await page.goto("/?demo");
   const waterfall = page.locator('[data-waterfall="full"]');
   await expect(waterfall).toHaveAttribute("aria-label", /451\.2 to 457\.2/);
@@ -32,20 +31,19 @@ test("desktop unnamed signals tune inline and retain a raw capture after stoppin
   await waterfall.click({ position: { x: bounds.width * 0.96, y: bounds.height * 0.5 } });
   await expect(page.getByRole("dialog")).toHaveCount(0);
   const selection = page.getByRole("region", { name: "Live tuning" });
-  await expect(selection).toContainText("FM signal audio · unsquelched");
+  await expect(selection.getByRole("combobox", { name: "Audio mode" })).toHaveValue("fm");
   const entered = Number(await selection.getByRole("textbox", { name: "Frequency (MHz)" }).inputValue()) * 1e6;
   expect(Math.round(entered) % 6250).toBe(0);
-  await expect(selection.getByRole("button", { name: "Save FM audio WAV" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: /^Save audio/ })).toBeEnabled();
   await selection.getByRole("button", { name: "Stop listening" }).click();
-  await expect(selection.getByRole("button", { name: "Save FM audio WAV" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: /^Save audio/ })).toBeEnabled();
 });
 
 test("desktop dragging follows the pointer and stopped listening can resume", async ({ page, isMobile }) => {
-  test.skip(isMobile, "the portrait strip is not interactive");
+  test.skip(isMobile, "pointer coordinates are checked on desktop");
   await page.goto("/?demo");
   const selection = page.getByRole("region", { name: "Live tuning" });
-  await expect(selection).toContainText("Listening off");
-  await expect(selection).toContainText("Audio will not start automatically");
+  await expect(selection).toContainText("Audio off");
   const waterfall = page.locator('[data-waterfall="full"]');
   await expect(waterfall).toHaveAttribute("aria-label", /451\.2 to 457\.2/);
   const box = (await waterfall.boundingBox())!;
@@ -56,14 +54,13 @@ test("desktop dragging follows the pointer and stopped listening can resume", as
   await page.mouse.move(box.x + box.width * 0.8, box.y + 100, { steps: 12 });
   await page.mouse.up();
   await expect(frequency).not.toHaveValue(first);
-  await expect(selection).toContainText("Playing FM signal audio");
+  await expect(selection).toContainText("Playing");
   await selection.getByRole("button", { name: "Stop listening" }).click();
-  await expect(selection).toContainText("Listening off");
-  await expect(selection).toContainText("Audio will not start automatically");
+  await expect(selection).toContainText("Audio off");
   const stopped = await frequency.inputValue();
   await selection.getByRole("button", { name: "Resume listening" }).click();
   await expect(frequency).toHaveValue(stopped);
-  await expect(selection).toContainText("Playing FM signal audio");
+  await expect(selection).toContainText("Playing");
 });
 
 test("landscape tuning and waterfall remain reachable after raw listening expands the panel", async ({ page, isMobile }) => {
@@ -72,8 +69,8 @@ test("landscape tuning and waterfall remain reachable after raw listening expand
   await page.goto("/?demo");
   const selection = page.getByRole("region", { name: "Live tuning" });
   await selection.getByRole("textbox", { name: "Frequency (MHz)" }).fill("456.70000");
-  await selection.getByRole("button", { name: "Listen", exact: true }).click();
-  await expect(selection).toContainText("Playing FM signal audio");
+  await selection.getByRole("button", { name: "Tune", exact: true }).click();
+  await expect(selection).toContainText("Playing");
   const waterfall = page.locator('[data-waterfall="full"]');
   await waterfall.scrollIntoViewIfNeeded();
   await expect(waterfall).toBeInViewport({ ratio: 0.5 });
@@ -81,5 +78,5 @@ test("landscape tuning and waterfall remain reachable after raw listening expand
   await stop.scrollIntoViewIfNeeded();
   await expect(stop).toBeInViewport();
   await stop.click();
-  await expect(selection).toContainText("Listening off");
+  await expect(selection).toContainText("Audio off");
 });

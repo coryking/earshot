@@ -34,7 +34,7 @@ export function SpectrumNavigation() {
     onSettled: () => { void client.invalidateQueries({ queryKey: keys.status }); void client.invalidateQueries({ queryKey: keys.blocks }); },
   });
   const disabled = !supported || move.isPending;
-  return <section aria-label="Spectrum window" className="shrink-0 rounded-xl border border-border bg-card p-3">
+  return <section aria-label="Spectrum window" className="shrink-0">
     <div className="mb-2 flex flex-wrap justify-between gap-1 text-xs text-muted-foreground">
       <span>Spectrum window</span>
       {center > 0 && width > 0 && <span className="tabular-nums">{((center - width / 2) / 1e6).toFixed(3)}–{((center + width / 2) / 1e6).toFixed(3)} MHz</span>}
@@ -47,7 +47,7 @@ export function SpectrumNavigation() {
       <Button type="submit" disabled={disabled || !text.trim() || !valid(hz)}>{move.isPending ? "Moving…" : "Go"}</Button>
       <Button type="button" variant="outline" disabled={disabled || !valid(center + width)} onClick={() => move.mutate(center + width)}>Next →</Button>
     </form>
-    {!supported && <p className="mt-2 text-xs text-muted-foreground">Start a receiver with spectrum-window controls to move the window.</p>}
+
     {move.error && <p role="alert" className="mt-2 text-sm text-destructive">{move.error.message}</p>}
   </section>;
 }

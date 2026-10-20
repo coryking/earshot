@@ -16,7 +16,7 @@ const OperatorScreen = lazy(() => import("@/screens/Operator").then((m) => ({ de
 
 export function App() {
   const route = useRoute();
-  const { desktop } = useWide();
+  const { desktop, landscape } = useWide();
   const player = usePlayerInstance();
   const recorded = usePlayerSelect((s) => s.kind === "call");
   const { current } = useBlocks();
@@ -49,7 +49,7 @@ export function App() {
       >
         Skip to content
       </a>
-      <Header wide={desktop} />
+      <Header wide={desktop || landscape} />
       <main
         id="main"
         className={route === "now" ? "flex min-h-0 flex-1" : "min-h-0 flex-1 overflow-y-auto"}
@@ -61,7 +61,7 @@ export function App() {
         )}
       </main>
       {(route !== "now" || recorded) && <PlayerBar />}
-      {!desktop && <TabBar />}
+      {!desktop && !landscape && <TabBar />}
       <SheetHost />
       <Palette />
       <ShortcutsDialog />
