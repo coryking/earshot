@@ -97,8 +97,24 @@ struct After {
     #[serde(default)]
     after: u64,
 }
+/// Display range for the waterfall. A producer that reports power per Hz is shown on
+/// the documented fixed scale; integrated per-bin dBFS has no fixed floor, so the range
+/// follows the retained rows (5th percentile to 99.9th percentile with a minimum span).
+fn display_range(unit: &str, rows: &std::collections::VecDeque<(u64, f64, Vec<f32>)>) -> (f64, f64) {
+    let mut values: Vec<f32> = rows.iter().flat_map(|r| r.2.iter().copied()).collect();
+    if unit == "dBFS/Hz" || values.len() < 16 {
+        return (-125., -65.);
+    }
+    values.sort_by(f32::total_cmp);
+    let at = |q: f64| values[((values.len() - 1) as f64 * q) as usize] as f64;
+    let low = at(0.05) - 2.;
+    let high = (at(0.999) + 2.).max(low + 30.);
+    (low, high)
+}
 async fn spectrum(State(app): State<App>, Query(q): Query<After>) -> Json<Value> {
     let e = app.inner.lock().unwrap();
+    let unit = e.source["psd"]["unit"].as_str().unwrap_or("uncalibrated");
+    let (low_db, high_db) = display_range(unit, &e.psd);
     let rows: Vec<_> = e
         .psd
         .iter()
@@ -106,7 +122,7 @@ async fn spectrum(State(app): State<App>, Query(q): Query<After>) -> Json<Value>
         .take(60)
         .collect();
     Json(
-        json!({"sequence":rows.last().map(|x|x.0).unwrap_or(e.psd_seq),"generation":e.generation,"rows":rows.iter().map(|x|&x.2).collect::<Vec<_>>(),"times":rows.iter().map(|x|x.1).collect::<Vec<_>>(),"center_hz":e.source["input_center_hz"],"span_hz":e.source["input_bandwidth_hz"],"low_db":-125,"high_db":-65,"unit":e.source["psd"]["unit"].as_str().unwrap_or("uncalibrated"),"source":if e.active{"live"}else{"disconnected"}}),
+        json!({"sequence":rows.last().map(|x|x.0).unwrap_or(e.psd_seq),"generation":e.generation,"rows":rows.iter().map(|x|&x.2).collect::<Vec<_>>(),"times":rows.iter().map(|x|x.1).collect::<Vec<_>>(),"center_hz":e.source["input_center_hz"],"span_hz":e.source["input_bandwidth_hz"],"low_db":low_db,"high_db":high_db,"unit":unit,"source":if e.active{"live"}else{"disconnected"}}),
     )
 }
 async fn ws(State(app): State<App>, ws: WebSocketUpgrade) -> impl IntoResponse {
@@ -324,6 +340,16 @@ mod tests {
             let mut e = app.inner.lock().unwrap();
             e.source = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,"queue_depth":0});
         }
+    }
+    #[test]
+    fn waterfall_range_follows_integrated_dbfs_and_keeps_the_density_scale() {
+        let rows: std::collections::VecDeque<_> = (0..20u64)
+            .map(|n| (n, n as f64, (0..64).map(|k| if k == 5 { -12.0 } else { -60.0 + (k % 7) as f32 }).collect()))
+            .collect();
+        let (low, high) = display_range("dBFS", &rows);
+        assert!(low < -58. && low > -66., "low {low}");
+        assert!(high > -12. && high < -5., "high {high}");
+        assert_eq!(display_range("dBFS/Hz", &rows), (-125., -65.));
     }
     #[tokio::test]
     async fn missing_source_controls_never_report_applied() {
