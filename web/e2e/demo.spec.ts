@@ -41,7 +41,7 @@ for (const theme of ["dark", "light"]) {
   });
 }
 
-test("changing the listening area is explained and deliberate", async ({ page }) => {
+test("changing the listening area is deliberate", async ({ page }) => {
   await page.getByRole("button", { name: /Listening area:/ }).click();
   const sheet = page.getByRole("dialog");
   await expect(sheet).toContainText("Listening area");
@@ -68,7 +68,7 @@ test("keyboard: move, listen, mute and stop", async ({ page, isMobile }) => {
 test("catch up plays recorded calls down the list", async ({ page }) => {
   await page.goto("/?demo#/catch-up");
   await page.getByRole("button", { name: /Play call from/ }).first().click();
-  await expect(page.getByRole("region", { name: "Player" })).toContainText("Recorded call");
+  await expect(page.getByRole("region", { name: "Player" })).toContainText("Recorded");
 });
 
 test("phone: every row's main area listens and only the About button opens info", async ({ page, isMobile }) => {

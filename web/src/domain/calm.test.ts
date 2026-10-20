@@ -5,7 +5,11 @@ import {
   groupSources,
   heardAgo,
   HOLD_MS,
+  listedSources,
+  rankByStrength,
+  signalBars,
   StableOrder,
+  StrengthTracker,
   TalkTracker,
   TALKING_SHOWN,
 } from "./calm";
@@ -99,6 +103,56 @@ describe("StableOrder", () => {
     expect(order.arrange(["d", "c", "a", "b"], false)).toEqual(["a", "b", "c", "d"]);
     expect(order.arrange(["d", "a"], false)).toEqual(["a", "d"]);
     expect(order.arrange(["d", "a"], true)).toEqual(["d", "a"]);
+  });
+});
+
+describe("listed ordering", () => {
+  it("arranging only listed ids puts a newly listed row at the end", () => {
+    const order = new StableOrder();
+    const none = new Map<string, number>();
+    const all = [src("a"), src("x", { heardVoice: false }), src("n")];
+    const ids = (s: Source[]) => listedSources(s, none, new Set(), new Set()).map((r) => r.id);
+    expect(order.arrange(ids(all), true)).toEqual(["a", "n"]);
+    // x gets heard later: it joins after n instead of taking its old slot ahead of it.
+    const later = [src("a"), src("x"), src("n")];
+    expect(order.arrange(ids(later), false)).toEqual(["a", "n", "x"]);
+  });
+
+  it("a short key-up observed between renders still counts", () => {
+    const t = new TalkTracker();
+    t.observe([src("a", { talking: true })], 100, uncalibrated);
+    t.observe([src("a", { talking: false })], 400, uncalibrated);
+    expect(t.observe([src("a")], 1000, uncalibrated).get("a")).toBe(100);
+  });
+});
+
+describe("signal strength", () => {
+  it("remembers a peak, so a brief fade does not reorder, then lets it fall", () => {
+    const t = new StrengthTracker();
+    t.observe([src("a", { levelDb: -20 })], 0);
+    expect(t.observe([src("a", { levelDb: -40 })], 2000).get("a")).toBe(-21);
+    expect(t.observe([src("a", { levelDb: -40 })], 60_000).get("a")).toBe(-40);
+    expect(t.observe([], 61_000).has("a")).toBe(false);
+  });
+
+  it("ranks strongest first and shows bars relative to the strongest", () => {
+    const sources = [
+      src("weak", { levelDb: -50, frequencyHz: 1 }),
+      src("strong", { levelDb: -14, frequencyHz: 3 }),
+      src("mid", { levelDb: -25, frequencyHz: 2 }),
+      src("none", { frequencyHz: 0 }),
+    ];
+    const strength = new Map([
+      ["weak", -50],
+      ["strong", -14],
+      ["mid", -25],
+    ]);
+    expect(rankByStrength(sources, strength)).toEqual(["strong", "mid", "weak", "none"]);
+    const bars = signalBars(["weak", "strong", "mid", "none"], strength);
+    expect(bars.get("strong")).toBe(4);
+    expect(bars.get("mid")).toBe(3);
+    expect(bars.get("weak")).toBe(1);
+    expect(bars.has("none")).toBe(false);
   });
 });
 

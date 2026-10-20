@@ -31,14 +31,14 @@
 3. **Catch up on what I missed.** Recent calls, newest first, playable.
 4. **Follow or mute a source.**
 5. **Get alerted** when a followed source gets busy or activity spikes.
-6. **Change block.** Rare and deliberate; the app explains that it hears one block at a time.
+6. **Change block.** Rare and deliberate, and offered only when there is more than one block to pick.
 7. **"Is it working?"** One plain status. **"What is this?"** A plain explanation of a source: probable user, kind of traffic, and why encrypted calls can't be heard.
 
 Listeners never tune frequencies, set gain or bandwidth, or pick decoders. Those controls are operator-only.
 
 ## The waterfall
 
-The waterfall is a supporting view, not the home screen. On mobile it is a thin live strip that shows the block is alive. Its traces correspond to items in the activity list, and tapping a trace listens; this is the path to signals that have no name yet. It becomes a full view in landscape or on desktop, for exploring. The browser renders it from compact spectrum data.
+The waterfall is a supporting view, not the home screen. On mobile it is a thin live strip that shows the block is alive. On the phone it is a picture, not a control: it labels whoever is talking or playing, and the way to listen is the list, where signals with no name yet sit under Other activity. It becomes a full view in landscape or on desktop, for exploring, and there tapping a trace listens. The browser renders it from compact spectrum data.
 
 ## Design principles
 

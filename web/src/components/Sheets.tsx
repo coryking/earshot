@@ -149,9 +149,9 @@ function NameIt({ source }: { source: Source }) {
 function encryptionText(source: Source): string | null {
   switch (source.encryption) {
     case "encrypted":
-      return "Encrypted: only their own radios can hear it";
+      return "Yes";
     case "mixed":
-      return "Some calls encrypted";
+      return "Some calls";
     case "clear":
       return "No";
     default:
@@ -369,7 +369,6 @@ function AlertsSheet({ open }: { open: boolean }) {
         <label className="flex min-h-14 items-center gap-3 py-2">
           <span className="flex-1">
             <span className="block text-heading">Followed channel gets busy</span>
-            <span className="tabular block text-sm text-muted-foreground">3+ calls in 10 min</span>
           </span>
           <Switch checked={alertFollowed} onCheckedChange={(v) => void enable("alertFollowed", v)} />
         </label>
@@ -383,7 +382,7 @@ function AlertsSheet({ open }: { open: boolean }) {
       {permission === "denied" && (
         <p className="mt-4 flex gap-2 text-sm text-muted-foreground">
           <BellRing className="mt-0.5 size-4 shrink-0" aria-hidden />
-          Notifications blocked in browser settings
+          Notifications blocked
         </p>
       )}
     </Sheet>
@@ -400,7 +399,7 @@ function StatusSheet({ open }: { open: boolean }) {
       ? "Reconnecting"
       : { listening: "Working", paused: "Paused", offline: "Not connected" }[health.state];
   return (
-    <Sheet open={open} title={title} description={health.detail}>
+    <Sheet open={open} title={title} description={health.detail.replace(/\.$/, "") === title ? undefined : health.detail}>
       <dl className="divide-y divide-border/60">
         <Fact label="Last data">{last ? relativeTime(last, now) : "Not yet"}</Fact>
         <Fact label="Channels">{status.data?.channels.length ?? 0}</Fact>

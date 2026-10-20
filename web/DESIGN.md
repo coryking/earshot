@@ -12,12 +12,12 @@ secondary detail or in the operator view.
 
 | Rank | Action | Where | Gesture |
 | --- | --- | --- | --- |
-| 1 | See what's happening now | **Now** tab (home). Titled by the listening area, then the live strip, a small **Talking now** area (at most three), and the channel list in a stable order. | Open the app. Pull to refresh is unnecessary because the list is live. |
+| 1 | See what's happening now | **Now** tab (home). Titled by the listening area, then the live strip, a small **Talking now** area (at most three, "+N" beside its heading for more), and the channel list in a stable order. | Open the app. Pull to refresh is unnecessary because the list is live. |
 | 2 | Tap to listen | Any row or Talking now card, any call in Catch up, a marked trace in the desktop waterfall. The **player bar** docks above the tab bar with stop, mute and volume. | One tap on a row listens. Tapping the playing row again stops. The player bar's stop button is in thumb reach. Volume lives in the expanded player sheet (swipe the bar up). |
 | 3 | Catch up on what I missed | **Catch up** tab: recent calls newest first, grouped by "Just now / Earlier this hour / Today", each with a play button and duration. | Tap a call to play it. Playback continues down the list (autoplay next) like a podcast queue, so a listener can catch up hands-free. |
 | 4 | Follow or mute a source | Star and mute in the source sheet and the expanded player. Followed sources pin to the top of Now, like pinned chats; muted ones sink into a collapsed "Muted" group and never alert. Naming a source keeps its follow or mute. | Tap the row's ⓘ button to open the source sheet. The row itself only ever listens. |
 | 5 | Get alerted | Bell in the header opens the alerts sheet: "A channel I follow gets busy" (three or more calls within ten minutes) and "It's much busier than normal" (the area moves into busier-than-usual). Only activity since the page opened counts, with a 30-minute cooldown. In-page notifications today; closed-app push needs the engine. | Toggle switches. The bell turns amber when alerts are on. |
-| 6 | Change block | Tap the block name in the header ("Downtown business radio"). A sheet explains that the radio hears one stretch of the airwaves at a time, lists the blocks in plain terms, and asks for confirmation. | Deliberately two taps plus a confirm. Never a swipe. |
+| 6 | Change block | Tap the area name at the top ("Downtown business radio"). A sheet lists the blocks in plain terms and asks for confirmation. With only one block (today's live engine) the name is plain text, with no chevron and no sheet. | Deliberately two taps plus a confirm. Never a swipe. |
 | 7 | Is it working? / What is this? | The status dot next to the block name ("Listening", "Paused", "Not connected"); tap it for a plain explanation. Each source sheet has "What is this?": probable user, kind of traffic, and, for encrypted sources, why you can't hear them. | Tap. |
 
 Listeners never tune, set gain or bandwidth, or pick decoders. Those live in the
@@ -34,16 +34,16 @@ is reachable with the right thumb.
 ┌──────────────────────────────┐
 │ ● Listening                🔔│  header: status (tap = status sheet), alerts
 │ Downtown business radio ⌄    │  title: the area (tap = block sheet); never changes with data
-│ Busier than usual            │  one fixed line, only once there's a baseline
+│ Busier than usual            │  fixed-height line, reserved once there's a baseline
 │ ▁▂▅▇▅▂▁▁▁▂▃▁▁▁▁▆█▆▁▁▁▁▁▁▂▁ │  live strip: labels on who's talking / playing; not a control
-│ Talking now                  │
+│ Talking now              +2  │
 │ ┌ Front desk        ▮▮▮  ⓘ ┐ │  at most three cards, in the order they started
 ├──────────────────────────────┤
 │ Channels                     │
 │ ★ Front desk          ▮▮▮ ⓘ │  followed first, then last voice heard; frozen while shown
 │   Warehouse crew  2 min ago ⓘ│  30-min call lane under each row
 │   Day Wireless   1 min ago  ⓘ│  same name twice: second line says "Line 1" / "Line 2"
-│ › Other activity (28)        │  RF without decoded voice, control channels: folded
+│ › Other activity (28)        │  no decoded voice: strongest signal first, with bars
 ├──────────────────────────────┤
 ├──────────────────────────────┤
 │ ▶ Front desk    ■  🔇        │  player bar: stop and mute in thumb reach
@@ -59,14 +59,22 @@ is reachable with the right thumb.
 - **Few words.** Rows carry a name, when a voice was last heard (in minutes),
   or the level meter, and the 30-minute call lane. A second line appears only
   to tell apart rows that share a name. No helper sentences or narration;
-  explanations live behind ⓘ and stay short there too.
+  explanations live behind ⓘ and stay short there too. Rows in Other
+  activity show signal bars, relative to the strongest in the group; they are
+  listenable like any row (analog FM through the engine's pin path).
 - **Calm.** "Talking" means decoded voice (DMR/NXDN voice with sync, FM held
   above the squelch), never RF energy, held 5 s past the last evidence. An
   encrypted source counts by carrier only after 2 s on a calibrated detector
   (not the ARM path). Control channels never talk. The view samples the engine
   once a second and re-renders only when something visible changed. The list
-  order is frozen while shown and re-ranks on open, on follow or mute, and on
-  returning after 30 s away. New rows join the end. Talking now cards fold in
+  order is frozen while shown and re-ranks on open (once the engine's names
+  have arrived), on follow or mute, and on returning after 30 s away. Only
+  listed rows are ranked, so a row that becomes listed joins the end. Other
+  activity is ordered the same way by recent signal strength. The talking
+  tracker sees every engine update, so a short key-up still counts; only the
+  render is limited to once a second. The Other group starts open when there
+  are no voice channels yet. The leaving Talking now card stays mounted while
+  it folds. Talking now cards fold in
   and out; `prefers-reduced-motion` turns that off. Logic: `src/domain/calm.ts`.
 - **Progressive disclosure.** Frequencies, slots and protocols are in the
   source sheet's "Details" section, collapsed by default.
@@ -107,7 +115,7 @@ A supporting view, as the spec says. Rendered entirely in the browser:
 
 - **Phone portrait:** a thin live strip (~56 px, about 20 seconds of history)
   under the title. It proves the block is alive and is a picture, not a
-  control: channels sit a few pixels apart, and on this receiver most bright
+  control (the playing source is marked even if it sits under Other activity): channels sit a few pixels apart, and on this receiver most bright
   lines are data, control channels or noise that can't be heard, so "tap a
   bright line" led people to nothing. Instead, the trace of each source
   talking now gets an amber guide line and name label, and the playing source a
@@ -132,7 +140,7 @@ A supporting view, as the spec says. Rendered entirely in the browser:
 | `protocol: Unknown` | "not identified yet" |
 | analog FM (catalog, later engine) | "voice" |
 | `speech_active` (held 5 s) | a Talking now card plus a level meter |
-| `rf_active` without decoded voice, or `label_kind: control` | folded into "Other activity (N)" |
+| `rf_active` without decoded voice, or `label_kind: control` (the engine's label kind only, never free text) | folded into "Other activity (N)", still playable unless it is a control channel |
 | encrypted (catalog/trunking) | "Private: encrypted, can't be heard" with an explanation in "What is this?" |
 | `/api/status` state `receiving` | "Listening" (green), `stopped` "Paused", `error` or disconnected "Not connected" (with the error in plain words and the raw message under Details) |
 | center / bandwidth | a block name: "Downtown business radio (454 MHz)" |
@@ -223,9 +231,9 @@ answers those endpoints, live mode uses honest in-browser fallbacks:
   Anything unmatched shows its number. When the engine gains a catalog, the
   device labels are uploaded and the starter list steps aside.
 - **Catch up:** a session-only call log built from speech transitions, with no
-  audio, and a banner saying so.
-- **Busy vs normal:** activity since the page opened, and "Still learning what
-  normal sounds like here" until there is a baseline.
+  audio.
+- **Busy vs normal:** activity since the page opened; the line stays blank
+  until there is a baseline.
 
 Demo mode (`?demo`) runs everything on a typed mock, which tests and
 screenshots use; it's badged "Demo" and loaded only on request.
@@ -234,8 +242,8 @@ screenshots use; it's badged "Demo" and loaded only on request.
 
 The engine plays one channel for every browser. The player only clears a
 selection it made, quietly re-selects when the engine releases the selection
-(restart, someone else stopping), and shows "Someone on another device switched
-the radio to …" with "Switch back" only when another channel was chosen.
+(restart, someone else stopping), and shows "Switched to … elsewhere" with
+"Switch back" only when another channel was chosen.
 Per-client listening is Frontend needs #1.
 
 ## Spectrum feed

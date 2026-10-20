@@ -5,26 +5,36 @@ import { cn } from "@/lib/utils";
 import { prefs, usePrefs, type ThemeChoice } from "@/state/prefs";
 import { useBlocks, useHealth } from "@/state/radio";
 
-function Row({ icon, title, detail, onClick }: { icon: ReactNode; title: string; detail?: string; onClick(): void }) {
+function Row({ icon, title, detail, onClick }: { icon: ReactNode; title: string; detail?: string; onClick?(): void }) {
+  const body = (
+    <>
+      <span className="text-muted-foreground" aria-hidden>
+        {icon}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-heading">{title}</span>
+        {detail && <span className="block truncate text-sm text-muted-foreground">{detail}</span>}
+      </span>
+      {onClick && <ChevronRight className="size-4 text-muted-foreground" aria-hidden />}
+    </>
+  );
+  const className = "flex min-h-16 w-full items-center gap-3 px-4 py-2 text-left";
   return (
     <li>
-      <button type="button" onClick={onClick} className="flex min-h-16 w-full items-center gap-3 px-4 py-2 text-left">
-        <span className="text-muted-foreground" aria-hidden>
-          {icon}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block text-heading">{title}</span>
-          {detail && <span className="block truncate text-sm text-muted-foreground">{detail}</span>}
-        </span>
-        <ChevronRight className="size-4 text-muted-foreground" aria-hidden />
-      </button>
+      {onClick ? (
+        <button type="button" onClick={onClick} className={className}>
+          {body}
+        </button>
+      ) : (
+        <div className={className}>{body}</div>
+      )}
     </li>
   );
 }
 
 export function RadioTab() {
   const health = useHealth();
-  const { current } = useBlocks();
+  const { current, canSwitch } = useBlocks();
   const { theme, alertBusy, alertFollowed } = usePrefs();
   return (
     <div className="pb-6">
@@ -35,7 +45,7 @@ export function RadioTab() {
           icon={<MapPin className="size-5" />}
           title="Listening area"
           detail={current?.name ?? "Not set"}
-          onClick={() => openSheet({ type: "block" })}
+          onClick={canSwitch ? () => openSheet({ type: "block" }) : undefined}
         />
         <Row
           icon={<Bell className="size-5" />}

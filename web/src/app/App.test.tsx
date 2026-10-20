@@ -75,7 +75,7 @@ describe("Now", { timeout: 40_000 }, () => {
     expect(await screen.findByRole("region", { name: "Player" })).toHaveTextContent("Encrypted");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     await user.click(screen.getAllByRole("button", { name: "About Private business radio" })[0]);
-    expect(await screen.findByText(/only their own radios can hear it/)).toBeInTheDocument();
+    expect(await screen.findByRole("dialog")).toHaveTextContent("Encrypted");
   });
 
   it("follows a source from its sheet", async () => {

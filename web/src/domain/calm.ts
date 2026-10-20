@@ -58,6 +58,62 @@ export class TalkTracker {
   }
 }
 
+/** A peak reading falls this fast, so "recent strength" remembers a signal for a while. */
+const STRENGTH_DECAY_DB_PER_S = 0.5;
+/** Signal bars span this many dB below the strongest in the group. */
+const BAR_STEP_DB = 6;
+export const MAX_BARS = 4;
+
+/**
+ * Recent signal strength per source: the engine's level with a fast attack and
+ * a slow release, so a brief fade doesn't reshuffle the "Other activity" order.
+ */
+export class StrengthTracker {
+  private peaks = new Map<string, { db: number; at: number }>();
+
+  observe(sources: Source[], now: number): ReadonlyMap<string, number> {
+    const seen = new Set<string>();
+    for (const s of sources) {
+      seen.add(s.id);
+      if (s.levelDb === null || !s.inRange) {
+        this.peaks.delete(s.id);
+        continue;
+      }
+      const old = this.peaks.get(s.id);
+      const decayed = old ? old.db - (Math.max(0, now - old.at) / 1000) * STRENGTH_DECAY_DB_PER_S : -Infinity;
+      this.peaks.set(s.id, { db: Math.max(s.levelDb, decayed), at: now });
+    }
+    for (const id of this.peaks.keys()) if (!seen.has(id)) this.peaks.delete(id);
+    return new Map([...this.peaks].map(([id, p]) => [id, p.db]));
+  }
+}
+
+/** 0 to MAX_BARS bars for each source with a strength, relative to the strongest among them. */
+export function signalBars(ids: string[], strength: ReadonlyMap<string, number>): Map<string, number> {
+  const values = ids.flatMap((id) => (strength.has(id) ? [strength.get(id)!] : []));
+  const out = new Map<string, number>();
+  if (!values.length) return out;
+  const top = Math.max(...values);
+  for (const id of ids) {
+    const v = strength.get(id);
+    if (v === undefined) continue;
+    out.set(id, Math.max(1, Math.min(MAX_BARS, MAX_BARS - Math.floor((top - v) / BAR_STEP_DB))));
+  }
+  return out;
+}
+
+/** Strongest recent signal first, then by frequency. Feed it to a StableOrder. */
+export function rankByStrength(sources: Source[], strength: ReadonlyMap<string, number>): string[] {
+  return [...sources]
+    .sort(
+      (a, b) =>
+        (strength.get(b.id) ?? -Infinity) - (strength.get(a.id) ?? -Infinity) ||
+        (a.frequencyHz ?? 0) - (b.frequencyHz ?? 0) ||
+        a.id.localeCompare(b.id),
+    )
+    .map((s) => s.id);
+}
+
 /**
  * A list order that only changes when asked. Known ids keep their relative
  * positions; new ids join the end; ids that disappear drop out. `resort`
@@ -108,7 +164,7 @@ export interface CalmGroups {
   moreTalking: number;
   /** Followed, or heard with decoded voice: the quiet main list, in stable order. */
   channels: Source[];
-  /** Activity without decoded content (noise, data, control, unidentified), by frequency. */
+  /** Activity without decoded content (noise, data, control, unidentified), strongest recent signal first. */
   other: Source[];
   muted: Source[];
 }
@@ -118,28 +174,51 @@ export function isListed(s: Source, followed: ReadonlySet<string>, talking: Read
   return followed.has(s.id) || (!s.control && (s.heardVoice || talking.has(s.id)));
 }
 
+/** The sources that belong in the main list: not muted, and followed or heard. */
+export function listedSources(
+  sources: Source[],
+  talking: ReadonlyMap<string, number>,
+  followed: ReadonlySet<string>,
+  muted: ReadonlySet<string>,
+): Source[] {
+  return sources.filter((s) => !muted.has(s.id) && isListed(s, followed, talking));
+}
+
 export function groupSources(
   sources: Source[],
   talking: ReadonlyMap<string, number>,
   order: string[],
   followed: ReadonlySet<string>,
   muted: ReadonlySet<string>,
+  otherOrder: string[] = [],
 ): CalmGroups {
   const byId = new Map(sources.map((s) => [s.id, s]));
   const audible = sources.filter((s) => !muted.has(s.id));
   const talkingNow = audible
     .filter((s) => talking.has(s.id))
     .sort((a, b) => talking.get(a.id)! - talking.get(b.id)! || a.id.localeCompare(b.id));
-  const listed = new Set(audible.filter((s) => isListed(s, followed, talking)).map((s) => s.id));
+  const listed = new Set(listedSources(sources, talking, followed, muted).map((s) => s.id));
   return {
     talking: talkingNow.slice(0, TALKING_SHOWN),
     moreTalking: Math.max(0, talkingNow.length - TALKING_SHOWN),
     channels: order.filter((id) => listed.has(id)).map((id) => byId.get(id)!),
-    other: audible
-      .filter((s) => !listed.has(s.id))
-      .sort((a, b) => (a.frequencyHz ?? 0) - (b.frequencyHz ?? 0) || a.id.localeCompare(b.id)),
+    other: sortedBy(
+      audible.filter((s) => !listed.has(s.id)),
+      otherOrder,
+    ),
     muted: sources.filter((s) => muted.has(s.id)).sort((a, b) => a.name.localeCompare(b.name)),
   };
+}
+
+/** In the given order; anything not in it goes last, by frequency. */
+function sortedBy(sources: Source[], order: string[]): Source[] {
+  const at = new Map(order.map((id, i) => [id, i]));
+  return [...sources].sort(
+    (a, b) =>
+      (at.get(a.id) ?? Infinity) - (at.get(b.id) ?? Infinity) ||
+      (a.frequencyHz ?? 0) - (b.frequencyHz ?? 0) ||
+      a.id.localeCompare(b.id),
+  );
 }
 
 /** Coarse "last heard" for the quiet list: minutes, not seconds, so it doesn't tick. */

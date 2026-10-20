@@ -67,23 +67,23 @@ function listenableFor(
   options: SourceOptions,
 ): Listenable {
   if (encryption === "encrypted")
-    return { ok: false, reason: "Encrypted. Can't be heard." };
+    return { ok: false, reason: "Encrypted" };
   if (control)
-    return { ok: false, reason: "Data only. No voices." };
-  if (!channel) return { ok: false, reason: "Not on the air right now." };
+    return { ok: false, reason: "Data only" };
+  if (!channel) return { ok: false, reason: "Off the air" };
   if (channel.in_range === false)
-    return { ok: false, reason: "Out of range." };
+    return { ok: false, reason: "Out of range" };
   const mode = modeOf(channel.protocol);
   // An unidentified channel can still be listened to: the engine keeps it pinned and plays
   // whatever voice it identifies there.
   if (mode === "fm" && !options.fmAudio)
-    return { ok: false, reason: "Analog voice can't play yet." };
+    return { ok: false, reason: "Analog not supported yet" };
   return { ok: true };
 }
 
-/** Labels and catalog entries that say a channel is a trunking control channel. */
-function isControl(channel: EngineChannel, entry?: WireCatalogEntry): boolean {
-  return channel.label_kind === "control" || /control/i.test(entry?.traffic_kind ?? "");
+/** The engine's own label kind says a channel is a trunking control channel; free text never does. */
+function isControl(channel: EngineChannel): boolean {
+  return channel.label_kind === "control";
 }
 
 /** Strong evidence of a real transmission: decoded speech, never RF energy alone. */
@@ -126,7 +126,7 @@ function named(
     covered.find((c) => c.speech_active) ?? covered.find((c) => modeOf(c.protocol) !== "unknown") ?? covered[0];
   const mode = modeOf(primary.protocol) !== "unknown" ? modeOf(primary.protocol) : entry.mode;
   const encryption = entry.encryption;
-  const control = covered.some((c) => isControl(c, entry));
+  const control = covered.some(isControl);
   return {
     id,
     kind: entry.kind,
@@ -304,7 +304,7 @@ export function healthOf(status: EngineStatus | undefined, connected: boolean): 
     const detail =
       away >= LONG_OUTAGE_S
         ? `Offline for ${duration(away)}.${reason ? ` ${reason}` : ""}`
-        : (reason ?? "Usually back within a minute.");
+        : (reason ?? "Reconnecting.");
     return {
       state: "offline",
       reconnecting: true,
@@ -319,7 +319,7 @@ export function healthOf(status: EngineStatus | undefined, connected: boolean): 
   if (status.state === "error")
     return {
       state: "offline",
-      detail: "Lost the receiver feed. Usually back within a minute.",
+      detail: "Receiver feed lost.",
       raw: status.error ?? null,
     };
   return { state: "paused", detail: "Paused." };
