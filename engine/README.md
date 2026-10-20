@@ -129,3 +129,72 @@ Remaining acceptance: multi-target 100 ksps adjacent-channel rejection and live
 producer-to-host binary audio; source stop ACK and actual RF/FIR/clock restoration
 with the host connected; sustained idle/noise behavior; frontend capability and
 waterfall checks. ARM throughput and the FPGA build remain producer work.
+
+## Frontend needs
+
+The new web UI (`web/`, design in `web/DESIGN.md`) is typed against the
+endpoints above, treating producer-derived fields as nullable. It also needs
+the endpoints below. Until the engine serves them, live mode falls back in the
+browser (frequency names, a session-only call log without audio, activity
+since the page opened) and `?demo` runs everything on a typed mock
+(`web/src/backend/mock.ts`). Wire types are in `web/src/api/needs.ts`; the
+operator view lists which of these the engine answers. A 404 means "not built
+yet", so each can land independently.
+
+1. **Per-client listening.** `/api/monitor` selects one channel for every
+   browser, so two people in the house can't listen to different channels.
+   Accept `WS /api/listen?channel_id=…` and keep a decoder for each channel
+   that has a listener; keep `/api/monitor` for compatibility. The UI already
+   detects a takeover via the heartbeat's `channel_id` and offers "Switch back".
+2. **Analog FM audio.** Monitoring an FM or `Unknown` channel returns 422 and
+   there's no FM audio path. Conventional analog FM is in scope (450–470 MHz).
+   Report `protocol: "FM"` for confirmed analog voice and send its audio on
+   the same listen socket.
+3. **Recent calls with audio (lookback).**
+   - `GET /api/calls?before=<unix s>&limit=<n>&source=<id>` →
+     `{calls: [{id, source_id, channel_id, started_at, ended_at|null,
+     encrypted, audio_url|null, talker|null, transcript|null}], next_before}`,
+     newest first.
+   - `GET <audio_url>` → `audio/ogg; codecs=opus` (or WAV), seekable.
+   - `{type:"call", call}` on `/api/events` when a call starts and ends.
+   - `talker` is for trunking (radio ID) and `transcript` for later STT; both
+     null for now. Retention can be time- or size-bounded; say which in the
+     response.
+4. **Source catalog with labels.**
+   - `GET /api/catalog` → `{sources: [{id, kind: "channel"|"talkgroup",
+     channel_ids, frequency_hz, slot, system: {id, name}|null,
+     talkgroup_id|null, name, description, probable_user, traffic_kind,
+     mode: "fm"|"dmr"|"nxdn"|"p25"|"unknown",
+     encryption: "clear"|"encrypted"|"mixed"|"unknown"}]}`.
+   - `PUT /api/catalog/{id}` with the same object saves a label (household
+     members can name channels from the UI). Persist it across restarts.
+   - Seed from `docs/rf-environment-seattle.md` on the `rf-research` branch,
+     keyed by measured frequency. Trunked talkgroups use
+     `kind: "talkgroup"` with `system` and `talkgroup_id`.
+5. **Activity history (busy vs normal).**
+   `GET /api/activity?window_s=86400&bucket_s=300` →
+   `{bucket_s, start, block: [talk_s…], sources: {source_id: [talk_s…]},
+   baseline: [talk_s…]|null}`, where `baseline` is the typical talk time for
+   the same weekday and hour (null until learned). The home screen compares
+   the last 15 minutes against it.
+6. **Compact spectrum rows.** `GET /api/spectrum.bin?after=N`
+   (`application/octet-stream`, optionally pushed on `WS /api/spectrum`), RSP1,
+   little-endian: `"RSP1"`, u16 bins, u16 rows, f64 center_hz, f64 span_hz,
+   f32 low_db, f32 high_db, then per row u64 sequence, f64 time_s and
+   `bins` × u8 levels scaled between low_db and high_db. A 1024-bin row is
+   1,040 bytes instead of about 8 KB of JSON. Pick low/high from the data:
+   today's JSON reports a fixed −125/−65 window while real dBFS rows sit at
+   about −60 to −15, so the UI quantizes JSON over −150…+10 and auto-levels.
+   Keep at least 60 s of rows (the engine keeps 120 rows today).
+7. **Listening areas (blocks).** `GET /api/blocks` →
+   `{current_id, blocks: [{id, name, description, center_hz, span_hz}]}` and
+   `POST /api/blocks/current {id}`, which applies through the same
+   acknowledged control path as `POST /api/source`. Names are plain
+   ("Downtown business radio").
+8. **Push alerts (later).** Alerts work while the page is open. Alerts with
+   the phone locked or the app closed need Web Push: `GET /api/push/key`
+   (VAPID public key) and `POST /api/push/subscribe {subscription, rules}`.
+
+Dev feeder: `web/dev/fixture_feed.py` sends the DMR fixture plus PSD rows
+measured from the 6 Msps recording it was cut from, so the waterfall shows
+real recorded RF. It is a development tool, not a data path.
