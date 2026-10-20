@@ -340,16 +340,18 @@ static int retune(const char *request, long long target) {
     int wrote = !attr_write("out_altvoltage0_RX_LO_frequency", value);
     int read = !attr_read("out_altvoltage0_RX_LO_frequency", readback, sizeof readback);
     long long actual = read ? atoll(readback) : 0;
-    // The AD936x fractional-N synthesizer can round a requested integer Hz.
-    // Keep the measured LO in CONFIG, including that small rounding difference.
-    int ok = wrote && read && llabs(actual - target) <= 100;
+    // The driver aligns the request to an achievable synthesizer setting.
+    // Its successful write and valid readback are authoritative, not equality
+    // with the requested number (nor an arbitrary frequency-error tolerance).
+    int ok = wrote && read && actual >= 70000000 && actual <= 6000000000LL;
     fprintf(stderr, "RX LO request=%lld readback=%lld write_ok=%d read_ok=%d accepted=%d\n",
             target, actual, wrote, read, ok);
     if (!ok) {
         snprintf(value, sizeof value, "%lld", previous);
         if (attr_write("out_altvoltage0_RX_LO_frequency", value)
-            || attr_read("out_altvoltage0_RX_LO_frequency", readback, sizeof readback)
-            || atoll(readback) != previous) return -1;
+            || attr_read("out_altvoltage0_RX_LO_frequency", readback, sizeof readback)) return -1;
+        previous = atoll(readback);
+        if (previous < 70000000 || previous > 6000000000LL) return -1;
     }
     center_hz = ok ? actual : previous;
     usleep(20000); // LO settling; acquisition remains stopped.

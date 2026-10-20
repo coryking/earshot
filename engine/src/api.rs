@@ -460,7 +460,8 @@ async fn configure_source(State(app): State<App>, Json(config): Json<Value>) -> 
             "Invalid receive rate, bandwidth or frequency",
         ));
     }
-    let reading = (center as f64 * (1. + app.calibration.ppm * 1e-6)).round() as u64;
+    let reading = ((center as f64 * (1. + app.calibration.ppm * 1e-6)).round() as u64)
+        .clamp(70_000_000, 6_000_000_000);
     source_request(&app,json!({"action":"configure","input_center_hz":reading,"input_rate_hz":rate,"input_bandwidth_hz":bandwidth})).await
 }
 #[derive(Deserialize)]
