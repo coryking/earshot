@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, type ReactNode } from "react";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import type { EngineChannel, EngineStatus } from "@/api/engine";
-import type { WireActivity, WireCall, WireCatalogEntry } from "@/api/needs";
+import { catalogSchema, type WireActivity, type WireCall, type WireCatalogEntry } from "@/api/needs";
 import type { Backend } from "@/backend/types";
 import { healthOf, toSources } from "@/domain/adapt";
 import type { Activity, Block, Call, Source } from "@/domain/model";
@@ -78,7 +78,9 @@ function recordTransition(previous: EngineChannel | undefined, next: EngineChann
 }
 
 const LOCAL_CATALOG = "radio.catalog.local.v1";
-export const localCatalog = createStore<WireCatalogEntry[]>(local.read(LOCAL_CATALOG, []));
+export const localCatalog = createStore<WireCatalogEntry[]>(
+  local.read(LOCAL_CATALOG, catalogSchema.shape.sources, []),
+);
 localCatalog.subscribe(() => local.write(LOCAL_CATALOG, localCatalog.get()));
 
 // ---------------------------------------------------------------------------
@@ -307,8 +309,10 @@ export function useBlocks(): { blocks: Block[]; current: Block | null; canChange
       }));
       return { blocks, current: blocks.find((b) => b.id === query.data?.current_id) ?? null, canChange: true };
     }
-    const center = status.data?.center_hz ?? null;
-    const span = status.data?.bandwidth_hz ?? status.data?.rate_hz ?? null;
+    // The engine reports 0 (newer builds) or null (older) before the first CONFIG.
+    const known = (v: number | null | undefined) => (v ? v : null);
+    const center = known(status.data?.center_hz);
+    const span = known(status.data?.bandwidth_hz) ?? known(status.data?.rate_hz);
     if (center === null || span === null) return { blocks: [], current: null, canChange: false };
     const lowMHz = Math.floor((center - span / 2) / 1e6);
     const highMHz = Math.ceil((center + span / 2) / 1e6);

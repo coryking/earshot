@@ -1,4 +1,5 @@
 /** Per-device listener preferences. Follow/mute are personal, so they stay on the device. */
+import { z } from "zod";
 import { createStore, local, useStore } from "@/lib/store";
 
 export type ThemeChoice = "dark" | "light" | "system";
@@ -22,7 +23,18 @@ const defaults: Prefs = {
   volume: 0.8,
 };
 
-export const prefsStore = createStore<Prefs>({ ...defaults, ...local.read<Partial<Prefs>>(KEY, {}) });
+const ids = z.array(z.string());
+/** Each field falls back on its own, so one bad value doesn't reset the rest. */
+const prefsSchema = z.object({
+  followed: ids.catch(defaults.followed),
+  muted: ids.catch(defaults.muted),
+  alertFollowed: z.boolean().catch(defaults.alertFollowed),
+  alertBusy: z.boolean().catch(defaults.alertBusy),
+  theme: z.enum(["dark", "light", "system"]).catch(defaults.theme),
+  volume: z.number().min(0).max(1).catch(defaults.volume),
+});
+
+export const prefsStore = createStore<Prefs>(local.read(KEY, prefsSchema, defaults));
 prefsStore.subscribe(() => local.write(KEY, prefsStore.get()));
 
 export function usePrefs() {

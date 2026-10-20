@@ -11,6 +11,12 @@ import { z } from "zod";
 import { decodeRsp1, fromJson } from "./spectrum";
 import { BackendError, type Backend, type CallQuery, type ListenHandlers, type Need } from "./types";
 
+/** /api/stop: `status` is a string when stopped locally, an object from the producer's readback otherwise. */
+const stopSchema = z.looseObject({
+  device_control: z.string().nullish().catch(null),
+  status: z.string().nullish().catch(null),
+});
+
 function wsUrl(path: string) {
   return `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${path}`;
 }
@@ -147,8 +153,9 @@ export class HttpBackend implements Backend {
 
   async stopReceiver() {
     const response = await request("/api/stop", { method: "POST", body: "{}" });
-    const body = (await response.json()) as { device_control?: string; status?: string };
-    return body.device_control ?? `Receiver ${body.status ?? "stopped"}.`;
+    const body = stopSchema.safeParse(await response.json().catch(() => ({})));
+    const data = body.success ? body.data : { device_control: null, status: null };
+    return data.device_control ?? `Receiver ${data.status ?? "stopped"}.`;
   }
 
   async configureSource(config: { centerHz: number; rateHz: number; bandwidthHz: number }) {
