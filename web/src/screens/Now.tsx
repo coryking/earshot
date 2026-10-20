@@ -239,7 +239,7 @@ function AreaTitle({ busy, reserve }: { busy: string | null; reserve: boolean })
 
 export function NowScreen({ showStrip }: { showStrip: boolean }) {
   const { view, callsBySource, followed, listen, busy, hasBaseline } = useHome();
-  const activeSourceId = usePlayerSelect((s) => (s.kind === "live" ? s.sourceId : null));
+  const activeSourceId = usePlayerSelect((s) => (s.kind === "live" && s.phase !== "taken" && s.phase !== "error" ? s.sourceId : null));
   // The playing source is marked wherever it sits in the list, Other activity included.
   const stripMarks = useMemo(
     () => view.all.filter((s) => view.talking.has(s.id) || s.id === activeSourceId),
@@ -252,6 +252,7 @@ export function NowScreen({ showStrip }: { showStrip: boolean }) {
       {showStrip && (
         <div className="px-4 pb-3">
           <Waterfall variant="strip" sources={stripMarks} talking={view.talking} activeSourceId={activeSourceId} />
+          <p className="mt-1 text-xs text-muted-foreground">Amber: recent activity · Blue: held channel. Only the held channel feeds the speaker.</p>
         </div>
       )}
       <TalkingNow groups={view.groups} labels={view.labels} followed={followed} now={view.now} onListen={listen} />

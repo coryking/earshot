@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { engineChannelSchema, type AudioDescriptor } from "@/api/engine";
 import { BackendError, type Backend, type ListenHandlers } from "@/backend/types";
 import type { Call, Source } from "@/domain/model";
-import { Player } from "./player";
+import { isAudible, Player } from "./player";
 
 function source(id: string, channel = `${id}-DMR-1`): Source {
   return {
@@ -170,6 +170,41 @@ describe("Player live listening", () => {
     await player.listen(source("a"));
     f.socket().onAudio(audio("other-DMR-1"), new Int16Array([1, 2]));
     expect(player.state.get().phase).toBe("waiting");
+  });
+
+  it("mutes only speaker output and unmute restores a zeroed volume without changing the held channel", async () => {
+    const f = fakeBackend();
+    const player = new Player(f.backend);
+    await player.listen(source("a"));
+    f.socket().onAudio(audio("a-DMR-1"), new Int16Array([1, 2]));
+    player.setVolume(0.35);
+    expect(isAudible(player.state.get())).toBe(true);
+    player.toggleMute();
+    expect(isAudible(player.state.get())).toBe(false);
+    expect(player.state.get()).toMatchObject({ kind: "live", phase: "playing", volume: 0.35, muted: true });
+    player.toggleMute();
+    expect(isAudible(player.state.get())).toBe(true);
+    player.setVolume(0);
+    expect(isAudible(player.state.get())).toBe(false);
+    player.toggleMute();
+    expect(player.state.get()).toMatchObject({ volume: 0.35, muted: false });
+    expect(f.monitor.mock.calls).toEqual([["a-DMR-1"]]);
+    await player.stop();
+  });
+
+  it("does not let socket audio hide a selection error", async () => {
+    const f = fakeBackend();
+    const player = new Player(f.backend);
+    await player.listen(source("a"));
+    f.socket().onHeartbeat("b-DMR-1");
+    vi.advanceTimersByTime(1600);
+    f.socket().onHeartbeat("b-DMR-1");
+    f.monitor.mockRejectedValueOnce(new BackendError("Receiver unavailable", 503));
+    await player.reclaim();
+    f.socket().onAudio(audio("a-DMR-1"), new Int16Array([1, 2]));
+    expect(player.state.get()).toMatchObject({ phase: "error", error: "Receiver unavailable" });
+    expect(isAudible(player.state.get())).toBe(false);
+    await player.stop();
   });
 
   it("doesn't clear anyone's selection after its own request failed", async () => {
@@ -341,16 +376,38 @@ describe("Player recorded calls", () => {
     transcript: null,
   });
 
-  it("stopping a call doesn't surface as an error, and the queue advances", () => {
+  it("stopping a call doesn't surface as an error, and the queue advances", async () => {
     const f = fakeBackend();
     const player = new Player(f.backend);
     player.playCall(call("1"), "A", [call("2")], () => "A");
     const element = (player as unknown as { callElement: HTMLAudioElement }).callElement;
     element.dispatchEvent(new Event("ended"));
+    await settle();
     expect(player.state.get()).toMatchObject({ kind: "call", callId: "2", phase: "playing",
       frequencyHz: 452675000, mode: "dmr", slot: 2 });
     void player.stop();
     element.dispatchEvent(new Event("error"));
     expect(player.state.get()).toMatchObject({ kind: "idle", phase: "idle" });
+  });
+
+  it("waits for recording playback to start and reflects buffering", async () => {
+    const f = fakeBackend();
+    const player = new Player(f.backend);
+    let start!: () => void;
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementationOnce(() => new Promise<void>((resolve) => { start = resolve; }));
+    player.playCall(call("1"), "A");
+    expect(player.state.get().phase).toBe("starting");
+    expect(isAudible(player.state.get())).toBe(false);
+    start();
+    await settle();
+    expect(isAudible(player.state.get())).toBe(true);
+    const element = (player as unknown as { callElement: HTMLAudioElement }).callElement;
+    element.dispatchEvent(new Event("waiting"));
+    expect(player.state.get().phase).toBe("waiting");
+    expect(isAudible(player.state.get())).toBe(false);
+    element.dispatchEvent(new Event("playing"));
+    expect(isAudible(player.state.get())).toBe(true);
+    await player.stop();
+    play.mockRestore();
   });
 });

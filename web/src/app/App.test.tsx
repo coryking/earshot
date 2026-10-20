@@ -32,7 +32,7 @@ describe("Now", { timeout: 40_000 }, () => {
     setup();
     await rowsReady();
     expect(screen.getByRole("heading", { level: 1, name: /Downtown business radio/ })).toBeInTheDocument();
-    const talking = screen.getByRole("list", { name: "Talking now" });
+    const talking = screen.getByRole("list", { name: "Recent activity" });
     expect(within(talking).getAllByRole("listitem")).toHaveLength(2);
     expect(screen.getByText(/than usual$|^About normal$/)).toBeInTheDocument();
     expect(screen.queryByText(/Still learning|Quiet right now/)).not.toBeInTheDocument();
@@ -61,7 +61,7 @@ describe("Now", { timeout: 40_000 }, () => {
     expect(monitor).toHaveBeenCalledWith("452685504-DMR-1");
     const player = await screen.findByRole("region", { name: "Player" });
     expect(player).toHaveTextContent("Downtown ambassadors");
-    await user.click(within(player).getByRole("button", { name: "Stop" }));
+    await user.click(within(player).getByRole("button", { name: "Stop listening" }));
     await waitFor(() => expect(monitor).toHaveBeenLastCalledWith(null));
     expect(screen.queryByRole("region", { name: "Player" })).not.toBeInTheDocument();
   });

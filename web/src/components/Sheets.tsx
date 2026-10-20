@@ -1,18 +1,18 @@
 import { ChannelIdentity } from "@/components/ChannelIdentity";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { BellRing, ChevronRight, Lock, Pause, Play, Star, VolumeX } from "lucide-react";
+import { BellRing, ChevronRight, EyeOff, Lock, Pause, Play, Star } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import type { WireCatalogEntry } from "@/api/needs";
 import { usePlayer, usePlayerInstance, usePlayerSelect } from "@/app/player-context";
 import { navigate, openSheet, sheetStore, useNow, useSheet } from "@/app/ui";
 import { LevelMeter } from "@/components/bits";
-import { playerLine } from "@/components/PlayerBar";
+import { playerLine, SpeakerControls } from "@/components/PlayerBar";
+import { isAudible } from "@/audio/player";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from "@/components/ui/drawer";
 import { Input } from "@/components/ui/input";
-import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { formatMHz } from "@/domain/adapt";
 import type { Call, Source } from "@/domain/model";
@@ -176,7 +176,7 @@ function SourceSheet({ id }: { id: string | null }) {
         {source.listenable.ok || source.listenable.reason === "Out of range" ? (
           <Button size="lg" className="h-12 gap-2" onClick={() => playing ? void player.stop() : void player.listen(source)}>
             {playing ? <Pause className="size-4" /> : <Play className="size-4 fill-current" />}
-            {playing ? "Stop audio" : "Tune and listen"}
+            {playing ? "Stop listening" : "Tune and listen"}
           </Button>
         ) : (
           <p className="w-full rounded-lg bg-secondary p-3 text-sm text-secondary-foreground">
@@ -201,10 +201,12 @@ function SourceSheet({ id }: { id: string | null }) {
           onClick={() => prefs.toggleMute(source.id)}
           aria-pressed={isMuted}
         >
-          <VolumeX className="size-4" />
-          {isMuted ? "Muted" : "Mute"}
+          <EyeOff className="size-4" />
+          {isMuted ? "Show channel" : "Hide channel"}
         </Button>
       </div>
+      <p className="mt-3 text-sm text-muted-foreground">Hide channel removes it from activity and Catch up on this device, and turns off Follow. Speaker audio is controlled in the player.</p>
+      {playing && <p className="mt-3 text-sm text-muted-foreground">{playerLine(state, null)}</p>}
 
       <dl className="mt-4 divide-y divide-border/60">
         {source.description && source.description !== source.summary && <Fact label="About">{source.description}</Fact>}
@@ -438,31 +440,17 @@ function PlayerSheet({ open }: { open: boolean }) {
   return (
     <Sheet open={open && state.kind !== "idle"} title={<ChannelIdentity name={state.sourceName} frequencyHz={state.frequencyHz} mode={state.mode} slot={state.slot} />} description={source?.summary}>
       <div className="flex items-center gap-4 rounded-2xl bg-secondary/60 p-4">
-        <LevelMeter active={state.phase === "playing"} className="h-8 [&>span]:w-1.5" />
+        <LevelMeter active={isAudible(state)} className="h-8 [&>span]:w-1.5" />
         <p aria-live="polite" className="text-heading">
           {playerLine(state, taken)}
         </p>
       </div>
-      <div className="mt-5">
-        <label htmlFor="volume" className="text-sm text-muted-foreground">
-          Volume
-        </label>
-        <Slider
-          id="volume"
-          className="mt-3"
-          value={[state.muted ? 0 : state.volume]}
-          max={1}
-          step={0.05}
-          onValueChange={([v]) => player.setVolume(v)}
-          aria-label="Volume"
-        />
-      </div>
+      <div className="mt-5"><SpeakerControls id="sheet-speaker-volume" /></div>
+      {state.kind === "live" && <p className="mt-3 text-sm text-muted-foreground">{state.phase === "taken" ? "Another browser selected a different channel. Switch back to hold this channel again." : state.phase === "error" ? "Select the channel again to retry listening." : state.phase === "starting" ? "Selecting this frequency and slot." : "Audio stays on this frequency and slot until you switch or stop."} Mute speaker keeps listening armed. Stop listening releases it; the receiver continues monitoring.</p>}
       <div className="mt-6 flex flex-wrap gap-2">
+        {state.phase === "taken" && <Button variant="secondary" size="lg" className="h-12" onClick={() => void player.reclaim()}>Switch back</Button>}
         <Button size="lg" className="h-12" onClick={() => void player.stop()}>
-          Stop
-        </Button>
-        <Button variant="outline" size="lg" className="h-12" onClick={() => player.toggleMute()} aria-pressed={state.muted}>
-          {state.muted ? "Unmute" : "Mute"}
+          {state.kind === "call" ? "Stop playback" : "Stop listening"}
         </Button>
         {source && (
           <Button variant="outline" size="lg" className="h-12 gap-2" onClick={() => prefs.toggleFollow(source.id)}>

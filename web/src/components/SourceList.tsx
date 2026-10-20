@@ -4,7 +4,7 @@ import { playerLine } from "@/components/PlayerBar";
 import { usePlayerSelect } from "@/app/player-context";
 import { openSheet } from "@/app/ui";
 import { ChannelIdentity } from "@/components/ChannelIdentity";
-import { CallLane, LevelMeter } from "@/components/bits";
+import { CallLane } from "@/components/bits";
 import { heardAgo, MAX_BARS, type CalmGroups } from "@/domain/calm";
 import type { Call, Source } from "@/domain/model";
 import { cn } from "@/lib/utils";
@@ -58,12 +58,12 @@ function Bars({ level }: { level: number }) {
  * on the right. There is no long-press or tap-for-info on the main target.
  */
 const SourceRow = memo(function SourceRow({ source, variant, talking, followed, calls, bars, now, onListen }: RowProps) {
-  const playing = usePlayerSelect((s) => s.kind === "live" && s.sourceId === source.id);
+  const held = usePlayerSelect((s) => s.kind === "live" && s.sourceId === source.id && s.phase !== "taken" && s.phase !== "error");
   const isPrivate = source.encryption === "encrypted";
   const right = talking ? (
-    <span className="flex shrink-0 items-center gap-2 text-lamp">
-      {isPrivate ? <Lock className="size-3.5" aria-hidden /> : <LevelMeter active />}
-      <span className="sr-only">{isPrivate ? "Private call" : "Talking"}</span>
+    <span className="flex shrink-0 items-center gap-1.5 text-xs text-lamp">
+      {isPrivate ? <Lock className="size-3.5" aria-hidden /> : <span className="size-1.5 rounded-full bg-lamp" aria-hidden />}
+      <span>{isPrivate ? "Encrypted" : "Recent voice"}</span>
     </span>
   ) : variant === "row" ? (
     <span className="tabular flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
@@ -84,12 +84,12 @@ const SourceRow = memo(function SourceRow({ source, variant, talking, followed, 
       className={cn(
         "relative flex items-stretch",
         variant === "card" && "overflow-hidden rounded-xl border border-lamp/35 bg-card",
-        playing && (variant === "card" ? "border-signal" : "bg-secondary/60"),
+        held && (variant === "card" ? "border-signal" : "bg-secondary/60"),
       )}
       data-source-id={source.id}
       data-talking={talking || undefined}
     >
-      {playing && <span className="absolute inset-y-2 left-0 w-1 rounded-r bg-signal" aria-hidden />}
+      {held && <span className="absolute inset-y-2 left-0 w-1 rounded-r bg-signal" aria-hidden />}
       <button
         type="button"
         data-source-row
@@ -98,6 +98,7 @@ const SourceRow = memo(function SourceRow({ source, variant, talking, followed, 
           variant === "quiet" ? "py-2" : "py-3",
         )}
         onClick={() => onListen(source.id)}
+        aria-pressed={held}
       >
         <span className="sr-only">{"Tune to"}</span>{" "}
         <span className="flex min-w-0 items-center gap-2">
@@ -202,16 +203,17 @@ export const TalkingNow = memo(function TalkingNow({
         id="talking-now-title"
         className="flex h-6 items-center justify-between text-sm font-semibold text-muted-foreground"
       >
-        Talking now
+        Recent activity
         {groups.moreTalking > 0 && <span className="tabular font-normal">+{groups.moreTalking}</span>}
       </h2>
+      <p className="pb-2 text-xs text-muted-foreground">Amber marks recent activity. Only the held channel feeds the speaker.</p>
       <div className="min-h-[4.25rem]">
         {groups.talking.length === 0 && !shown.length ? (
           <p className="calm-fade flex min-h-[4.25rem] items-center rounded-xl border border-dashed border-border px-4 text-sm text-muted-foreground">
-            Nobody
+            No recent voice activity
           </p>
         ) : (
-          <ul aria-label="Talking now" className="flex flex-col">
+          <ul aria-label="Recent activity" className="flex flex-col">
             {shown.map(({ item, leaving }) => (
               <li key={item.id} className={cn("calm-presence grid", leaving && "calm-leaving")} inert={leaving}>
                 <div className="min-h-0 overflow-hidden">
@@ -272,7 +274,7 @@ export const SourceList = memo(function SourceList({
       <h2 id="channels-title" className="flex h-8 items-center px-4 text-sm font-semibold text-muted-foreground">
         Channels
       </h2>
-      <p className="px-4 pb-2 text-xs text-muted-foreground">Select a channel to tune and hear live audio. Use Stop to finish.</p>
+      <p className="px-4 pb-2 text-xs text-muted-foreground">Select a channel to hold its frequency and slot. Audio stays there until you switch or Stop listening; it does not scan through this list.</p>
       {groups.channels.length ? (
         <ul aria-label="Channels" className="divide-y divide-border/60" data-source-list>
           {groups.channels.map((s) => row(s, "row"))}
@@ -294,8 +296,8 @@ export const SourceList = memo(function SourceList({
         </Folded>
       )}
       {groups.muted.length > 0 && (
-        <Folded title={`Muted (${groups.muted.length})`} open={showMuted} onToggle={() => setShowMuted((v) => !v)}>
-          <ul aria-label="Muted channels" className="divide-y divide-border/40 opacity-70" data-source-list>
+        <Folded title={`Hidden channels (${groups.muted.length})`} open={showMuted} onToggle={() => setShowMuted((v) => !v)}>
+          <ul aria-label="Hidden channels" className="divide-y divide-border/40 opacity-70" data-source-list>
             {groups.muted.map((s) => row(s, "quiet"))}
           </ul>
         </Folded>

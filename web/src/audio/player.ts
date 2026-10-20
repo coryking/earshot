@@ -37,6 +37,11 @@ export interface PlayerState {
   background: boolean | null;
 }
 
+/** Audio is arriving/playing and this browser's speaker output is enabled. */
+export function isAudible(state: PlayerState): boolean {
+  return state.kind !== "idle" && state.phase === "playing" && !state.muted && state.volume > 0;
+}
+
 const idle = {
   kind: "idle",
   raw: false,
@@ -120,6 +125,7 @@ export class Player {
   private nameFor: ((sourceId: string) => string) | undefined;
   private lastSource: Source | null = null;
   private lastRaw = false;
+  private lastVolume = prefsStore.get().volume || 0.8;
   private blockName = "";
   private onVisible = () => {
     if (document.visibilityState === "visible" && this.state.get().kind === "live") this.resumeAudio();
@@ -233,13 +239,22 @@ export class Player {
   }
 
   setVolume(volume: number) {
+    if (!Number.isFinite(volume)) return;
+    volume = Math.max(0, Math.min(1, volume));
+    if (volume > 0) this.lastVolume = volume;
     this.patch({ volume, muted: volume === 0 });
     prefsStore.set((p) => ({ ...p, volume }));
     this.applyVolume();
   }
 
   toggleMute() {
-    this.patch({ muted: !this.state.get().muted });
+    const state = this.state.get();
+    if (state.muted || state.volume === 0) {
+      // Moving the slider to zero must still have a working Unmute action.
+      this.setVolume(state.volume || this.lastVolume);
+      return;
+    }
+    this.patch({ muted: true });
     this.applyVolume();
   }
 
@@ -391,7 +406,7 @@ export class Player {
         if (token !== this.connectionToken) return;
         this.lastMessage = performance.now();
         const s = this.state.get();
-        if (s.kind !== "live" || descriptor.channel_id !== s.channelId || s.phase === "taken") return;
+        if (s.kind !== "live" || descriptor.channel_id !== s.channelId || s.phase === "taken" || s.phase === "error" || pcm.length === 0) return;
         if (this.decoderGeneration !== descriptor.generation) {
           this.flush();
           this.decoderGeneration = descriptor.generation;
@@ -531,7 +546,7 @@ export class Player {
     this.patch({
       ...idle,
       kind: "call",
-      phase: "playing",
+      phase: "starting",
       sourceId: call.sourceId,
       sourceName,
       frequencyHz: call.frequencyHz ?? null,
@@ -543,7 +558,9 @@ export class Player {
     this.updateSession(sourceName, "Recorded call");
     const callId = call.id;
     try {
-      void Promise.resolve(element.play()).catch(() => {
+      void Promise.resolve(element.play()).then(() => {
+        if (this.state.get().callId === callId) this.patch({ phase: "playing" });
+      }).catch(() => {
         if (this.state.get().callId === callId) this.patch({ phase: "error", error: "Tap play again." });
       });
     } catch {
@@ -555,6 +572,12 @@ export class Player {
   private makeCallElement() {
     const element = new Audio();
     element.preload = "auto";
+    element.onplaying = () => {
+      if (this.state.get().kind === "call") this.patch({ phase: "playing" });
+    };
+    element.onwaiting = () => {
+      if (this.state.get().kind === "call") this.patch({ phase: "waiting" });
+    };
     element.ontimeupdate = () => {
       if (this.state.get().kind === "call") this.patch({ position: element.currentTime, duration: element.duration || 0 });
     };
