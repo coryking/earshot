@@ -90,10 +90,19 @@ the pinned stream, then streams the source actually forwards IQ for (CONFIG
 lower frequency. Metadata-only streams never take decoder budget, however RF-active
 their activity looks (`source.metadata_only_streams` counts them). A source that does
 not publish `iq_forwarded` is assumed to forward every stream it declares. Each stream has a
-four-packet input queue; overflow is counted and resets DSP and codec state on
+bounded input queue: four packets for the legacy 100 ms framing, up to sixteen
+for FPGA 10 ms framing (160 ms), accommodating DMA publication bursts without
+requiring a continuous arrival clock. Overflow is counted and resets DSP and codec state on
 the next accepted packet. Catalog entries survive silence, retuning, and source
 loss. `available`/`decoder_admitted` describe the bounded decode budget;
 `rf_active`, `decoded`, and `speech_active` remain separate.
+
+When the source explicitly reports `activity_calibrated: false`, raw activity
+does not rank decoder admission. A slice containing an operator-selected target
+decodes the selected targets only, so an uncalibrated coarse-bin probe cannot
+compete with their IQ processing. Other forwarded slices retain discovery, and
+multiple explicit listeners on one slice retain their own targets. Activity
+metadata and producer-measured spectrum remain visible independently of decoding.
 
 Confirmed protocols are cached; unused probes are dropped while the confirmed
 decoder keeps its state. RF-idle metadata suppresses audio immediately.
