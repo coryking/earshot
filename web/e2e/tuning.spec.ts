@@ -36,7 +36,7 @@ test("desktop unnamed signals tune inline and retain a raw capture after stoppin
   const entered = Number(await selection.getByRole("textbox", { name: "Frequency (MHz)" }).inputValue()) * 1e6;
   expect(Math.round(entered) % 6250).toBe(0);
   await expect(selection.getByRole("button", { name: "Save FM audio WAV" })).toBeEnabled();
-  await selection.getByRole("button", { name: "Stop audio" }).click();
+  await selection.getByRole("button", { name: "Stop listening" }).click();
   await expect(selection.getByRole("button", { name: "Save FM audio WAV" })).toBeEnabled();
 });
 
@@ -57,7 +57,7 @@ test("desktop dragging follows the pointer and stopped listening can resume", as
   await page.mouse.up();
   await expect(frequency).not.toHaveValue(first);
   await expect(selection).toContainText("Playing FM signal audio");
-  await selection.getByRole("button", { name: "Stop audio" }).click();
+  await selection.getByRole("button", { name: "Stop listening" }).click();
   await expect(selection).toContainText("Listening stopped");
   await expect(selection).toContainText("Audio will not start automatically");
   const stopped = await frequency.inputValue();

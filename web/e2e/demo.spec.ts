@@ -8,18 +8,18 @@ test.beforeEach(async ({ page }) => {
 
 test("home is titled by the area, pins who's talking, and plays with one tap", async ({ page }, info) => {
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(/Downtown business radio/);
-  const talking = page.getByRole("list", { name: "Talking now" });
+  const talking = page.getByRole("list", { name: "Recent activity" });
   await expect(talking.getByRole("listitem").first()).toBeVisible();
   await talking.getByRole("button", { name: /^Tune to / }).first().click();
   const player = page.getByRole("region", { name: "Player" });
-  await expect(player).toContainText("Playing live audio", { timeout: 10_000 });
+  await expect(player).toContainText("Playing live voice", { timeout: 10_000 });
   await expect(player).toContainText(/\d+\.\d+ MHz/);
   // Re-selecting a channel must never silently turn its audio off.
   await talking.getByRole("button", { name: /^Tune to / }).first().click();
   await expect(player).toBeVisible();
   await expect(page.getByRole("region", { name: "Live tuning" })).toContainText(/\d+\.\d+ MHz/);
   await page.screenshot({ path: info.outputPath(`home-${info.project.name}.png`) });
-  await player.getByRole("button", { name: "Stop" }).click();
+  await player.getByRole("button", { name: "Stop listening" }).click();
   await expect(player).toHaveCount(0);
 });
 
@@ -72,7 +72,7 @@ test("keyboard: move, listen, mute and stop", async ({ page, isMobile }) => {
   const player = page.getByRole("region", { name: "Player" });
   await expect(player).toBeVisible();
   await page.keyboard.press("m");
-  await expect(player.getByRole("button", { name: "Unmute", exact: true })).toBeVisible();
+  await expect(player.getByRole("button", { name: "Unmute speaker", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(player).toHaveCount(0);
   await page.keyboard.press("Control+k");

@@ -34,7 +34,11 @@
 6. **Change block.** Rare and deliberate, and offered only when there is more than one block to pick.
 7. **"Is it working?"** One plain status. **"What is this?"** A plain explanation of a source: probable user, kind of traffic, and why encrypted calls can't be heard.
 
-Selecting a channel tunes it and keeps it selected until Stop. Now also offers frequency entry and shows whether the selected channel is tuning, waiting for audio, playing audio, or muted. Gain, bandwidth and decoder settings remain operator-only. Every channel block includes its frequency; Catch up stays in its own tab.
+Selecting a channel holds listening on that frequency and slot through silence. It does not scan or switch to whichever channel becomes active. **Stop listening** releases the selection; **Mute speaker** silences this browser while keeping the channel held, alongside a visible volume control. **Start receiving / Stop receiving** in the header controls the receiver itself, with the observed state shown beside it. A stopped receiver stays stopped until explicitly started again. Gain, bandwidth and decoder settings remain operator-only. Every channel block includes its frequency; Catch up stays in its own tab.
+
+Recent activity across channels is separate from playback. Only the held channel feeds the speaker. Activity can remain visible briefly after voice ends; a DMR label or RF signal does not promise decodable voice. The player and selected row distinguish waiting, audible playback, speaker muted, reconnecting and errors.
+
+Manual tuning shows how much original I/Q is buffered, its sampled frequency range and the retention limit. Saving I/Q downloads a snapshot of a rolling receiver-server buffer. FM audio WAV is a separate browser buffer, with its own duration and limit.
 
 ## The waterfall
 

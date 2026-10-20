@@ -12,10 +12,10 @@ secondary detail or in the operator view.
 
 | Rank | Action | Where | Gesture |
 | --- | --- | --- | --- |
-| 1 | See what's happening now | **Now** tab (home). Titled by the listening area, then the live strip, a small **Talking now** area (at most three, "+N" beside its heading for more), and the channel list in a stable order. | Open the app. Pull to refresh is unnecessary because the list is live. |
-| 2 | Tap to listen | Any row or Talking now card, any call in Catch up, a marked trace in the desktop waterfall. The **player bar** docks above the tab bar with stop, mute and volume. | One tap on a row listens. Tapping the selected row again keeps it selected; Stop ends playback. The player bar's stop button is in thumb reach. Volume lives in the expanded player sheet (swipe the bar up). |
+| 1 | See what's happening now | **Now** tab (home). Titled by the listening area, then the live strip, a small **Recent activity** area (at most three, "+N" beside its heading for more), and the channel list in a stable order. | Open the app. Activity is separate from the speaker's playback state. |
+| 2 | Tap to listen | Any channel row or recent activity card, any call in Catch up, a marked trace in the desktop waterfall. The **player bar** docks above the tab bar with labeled controls. | One tap holds that channel and slot through silence. **Stop listening** releases it; **Mute speaker** keeps it held. Volume is visible beside mute. There is no automatic scanning. |
 | 3 | Catch up on what I missed | **Catch up** tab: recent calls newest first, grouped by "Just now / Earlier this hour / Today", each with a play button and duration. | Tap a call to play it. Playback continues down the list (autoplay next) like a podcast queue, so a listener can catch up hands-free. |
-| 4 | Follow or mute a source | Star and mute in the source sheet and the expanded player. Followed sources pin to the top of Now, like pinned chats; muted ones sink into a collapsed "Muted" group and never alert. Naming a source keeps its follow or mute. | Tap the row's ⓘ button to open the source sheet. The row itself only ever listens. |
+| 4 | Follow or hide a source | Star and **Hide activity** in the source sheet and expanded player. Followed sources pin to the top of Now; hidden ones move to a collapsed group and never alert. | Tap the row's ⓘ button for details. Hiding activity is separate from muting the speaker. |
 | 5 | Get alerted | Bell in the header opens the alerts sheet: "A channel I follow gets busy" (three or more calls within ten minutes) and "It's much busier than normal" (the area moves into busier-than-usual). Only activity since the page opened counts, with a 30-minute cooldown. In-page notifications today; closed-app push needs the engine. | Toggle switches. The bell turns amber when alerts are on. |
 | 6 | Change block | Tap the area name at the top ("Downtown business radio"). A sheet lists the blocks in plain terms and asks for confirmation. With only one block (today's live engine) the name is plain text, with no chevron and no sheet. | Deliberately two taps plus a confirm. Never a swipe. |
 | 7 | Is it working? / What is this? | The status dot next to the block name ("Receiving", "Paused", "Not connected"); tap it for a plain explanation. Each source sheet has "What is this?": probable user, kind of traffic, and, for encrypted sources, why you can't hear them. | Tap. |
@@ -24,6 +24,12 @@ Now includes frequency entry and the selected channel’s live status. Gain,
 bandwidth and decoder controls live in the **operator view** (`#/operator`), reached from the Radio tab's "Operator tools"
 row and the command palette. It is not hidden for security (the tailnet is the
 boundary); it's out of the way so a listener doesn't wander into it.
+
+The header also has **Start receiving / Stop receiving**. This changes the
+supervisor's desired receive state and waits for observed receiver status.
+Stop restores the receiver's settings and keeps reception off until Start,
+including across supervisor restarts. Errors and unavailable control are
+visible. Stopping reception is separate from this browser's listening selection.
 
 ## Mobile-first layout
 
@@ -157,8 +163,9 @@ A supporting view, as the spec says. Rendered entirely in the browser:
 - Source config (the CONFIG JSON as read back from the producer) and a form to
   set center/rate/bandwidth via `POST /api/source`, which reports 501 plainly
   when the producer can't do it.
-- Receiver stop (`POST /api/stop`) behind a confirm. This is the only place it
-  appears; the listener's stop button only clears the listener selection.
+- Receiver controls shared with the header (`POST /api/receiver`). Start and
+  stop wait for observed state; stop includes restoration readback. The
+  listener's **Stop listening** only clears its selection.
 - Channel table: id, stream, frequency, protocol, slot, rf/decoded/speech
   flags, level, last heard, admitted.
 - Catalog editor: name, description, probable user, traffic kind, encrypted.

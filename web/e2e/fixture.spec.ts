@@ -8,12 +8,12 @@ test.skip(!process.env.FIXTURE_ENGINE, "needs the engine binary and the private 
 test("real engine: the fixture's DMR call shows up and plays", async ({ page }, info) => {
   await page.goto("/");
   const row = page
-    .getByRole("list", { name: "Talking now" })
+    .getByRole("list", { name: "Recent activity" })
     .getByRole("button", { name: /^Tune to Columbia Tower shared radio/ });
   await expect(row).toBeVisible({ timeout: 30_000 });
   await row.click();
   const player = page.getByRole("region", { name: "Player" });
-  await expect(player).toContainText("Playing live audio", { timeout: 15_000 });
+  await expect(player).toContainText("Playing live voice", { timeout: 15_000 });
   await page.screenshot({ path: info.outputPath(`fixture-${info.project.name}.png`) });
   await expectAccessible(page, "live fixture");
 });
@@ -21,7 +21,7 @@ test("real engine: the fixture's DMR call shows up and plays", async ({ page }, 
 test("real engine: the call shows up in catch up", async ({ page }) => {
   await page.goto("/");
   await expect(
-    page.getByRole("list", { name: "Talking now" }).getByRole("button", { name: /^Tune to Columbia Tower shared radio/ }),
+    page.getByRole("list", { name: "Recent activity" }).getByRole("button", { name: /^Tune to Columbia Tower shared radio/ }),
   ).toBeVisible({ timeout: 30_000 });
   await page.goto("/#/catch-up");
   await expect(page.getByText("Columbia Tower shared radio").first()).toBeVisible({ timeout: 30_000 });
