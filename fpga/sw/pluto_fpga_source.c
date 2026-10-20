@@ -280,7 +280,7 @@ static int parse_word(uint64_t w) {
     return 0;
 }
 
-static int send_psd_activity(int all) {
+static int send_psd_activity(int activity_due) {
     float psd[BINS];
     for (unsigned m = 0; m < BINS; ++m) {           // low to high frequency
         unsigned k = (m + BINS / 2) % BINS;
@@ -288,9 +288,13 @@ static int send_psd_activity(int all) {
         psd[m] = 3.0103f * l / 256.0f - 96.33f - 39.13f;     // -10 log10(2^13 frames)
     }
     if (message(2, 0, 0, (uint64_t)chan[0x12], 2, 32, psd, sizeof psd)) return -1;
+    // The detector is not calibrated on live RF yet. A noisy window can mark
+    // nearly every bin active; sending 512 individual activity frames at the
+    // 10 Hz PSD cadence overwhelms the host with unchanged state. Keep the
+    // measured PSD at 10 Hz and report every bin's current activity at 1 Hz.
+    if (!activity_due) return 0;
     for (unsigned k = 0; k < BINS; ++k) {
         int active = chan[0x50 + k / 32] >> (k % 32) & 1;
-        if (!all && !active && !is_selected(k)) continue;
         uint32_t lv = chan[0x200 + k];
         char j[200];
         int n = snprintf(j, sizeof j, "{\"stream_id\":%u,\"rf_active\":%s,\"level_db\":%.2f,\"floor_db\":%.2f,"
@@ -404,7 +408,7 @@ int main(int argc, char **argv) {
     submit_next(); submit_next();
     if (send_config(NULL, 1, NULL, 1)) { result = 1; goto out; }
 
-    double t0 = now(), last_psd = 0, last_all = 0;
+    double t0 = now(), last_psd = 0, last_activity = 0;
     while (!interrupted && (seconds == 0 || now() - t0 < seconds)) {
         uint32_t b = completed % NBLOCKS;
         if (completed < submitted && (dma[0x10A] >> (ids[b] & 3) & 1)) {
@@ -416,9 +420,9 @@ int main(int argc, char **argv) {
         }
         double t = now();
         if (t - last_psd > 0.1) {
-            int all = t - last_all > 2.0;
-            if (send_psd_activity(all)) { result = 1; goto out; }
-            last_psd = t; if (all) last_all = t;
+            int activity_due = t - last_activity > 1.0;
+            if (send_psd_activity(activity_due)) { result = 1; goto out; }
+            last_psd = t; if (activity_due) last_activity = t;
         }
         int r = handle_control();
         if (r < 0) break;                 // client gone
