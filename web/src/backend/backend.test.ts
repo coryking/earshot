@@ -1,12 +1,39 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HttpBackend } from "./http";
-import { decodeRsp1, encodeRsp1, fromJson } from "./spectrum";
+import { RSP1_HEADER } from "@/api/needs";
+import type { SpectrumBatch } from "@/domain/model";
+import { decodeRsp1, fromJson } from "./spectrum";
+
+/** What the engine would send; kept here because only tests encode RSP1. */
+function encodeRsp1(batch: SpectrumBatch): ArrayBuffer {
+  const bins = batch.rows[0]?.bins.length ?? 0;
+  const stride = 16 + bins;
+  const buffer = new ArrayBuffer(RSP1_HEADER + batch.rows.length * stride);
+  const view = new DataView(buffer);
+  "RSP1".split("").forEach((c, i) => view.setUint8(i, c.charCodeAt(0)));
+  view.setUint16(4, bins, true);
+  view.setUint16(6, batch.rows.length, true);
+  view.setFloat64(8, batch.centerHz ?? 0, true);
+  view.setFloat64(16, batch.spanHz ?? 0, true);
+  view.setFloat32(24, batch.lowDb, true);
+  view.setFloat32(28, batch.highDb, true);
+  view.setBigUint64(32, BigInt(batch.sequence), true);
+  view.setUint32(40, batch.generation, true);
+  batch.rows.forEach((row, r) => {
+    const offset = RSP1_HEADER + r * stride;
+    view.setBigUint64(offset, BigInt(row.sequence), true);
+    view.setFloat64(offset + 8, row.time, true);
+    new Uint8Array(buffer, offset + 16, bins).set(row.bins);
+  });
+  return buffer;
+}
 import { BackendError } from "./types";
 
 describe("spectrum", () => {
   it("round-trips RSP1", () => {
     const bins = Uint8Array.from({ length: 1024 }, (_, i) => i % 256);
     const buffer = encodeRsp1({
+      generation: 3,
       centerHz: 454_216_998,
       spanHz: 6e6,
       lowDb: -150,
@@ -18,11 +45,20 @@ describe("spectrum", () => {
         { sequence: 7, time: 1.6, bins },
       ],
     });
-    expect(buffer.byteLength).toBe(32 + 2 * (16 + 1024));
+    expect(buffer.byteLength).toBe(48 + 2 * (16 + 1024));
     const batch = decodeRsp1(buffer)!;
     expect(batch.centerHz).toBe(454_216_998);
+    expect(batch.generation).toBe(3);
+    expect(batch.sequence).toBe(7);
     expect(batch.rows.map((r) => r.sequence)).toEqual([6, 7]);
     expect(Array.from(batch.rows[1].bins.slice(0, 4))).toEqual([0, 1, 2, 3]);
+  });
+
+  it("keeps the latest sequence when a batch has no rows", () => {
+    const empty = encodeRsp1({ generation: 1, centerHz: 1, spanHz: 1, lowDb: 0, highDb: 1, unit: "", sequence: 42, rows: [] });
+    const batch = decodeRsp1(empty)!;
+    expect(batch.rows).toEqual([]);
+    expect(batch.sequence).toBe(42);
   });
 
   it("rejects truncated RSP1", () => {

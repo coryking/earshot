@@ -24,8 +24,6 @@ class PcmPlayer extends AudioWorkletProcessor {
   private tail = 0;
   private readonly prime = Math.round(sampleRate * 0.06);
   private readonly ceiling = Math.round(sampleRate * 0.4);
-  private energy = 0;
-  private frames = 0;
 
   constructor() {
     super();
@@ -75,22 +73,12 @@ class PcmPlayer extends AudioWorkletProcessor {
         const v = this.ring[this.read];
         this.read = (this.read + 1) % this.ring.length;
         out[i] = v;
-        this.energy += v * v;
       } else {
-        if (this.primed) {
-          this.primed = false;
-          this.port.postMessage({ type: "underrun" });
-        }
+        this.primed = false;
         out[i] = 0;
       }
     }
     for (let c = 1; c < outputs[0].length; c++) outputs[0][c].set(out);
-    this.frames += out.length;
-    if (this.frames >= sampleRate / 10) {
-      this.port.postMessage({ type: "level", rms: Math.sqrt(this.energy / this.frames), buffered: this.buffered / sampleRate });
-      this.energy = 0;
-      this.frames = 0;
-    }
     return true;
   }
 }

@@ -4,6 +4,7 @@ import type { EngineChannel, EngineStatus } from "@/api/engine";
 import { catalogSchema, type WireActivity, type WireCall, type WireCatalogEntry } from "@/api/needs";
 import type { Backend } from "@/backend/types";
 import { healthOf, toSources } from "@/domain/adapt";
+import { STARTER_CATALOG } from "@/domain/starter";
 import type { Activity, Block, Call, Source } from "@/domain/model";
 import { createStore, local, useStore } from "@/lib/store";
 
@@ -28,8 +29,10 @@ export const keys = {
   supports: ["supports"] as const,
 };
 
-/** Live connection to /api/events; spectrum sequence for the waterfall to poll on. */
-export const connectionStore = createStore({ events: false, spectrumSequence: 0 });
+/** Whether /api/events is connected. */
+export const connectionStore = createStore({ events: false });
+/** Newest spectrum sequence announced on /api/events; only the waterfall feed listens. */
+export const spectrumAnnounce = createStore(0);
 
 // ---------------------------------------------------------------------------
 // Session fallbacks: used only while the engine lacks /api/calls, /api/activity
@@ -55,26 +58,33 @@ function recordTransition(previous: EngineChannel | undefined, next: EngineChann
     sessionCalls.set((calls) =>
       [{ id: `session-${next.id}-${now}`, channelId: next.id, startedAt: now, endedAt: null }, ...calls].slice(0, 500),
     );
-  } else if (was && !is) {
-    let started: number | null = null;
-    sessionCalls.set((calls) =>
-      calls.map((c) => {
-        if (c.channelId !== next.id || c.endedAt !== null) return c;
-        started = c.startedAt;
-        return { ...c, endedAt: now };
-      }),
-    );
-    if (started !== null) {
-      const begin: number = started;
-      sessionActivity.set((a) => {
-        const index = Math.floor((begin - a.start) / SESSION_BUCKET);
-        const series = [...(a.byChannel[next.id] ?? [])];
-        while (series.length <= index) series.push(0);
-        series[index] += (now - begin) / 1000;
-        return { ...a, byChannel: { ...a.byChannel, [next.id]: series } };
-      });
-    }
+    return;
   }
+  if (!was || is) return;
+  const open = sessionCalls.get().filter((c) => c.channelId === next.id && c.endedAt === null);
+  if (!open.length) return;
+  // Close every open call on this channel; only the newest counts as talk time.
+  const newest = open.reduce((a, b) => (a.startedAt > b.startedAt ? a : b));
+  sessionCalls.set((calls) =>
+    calls.map((c) =>
+      c.channelId === next.id && c.endedAt === null ? { ...c, endedAt: c === newest ? now : c.startedAt } : c,
+    ),
+  );
+  sessionActivity.set((a) => {
+    const index = Math.floor((newest.startedAt - a.start) / SESSION_BUCKET);
+    if (index < 0) return a;
+    const series = [...(a.byChannel[next.id] ?? [])];
+    while (series.length <= index) series.push(0);
+    series[index] += (now - newest.startedAt) / 1000;
+    return { ...a, byChannel: { ...a.byChannel, [next.id]: series } };
+  });
+}
+
+/** Which source owns each engine channel. */
+function channelOwners(sources: Source[]) {
+  const owner = new Map<string, string>();
+  sources.forEach((s) => s.channelIds.forEach((id) => owner.set(id, s.id)));
+  return owner;
 }
 
 const LOCAL_CATALOG = "radio.catalog.local.v1";
@@ -87,6 +97,8 @@ localCatalog.subscribe(() => local.write(LOCAL_CATALOG, localCatalog.get()));
 
 /** Apply a burst of channel events in one cache update (one render), newest wins. */
 function applyChannels(client: QueryClient, updates: EngineChannel[]) {
+  // An in-flight snapshot may predate these events; drop it rather than let it land after them.
+  void client.cancelQueries({ queryKey: keys.status });
   client.setQueryData<EngineStatus>(keys.status, (status) => {
     if (!status) return status;
     const channels = [...status.channels];
@@ -124,6 +136,9 @@ export function RadioSync() {
       const now = Date.now();
       const next = new Map(status.channels.map((c) => [c.id, c]));
       for (const channel of status.channels) recordTransition(seen.get(channel.id), channel, now);
+      // A channel that vanished mid-call (engine restart) has stopped talking.
+      for (const [id, previous] of seen)
+        if (!next.has(id)) recordTransition(previous, { ...previous, speech_active: false }, now);
       seen = next;
     };
     diff();
@@ -134,6 +149,15 @@ export function RadioSync() {
   useEffect(() => {
     let pending: EngineChannel[] = [];
     let flush: ReturnType<typeof setTimeout> | undefined;
+    // Gaps can arrive in bursts (one per gap frame); refresh at most once a second.
+    let refresh: ReturnType<typeof setTimeout> | undefined;
+    const refreshSnapshot = () => {
+      refresh ??= setTimeout(() => {
+        refresh = undefined;
+        void client.invalidateQueries({ queryKey: keys.status });
+        void client.invalidateQueries({ queryKey: keys.blocks });
+      }, 1000);
+    };
     const connection = backend.events(
       (event) => {
         switch (event.type) {
@@ -149,26 +173,28 @@ export function RadioSync() {
             applyCall(client, event.call);
             break;
           case "spectrum_available":
-            connectionStore.set((c) => ({ ...c, spectrumSequence: event.sequence }));
+            spectrumAnnounce.set(event.sequence);
             break;
           case "source_config":
           case "source_state":
           case "source_gap":
           case "gap":
-            void client.invalidateQueries({ queryKey: keys.status });
-            void client.invalidateQueries({ queryKey: keys.blocks });
+            refreshSnapshot();
             break;
           case "heartbeat":
             break;
         }
       },
       (open) => {
-        connectionStore.set((c) => ({ ...c, events: open }));
-        if (open) void client.invalidateQueries({ queryKey: keys.status });
+        connectionStore.set({ events: open });
+        // Anything could have happened while disconnected.
+        if (open)
+          for (const key of [keys.status, keys.calls, keys.activity]) void client.invalidateQueries({ queryKey: key });
       },
     );
     return () => {
       clearTimeout(flush);
+      clearTimeout(refresh);
       connection.close();
     };
   }, [backend, client]);
@@ -185,18 +211,63 @@ export function useStatus() {
   });
 }
 
+/**
+ * Names, in priority order: the engine's catalog, labels saved on this device
+ * that the engine doesn't have, and (until the engine has a catalog) the
+ * starter names from the RF research. `onDevice` is true while labels can only
+ * be saved on this device.
+ */
 export function useCatalog() {
   const backend = useBackend();
   const query = useQuery({ queryKey: keys.catalog, queryFn: () => backend.catalog(), staleTime: 60_000 });
-  const fallback = useStore(localCatalog);
-  const engineHasCatalog = query.data !== null && query.data !== undefined;
-  return { entries: engineHasCatalog ? query.data! : fallback, onDevice: query.data === null };
+  const saved = useStore(localCatalog);
+  const engine = query.data ?? null;
+  const entries = useMemo(() => {
+    if (!engine) return [...saved, ...STARTER_CATALOG];
+    const known = new Set(engine.map((e) => e.id));
+    return [...engine, ...saved.filter((e) => !known.has(e.id))];
+  }, [engine, saved]);
+  return { entries, onDevice: query.data === null, engineEntries: engine };
+}
+
+/**
+ * Once the engine serves /api/catalog, upload labels that were saved on this
+ * device and forget the ones it accepted. Mount once.
+ */
+export function CatalogMigration() {
+  const backend = useBackend();
+  const client = useQueryClient();
+  const { engineEntries } = useCatalog();
+  const saved = useStore(localCatalog);
+  useEffect(() => {
+    if (!engineEntries || !saved.length) return;
+    let cancelled = false;
+    void (async () => {
+      const uploaded: string[] = [];
+      for (const entry of saved) {
+        try {
+          if (await backend.saveCatalogEntry(entry)) uploaded.push(entry.id);
+        } catch {
+          /* keep it on the device and try again next time */
+        }
+      }
+      if (cancelled || !uploaded.length) return;
+      localCatalog.set((list) => list.filter((e) => !uploaded.includes(e.id)));
+      void client.invalidateQueries({ queryKey: keys.catalog });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [backend, client, engineEntries, saved]);
+  return null;
 }
 
 export function useSources(): Source[] {
   const { data } = useStatus();
   const { entries } = useCatalog();
-  return useMemo(() => toSources(data?.channels ?? [], entries), [data?.channels, entries]);
+  const capabilities = data?.source?.capabilities as { fm_audio?: unknown } | undefined;
+  const fmAudio = capabilities?.fm_audio === true;
+  return useMemo(() => toSources(data?.channels ?? [], entries, { fmAudio }), [data?.channels, entries, fmAudio]);
 }
 
 export function useHealth() {
@@ -220,7 +291,7 @@ function toCall(call: WireCall, backend: Backend): Call {
 }
 
 /** Recent calls. `recorded` is false while calls come from this browser session only. */
-export function useCalls(): { calls: Call[]; recorded: boolean; loading: boolean } {
+export function useCalls(): { calls: Call[]; recorded: boolean; loading: boolean; failed: boolean } {
   const backend = useBackend();
   const sources = useSources();
   const query = useQuery({
@@ -230,9 +301,9 @@ export function useCalls(): { calls: Call[]; recorded: boolean; loading: boolean
   });
   const session = useStore(sessionCalls);
   return useMemo(() => {
-    if (query.data) return { calls: query.data.map((c) => toCall(c, backend)), recorded: true, loading: false };
-    const owner = new Map<string, string>();
-    sources.forEach((s) => s.channelIds.forEach((id) => owner.set(id, s.id)));
+    if (query.data)
+      return { calls: query.data.map((c) => toCall(c, backend)), recorded: true, loading: false, failed: false };
+    const owner = channelOwners(sources);
     return {
       calls: session.map((c) => ({
         id: c.id,
@@ -247,8 +318,10 @@ export function useCalls(): { calls: Call[]; recorded: boolean; loading: boolean
       })),
       recorded: false,
       loading: query.isLoading,
+      // The engine errored rather than answering "not built yet" (null).
+      failed: query.isError && query.data === undefined,
     };
-  }, [query.data, query.isLoading, session, sources, backend]);
+  }, [query.data, query.isLoading, query.isError, session, sources, backend]);
 }
 
 function toActivity(a: WireActivity): Activity {
@@ -273,8 +346,7 @@ export function useActivity(): { activity: Activity | null; learned: boolean } {
   const session = useStore(sessionActivity);
   return useMemo(() => {
     if (query.data) return { activity: toActivity(query.data), learned: true };
-    const owner = new Map<string, string>();
-    sources.forEach((s) => s.channelIds.forEach((id) => owner.set(id, s.id)));
+    const owner = channelOwners(sources);
     const bySource: Record<string, number[]> = {};
     const length = Math.max(1, Math.ceil((Date.now() - session.start) / SESSION_BUCKET));
     const block = new Array(length).fill(0);

@@ -2,16 +2,21 @@
  * Wire types for endpoints the frontend needs but the engine does not serve
  * yet. The contract is written up in engine/README.md § "Frontend needs" and on
  * issue #1. Until the engine answers them, live mode falls back to in-browser
- * equivalents (see backend/fallback.ts) and demo mode uses the mock.
+ * equivalents (the session fallbacks in state/radio.tsx) and demo mode uses the
+ * mock. Lists parse per item, so one bad entry never empties a list.
  */
 import { z } from "zod";
+import { lenientArray } from "./lenient";
+
+/** Ids are strings on the wire; accept numbers too. */
+const id = z.union([z.string(), z.number()]).transform(String);
 
 const num = z.number().nullish().catch(null);
 const str = z.string().nullish().catch(null);
 
 /** GET /api/blocks */
 export const blockSchema = z.looseObject({
-  id: z.string(),
+  id,
   name: z.string(),
   description: z.string().catch(""),
   center_hz: z.number(),
@@ -19,16 +24,20 @@ export const blockSchema = z.looseObject({
 });
 export const blocksSchema = z.looseObject({
   current_id: str,
-  blocks: z.array(blockSchema).catch([]),
+  blocks: lenientArray(blockSchema),
 });
 export type WireBlocks = z.infer<typeof blocksSchema>;
 
 /** GET /api/catalog. One entry per listenable thing, labelled by the operator. */
 export const catalogEntrySchema = z.looseObject({
-  id: z.string(),
+  id,
   kind: z.enum(["channel", "talkgroup"]).catch("channel"),
-  /** Engine channel ids this entry covers (`454029223-DMR-2`). */
-  channel_ids: z.array(z.string()).catch([]),
+  /**
+   * Engine channel ids this entry covers (`454029223-DMR-2`). The UI also joins
+   * by frequency_hz (±3 kHz) and slot, since an id changes when the engine
+   * identifies the protocol.
+   */
+  channel_ids: lenientArray(z.string()),
   frequency_hz: num,
   slot: num,
   /** Trunking (next): the system and talkgroup this entry belongs to. */
@@ -38,20 +47,18 @@ export const catalogEntrySchema = z.looseObject({
   description: z.string().catch(""),
   probable_user: str,
   traffic_kind: str,
-  /** "fm" | "dmr" | "nxdn" | "p25" | "unknown" */
-  mode: z.string().catch("unknown"),
-  /** "clear" | "encrypted" | "mixed" | "unknown" */
-  encryption: z.string().catch("unknown"),
+  mode: z.enum(["fm", "dmr", "nxdn", "p25", "unknown"]).catch("unknown"),
+  encryption: z.enum(["clear", "encrypted", "mixed", "unknown"]).catch("unknown"),
 });
 export const catalogSchema = z.looseObject({
-  sources: z.array(catalogEntrySchema).catch([]),
+  sources: lenientArray(catalogEntrySchema),
 });
 export type WireCatalogEntry = z.infer<typeof catalogEntrySchema>;
 
 /** GET /api/calls?before=&limit=&source= and `{type:"call"}` on /api/events. */
 export const callSchema = z.looseObject({
-  id: z.string(),
-  source_id: z.string(),
+  id,
+  source_id: id,
   channel_id: str,
   /** Unix seconds. */
   started_at: z.number(),
@@ -60,13 +67,14 @@ export const callSchema = z.looseObject({
   /** Relative URL to the recorded audio (audio/ogg;codecs=opus or audio/wav). */
   audio_url: str,
   /** Trunking: radio ID of the talker, when known. */
-  talker: str,
+  talker: id.nullish().catch(null),
   /** Speech-to-text (later). */
   transcript: str,
 });
 export const callsSchema = z.looseObject({
-  calls: z.array(callSchema).catch([]),
-  next_before: str,
+  calls: lenientArray(callSchema),
+  /** Unix seconds; pass back as `before` for the next page. */
+  next_before: num,
 });
 export type WireCall = z.infer<typeof callSchema>;
 
@@ -95,8 +103,11 @@ export type WireActivity = z.infer<typeof activitySchema>;
  *  16  8  f64 span_hz
  *  24  4  f32 low_db   (byte 0)
  *  28  4  f32 high_db  (byte 255)
- *  32  …  R rows of: u64 sequence, f64 time_s, N × u8 level
+ *  32  8  u64 latest sequence (also when R = 0)
+ *  40  4  u32 generation (changes on retune)
+ *  44  4  reserved, 0
+ *  48  …  R rows of: u64 sequence, f64 time_s, N × u8 level
  *
  * One 1024-bin row is 1,040 bytes instead of ~8 KB of JSON floats.
  */
-export const RSP1_HEADER = 32;
+export const RSP1_HEADER = 48;

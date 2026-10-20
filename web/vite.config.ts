@@ -11,7 +11,7 @@ const engine = process.env.ENGINE_URL ?? "http://127.0.0.1:8820";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   // ~210 KB gzipped: React, Radix, cmdk, vaul, zod. Fine on the tailnet.
-  build: { chunkSizeWarningLimit: 800 },
+  build: { chunkSizeWarningLimit: 800, target: "es2022" },
   resolve: { alias: { "@": path.resolve(import.meta.dirname, "src") } },
   server: {
     host: "127.0.0.1",

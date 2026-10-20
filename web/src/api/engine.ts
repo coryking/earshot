@@ -6,6 +6,7 @@
  */
 import { z } from "zod";
 import { callSchema } from "./needs";
+import { lenientArray } from "./lenient";
 
 const num = z.number().nullish().catch(null);
 const str = z.string().nullish().catch(null);
@@ -38,16 +39,7 @@ export const engineChannelSchema = z.looseObject({
 });
 export type EngineChannel = z.infer<typeof engineChannelSchema>;
 
-/** Lenient list: one malformed channel must not drop the others. */
-const channelList = z
-  .array(z.unknown())
-  .catch([])
-  .transform((items) =>
-    items.flatMap((item) => {
-      const parsed = engineChannelSchema.safeParse(item);
-      return parsed.success ? [parsed.data] : [];
-    }),
-  );
+const channelList = lenientArray(engineChannelSchema);
 
 export const engineStatusSchema = z.looseObject({
   /** "live" | "disconnected" */
@@ -76,20 +68,6 @@ export const engineStatusSchema = z.looseObject({
   source: z.record(z.string(), z.unknown()).nullish().catch(null),
 });
 export type EngineStatus = z.infer<typeof engineStatusSchema>;
-
-export const engineListenerSchema = z.looseObject({
-  /** "stopped" | "waiting" | "listening" | "error" */
-  status: z.string().catch("stopped"),
-  channel_id: str,
-  voice_active: bool,
-  generation: num,
-  source_generation: num,
-  sequence: num,
-  last_audio_at: num,
-  ingress_age_ms: num,
-  error: str,
-});
-export type EngineListener = z.infer<typeof engineListenerSchema>;
 
 export const engineSpectrumSchema = z.looseObject({
   sequence: z.number().catch(0),

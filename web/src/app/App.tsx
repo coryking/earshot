@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect } from "react";
-import { usePlayer } from "@/app/player-context";
+import { usePlayerInstance, usePlayerSelect } from "@/app/player-context";
 import { useAlerts } from "@/app/alerts";
 import { Palette, ShortcutsDialog, useShortcuts } from "@/app/Palette";
 import { openSheet, useRoute, useWide } from "@/app/ui";
@@ -19,7 +19,8 @@ const OperatorScreen = lazy(() => import("@/screens/Operator").then((m) => ({ de
 /** Desktop and landscape: list on the left; full waterfall over the call timeline on the right. */
 function WideNow() {
   const { ranked } = useHome();
-  const [player, state] = usePlayer();
+  const player = usePlayerInstance();
+  const activeSourceId = usePlayerSelect((s) => (s.kind === "live" ? s.sourceId : null));
   return (
     <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
       <ResizablePanel defaultSize="38%" minSize="26%" className="min-h-0">
@@ -34,8 +35,9 @@ function WideNow() {
             <Waterfall
               variant="full"
               sources={ranked}
-              activeSourceId={state.kind === "live" ? state.sourceId : null}
+              activeSourceId={activeSourceId}
               onListen={(s) => void player.listen(s)}
+              onAbout={(s) => openSheet({ type: "source", id: s.id })}
               onUnnamed={(frequencyHz) => openSheet({ type: "unnamed", frequencyHz })}
             />
           </ResizablePanel>
@@ -54,7 +56,7 @@ function WideNow() {
 export function App() {
   const route = useRoute();
   const { wide, desktop } = useWide();
-  const [player] = usePlayer();
+  const player = usePlayerInstance();
   const { current } = useBlocks();
   useAlerts();
   useShortcuts();

@@ -54,7 +54,7 @@ describe("Now", () => {
     await user.click(await screen.findByRole("button", { name: "More about Convention Center radio" }));
     await user.click(await screen.findByRole("button", { name: "Follow" }));
     expect(await screen.findByRole("button", { name: "Following" })).toHaveAttribute("aria-pressed", "true");
-    expect(JSON.parse(localStorage.getItem("radio.prefs.v1")!).followed).toEqual(["convention"]);
+    expect(JSON.parse(localStorage.getItem("radio.prefs.v1")!).followed).toEqual(["starter-convention"]);
   });
 });
 
@@ -64,7 +64,6 @@ describe("Catch up", () => {
     setup();
     expect(await screen.findByRole("heading", { name: "Catch up" })).toBeInTheDocument();
     expect((await screen.findAllByRole("button", { name: /Play call from/ })).length).toBeGreaterThan(3);
-    location.hash = "";
   });
 
   it("says plainly when the engine doesn't record calls yet", async () => {
@@ -73,7 +72,6 @@ describe("Catch up", () => {
     vi.spyOn(backend, "calls").mockResolvedValue(null as never);
     setup(backend);
     expect(await screen.findByText(/doesn't record calls yet/)).toBeInTheDocument();
-    location.hash = "";
   });
 });
 

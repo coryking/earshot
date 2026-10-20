@@ -66,13 +66,17 @@ export function OperatorScreen() {
   const [rate, setRate] = useState("");
   const [width, setWidth] = useState("");
 
+  const mhz = (text: string) => {
+    const value = Number(text);
+    return text.trim() !== "" && Number.isFinite(value) && value > 0 ? value * 1e6 : null;
+  };
+  const centerHz = mhz(center);
+  const rateHz = mhz(rate);
+  const widthHz = width.trim() === "" ? rateHz : mhz(width);
+  const valid = centerHz !== null && rateHz !== null && widthHz !== null;
+
   const configure = useMutation({
-    mutationFn: () =>
-      backend.configureSource({
-        centerHz: Number(center) * 1e6,
-        rateHz: Number(rate) * 1e6,
-        bandwidthHz: Number(width || rate) * 1e6,
-      }),
+    mutationFn: () => backend.configureSource({ centerHz: centerHz!, rateHz: rateHz!, bandwidthHz: widthHz! }),
     onSuccess: (message) => {
       toast.success(message);
       void client.invalidateQueries({ queryKey: keys.status });
@@ -104,8 +108,8 @@ export function OperatorScreen() {
               ["mode / state", s ? `${s.mode} / ${s.state}` : null],
               ["error", s?.error ?? "none"],
               ["source", s?.source_name],
-              ["center", s?.center_hz != null ? `${formatMHz(s.center_hz, 6)} MHz` : null],
-              ["rate / bandwidth", s?.rate_hz != null ? `${s.rate_hz} / ${s.bandwidth_hz ?? "?"} Hz` : null],
+              ["center", s?.center_hz ? `${formatMHz(s.center_hz, 6)} MHz` : "not reported yet"],
+              ["rate / bandwidth", s?.rate_hz ? `${s.rate_hz} / ${s.bandwidth_hz || "?"} Hz` : "not reported yet"],
               ["generation", s?.generation],
               ["decoders", s ? `${String(s.source?.active_decoders ?? "?")} of ${s.decoder_capacity ?? "?"}` : null],
               ["queue depth", s?.queue_depth],
@@ -113,7 +117,7 @@ export function OperatorScreen() {
               ["last samples", s?.last_samples_at ? relativeTime(s.last_samples_at * 1000, now) : "never"],
               ["source position", s?.source_position_s != null ? `${s.source_position_s.toFixed(1)} s` : null],
               ["continuity", s?.continuity],
-              ["spectrum", spectrum.bins ? `${spectrum.bins} bins, seq ${spectrum.sequence}, ${spectrum.unit}` : "no rows"],
+              ["spectrum", spectrum.bins ? `${spectrum.bins} bins, generation ${spectrum.generation}, ${spectrum.unit}` : "no rows"],
             ]}
           />
         </Panel>
@@ -137,7 +141,7 @@ export function OperatorScreen() {
               Width MHz
               <Input value={width} onChange={(e) => setWidth(e.target.value)} inputMode="decimal" placeholder="6" />
             </label>
-            <Button type="submit" variant="secondary" className="col-span-3 h-10" disabled={!center || !rate || configure.isPending}>
+            <Button type="submit" variant="secondary" className="col-span-3 h-10" disabled={!valid || configure.isPending}>
               Apply (waits for the producer's acknowledgement)
             </Button>
           </form>
@@ -243,7 +247,7 @@ function CatalogEditor() {
       {entries.length === 0 && <p className="text-sm text-muted-foreground">No names yet. Name channels from their sheet.</p>}
       <ul className="space-y-3">
         {entries.map((e) => (
-          <CatalogRow key={e.id} entry={e} onSave={(next) => save.mutate(next)} />
+          <CatalogRow key={e.id} entry={e} onSave={(next) => save.mutate({ entry: next })} />
         ))}
       </ul>
     </Panel>
@@ -268,7 +272,7 @@ function CatalogRow({ entry, onSave }: { entry: WireCatalogEntry; onSave(entry: 
         Encryption
         <select
           value={draft.encryption}
-          onChange={(ev) => setDraft({ ...draft, encryption: ev.target.value })}
+          onChange={(ev) => setDraft({ ...draft, encryption: ev.target.value as WireCatalogEntry["encryption"] })}
           className="mt-0.5 h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm text-foreground"
         >
           {["unknown", "clear", "encrypted", "mixed"].map((v) => (

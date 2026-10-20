@@ -7,6 +7,7 @@
 import type { AudioDescriptor, EngineChannel, EngineEvent, EngineStatus } from "@/api/engine";
 import type { WireActivity, WireBlocks, WireCall, WireCatalogEntry } from "@/api/needs";
 import type { SpectrumBatch, SpectrumRow } from "@/domain/model";
+import { STARTER_CATALOG } from "@/domain/starter";
 import { scaleToByte } from "./spectrum";
 import { BackendError, type Backend, type CallQuery, type ListenHandlers, type Need } from "./types";
 
@@ -63,9 +64,15 @@ export function wavUrl(pcm: Int16Array, rate = 8000): string {
   return URL.createObjectURL(new Blob([buffer], { type: "audio/wav" }));
 }
 
-interface Def {
-  entry: WireCatalogEntry;
+const BLOCK_CENTER = 454_216_998;
+const BLOCK_SPAN = 6_000_000;
+
+
+/** How each starter source behaves in the simulation (names live in domain/starter.ts). */
+interface Sim {
+  id: string;
   protocol: string;
+  slot: number;
   /** Calls per hour. */
   rate: number;
   /** Mean call length, seconds. */
@@ -73,99 +80,26 @@ interface Def {
   weight: number;
 }
 
-const BLOCK_CENTER = 454_216_998;
-const BLOCK_SPAN = 6_000_000;
+const SIMS: Sim[] = [
+  { id: "columbia-shared", protocol: "DMR", slot: 2, rate: 40, length: 9, weight: 3 },
+  { id: "ambassadors", protocol: "DMR", slot: 1, rate: 30, length: 7, weight: 2.5 },
+  { id: "convention", protocol: "DMR", slot: 1, rate: 14, length: 8, weight: 1.5 },
+  { id: "fleetnet", protocol: "NXDN48", slot: 1, rate: 12, length: 11, weight: 1.2 },
+  { id: "amazon", protocol: "DMR", slot: 1, rate: 10, length: 6, weight: 1 },
+  { id: "stadium", protocol: "DMR", slot: 1, rate: 4, length: 6, weight: 0.4 },
+  { id: "hotels", protocol: "FM", slot: 1, rate: 12, length: 5, weight: 0.8 },
+  { id: "private", protocol: "DMR", slot: 1, rate: 16, length: 10, weight: 1.4 },
+];
 
-function def(
-  id: string,
-  name: string,
-  frequency: number,
-  protocol: string,
-  slot: number,
-  extra: Partial<WireCatalogEntry> & { rate: number; length: number; weight: number },
-): Def {
-  const { rate, length, weight, ...rest } = extra;
-  return {
-    protocol,
-    rate,
-    length,
-    weight,
-    entry: {
-      id,
-      kind: "channel",
-      channel_ids: [`${frequency}-${protocol}-${slot}`],
-      frequency_hz: frequency,
-      slot,
-      system: null,
-      talkgroup_id: null,
-      name,
-      description: "",
-      probable_user: null,
-      traffic_kind: null,
-      mode: protocol === "DMR" ? "dmr" : protocol === "NXDN48" ? "nxdn" : protocol === "FM" ? "fm" : "unknown",
-      encryption: "clear",
-      ...rest,
-    },
-  };
+interface Def extends Sim {
+  entry: WireCatalogEntry;
+  channelId: string;
 }
 
-/**
- * Sample catalog for the 454 MHz block, using the carriers measured in the
- * 2026-10-19 wideband capture and the probable users from
- * docs/rf-environment-seattle.md § 6 (rf-research branch). A licence is not
- * proof of who is talking; descriptions say "probably".
- */
-export const MOCK_DEFS: Def[] = [
-  def("columbia-shared", "Columbia Tower shared radio", 454_029_223, "DMR", 2, {
-    description: "Shared business radio system run from Columbia Tower",
-    probable_user: "Businesses renting time on a shared radio network (TRBOWEST / Day Wireless)",
-    traffic_kind: "Work chatter from many small businesses: deliveries, security, building crews",
-    rate: 40, length: 9, weight: 3,
-  }),
-  def("ambassadors", "Downtown ambassadors", 452_685_504, "DMR", 1, {
-    description: "Street ambassadors and sidewalk cleaning crews",
-    probable_user: "Probably the Metropolitan Improvement District (FCC licence WPQB331)",
-    traffic_kind: "Cleanups, people needing help, sidewalk issues",
-    rate: 30, length: 7, weight: 2.5,
-  }),
-  def("convention", "Convention Center radio", 451_360_300, "DMR", 1, {
-    description: "Event, security and building staff",
-    probable_user: "Probably the Washington State Convention Center (FCC licence WQJB646)",
-    traffic_kind: "Doors, loading docks, event setup; busiest on show days",
-    rate: 14, length: 8, weight: 1.5,
-  }),
-  def("fleetnet", "FleetNet business radio", 452_341_800, "NXDN48", 1, {
-    description: "Shared radio network for service fleets",
-    probable_user: "Customers of FleetNet / Silke Communications",
-    traffic_kind: "Dispatch for trades and delivery fleets",
-    rate: 12, length: 11, weight: 1.2,
-  }),
-  def("amazon", "Amazon operations", 452_160_600, "DMR", 1, {
-    description: "Campus operations and facilities",
-    probable_user: "Probably Amazon's downtown campus (FCC licence WRFI741)",
-    traffic_kind: "Facilities, security and building operations",
-    rate: 10, length: 6, weight: 1,
-  }),
-  def("stadium", "Stadium and event staff", 452_985_500, "DMR", 1, {
-    description: "Event staff around the stadiums",
-    probable_user: "Probably Lumen Field event operations, or a nearby venue sharing the channel",
-    traffic_kind: "Gates, crowds, ushers; busy only around games and concerts",
-    rate: 4, length: 6, weight: 0.4,
-  }),
-  def("hotels", "Hotels and buildings", 451_773_100, "FM", 1, {
-    description: "A shared channel many downtown hotels and buildings use",
-    probable_user: "One of dozens of hotels and office buildings licensed on this channel",
-    traffic_kind: "Housekeeping, maintenance, door staff",
-    rate: 12, length: 5, weight: 0.8,
-  }),
-  def("private", "Private business radio", 454_554_500, "DMR", 1, {
-    description: "Private (encrypted)",
-    probable_user: "A subscriber on the Day Wireless network at Columbia Tower",
-    traffic_kind: "Encrypted: you can see when they talk, but not hear it",
-    encryption: "encrypted",
-    rate: 16, length: 10, weight: 1.4,
-  }),
-];
+export const MOCK_DEFS: Def[] = SIMS.map((sim) => {
+  const entry = STARTER_CATALOG.find((e) => e.id === `starter-${sim.id}`)!;
+  return { ...sim, entry, channelId: `${entry.frequency_hz}-${sim.protocol}-${sim.slot}` };
+});
 
 /** Signals the engine has seen that nobody has labelled. */
 const UNLABELLED: { frequency: number; protocol: string; slot: number; rate: number; length: number }[] = [
@@ -245,17 +179,17 @@ export class MockBackend implements Backend {
   constructor(options: MockOptions = {}) {
     this.rand = mulberry32(options.seed ?? 7);
     this.now = options.now ?? Date.now;
-    this.catalog_ = MOCK_DEFS.map((d) => structuredClone(d.entry));
+    this.catalog_ = STARTER_CATALOG.map((e) => structuredClone(e));
     const now = this.now();
-    for (const d of MOCK_DEFS) this.addChannel(d.entry.frequency_hz!, d.protocol, d.entry.slot!);
+    for (const d of MOCK_DEFS) this.addChannel(d.entry.frequency_hz!, d.protocol, d.slot);
     for (const u of UNLABELLED) this.addChannel(u.frequency, u.protocol, u.slot);
     // The engine keeps an Unknown placeholder beside identified entries.
     this.addChannel(454_029_223, "Unknown", 1);
     this.activity_ = this.buildActivity(now);
     this.backfillCalls(now);
     for (const id of options.startTalking ?? ["columbia-shared", "ambassadors"]) {
-      const d = MOCK_DEFS.find((x) => x.entry.id === id);
-      if (d) this.startCall(d.entry.channel_ids[0], now, 25 + this.rand() * 20, d.entry.encryption === "encrypted");
+      const d = MOCK_DEFS.find((x) => x.id === id);
+      if (d) this.startCall(d.channelId, now, 25 + this.rand() * 20, d.entry.encryption === "encrypted");
     }
     for (let i = 0; i < 400; i++) this.spectrumRow(now - (400 - i) * 100);
     if (!options.manual) {
@@ -296,7 +230,7 @@ export class MockBackend implements Backend {
   }
 
   private defFor(channelId: string) {
-    return MOCK_DEFS.find((d) => d.entry.channel_ids.includes(channelId));
+    return MOCK_DEFS.find((d) => d.channelId === channelId);
   }
 
   private emit(event: EngineEvent) {
@@ -381,7 +315,7 @@ export class MockBackend implements Backend {
     const hour = new Date(now).getHours();
     const daytime = hour >= 7 && hour < 20 ? 1 : 0.45;
     for (const d of MOCK_DEFS) {
-      const id = d.entry.channel_ids[0];
+      const id = d.channelId;
       if (this.live.has(id)) continue;
       if (this.rand() < ((d.rate * daytime) / 3600) * (dt / 1000) * 3)
         this.startCall(id, now, d.length * (0.4 + this.rand() * 1.4), d.entry.encryption === "encrypted");
@@ -475,8 +409,8 @@ export class MockBackend implements Backend {
       const d = MOCK_DEFS[Math.floor(this.rand() * MOCK_DEFS.length)];
       const length = d.length * (0.4 + this.rand() * 1.4) * 1000;
       const id = `call-${++this.callCounter}`;
-      calls.unshift(this.makeCall(id, d.entry.channel_ids[0], t, t + length, d.entry.encryption === "encrypted"));
-      const channel = this.channels.get(d.entry.channel_ids[0]);
+      calls.unshift(this.makeCall(id, d.channelId, t, t + length, d.entry.encryption === "encrypted"));
+      const channel = this.channels.get(d.channelId);
       if (channel && d.entry.encryption !== "encrypted") channel.last_heard = (t + length) / 1000;
       if (channel) channel.last_rf = (t + length) / 1000;
     }
@@ -524,6 +458,7 @@ export class MockBackend implements Backend {
     const rows = this.spectrumRows.filter((r) => r.sequence > after).slice(after === 0 ? -400 : -120);
     const block = MOCK_BLOCKS.blocks.find((b) => b.id === this.blockId)!;
     return {
+      generation: this.generation,
       centerHz: block.center_hz,
       spanHz: block.span_hz,
       lowDb: -125,

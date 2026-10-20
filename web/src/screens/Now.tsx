@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { usePlayer } from "@/app/player-context";
+import { usePlayerInstance, usePlayerSelect } from "@/app/player-context";
 import { openSheet, useNow } from "@/app/ui";
 import { SourceList } from "@/components/SourceList";
 import { Waterfall } from "@/components/Waterfall";
@@ -56,7 +56,8 @@ export function Headline({ lead, context, large }: { lead: string; context: stri
 
 export function NowScreen({ showStrip }: { showStrip: boolean }) {
   const { ranked, callsBySource, followed, muted, now, text } = useHome();
-  const [player, state] = usePlayer();
+  const player = usePlayerInstance();
+  const activeSourceId = usePlayerSelect((s) => (s.kind === "live" ? s.sourceId : null));
   return (
     <div>
       <Headline lead={text.lead} context={text.context} />
@@ -65,8 +66,9 @@ export function NowScreen({ showStrip }: { showStrip: boolean }) {
           <Waterfall
             variant="strip"
             sources={ranked}
-            activeSourceId={state.kind === "live" ? state.sourceId : null}
+            activeSourceId={activeSourceId}
             onListen={(s: Source) => void player.listen(s)}
+            onAbout={(s: Source) => openSheet({ type: "source", id: s.id })}
             onUnnamed={(frequencyHz) => openSheet({ type: "unnamed", frequencyHz })}
           />
           <p className="mt-1 text-xs text-muted-foreground">Live airwaves. Tap a bright line to listen to it.</p>

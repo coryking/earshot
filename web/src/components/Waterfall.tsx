@@ -10,6 +10,8 @@ interface Props {
   sources: Source[];
   activeSourceId: string | null;
   onListen(source: Source): void;
+  /** Tapped a source that can't be played: show what it is instead. */
+  onAbout(source: Source): void;
   /** Tapped a trace with no catalogued source nearby. */
   onUnnamed(frequencyHz: number): void;
   className?: string;
@@ -45,11 +47,12 @@ function stackLabels<T extends { source: Source; x: number }>(markers: T[], widt
  * alive and doubles as a tap target; the full view adds history, a frequency
  * readout and labelled markers.
  */
-export function Waterfall({ variant, sources, activeSourceId, onListen, onUnnamed, className }: Props) {
+export function Waterfall({ variant, sources, activeSourceId, onListen, onAbout, onUnnamed, className }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const box = useRef<HTMLDivElement>(null);
-  const renderer = useRef<Renderer | null>(null);
   const meta = useSpectrumMeta();
+  // Bumped when the GPU context is restored after the browser dropped it (common on backgrounded phones).
+  const [contextEpoch, setContextEpoch] = useState(0);
   const [width, setWidth] = useState(0);
   const [height, setHeight] = useState(0);
   const [hover, setHover] = useState<number | null>(null);
@@ -64,7 +67,6 @@ export function Waterfall({ variant, sources, activeSourceId, onListen, onUnname
     } catch {
       return;
     }
-    renderer.current = r;
     spectrumRows.slice(-visible).forEach((row) => r.push(row.bins));
     let frame = 0;
     let dirty = true;
@@ -91,14 +93,22 @@ export function Waterfall({ variant, sources, activeSourceId, onListen, onUnname
       dirty = true;
     });
     frame = requestAnimationFrame(draw);
+    const lost = (event: Event) => {
+      event.preventDefault();
+      cancelAnimationFrame(frame);
+    };
+    const restored = () => setContextEpoch((n) => n + 1);
+    el.addEventListener("webglcontextlost", lost);
+    el.addEventListener("webglcontextrestored", restored);
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
       unsubscribe();
+      el.removeEventListener("webglcontextlost", lost);
+      el.removeEventListener("webglcontextrestored", restored);
       r.dispose();
-      renderer.current = null;
     };
-  }, [meta.bins, visible]);
+  }, [meta.bins, meta.epoch, visible, contextEpoch]);
 
   const low = meta.centerHz !== null && meta.spanHz !== null ? meta.centerHz - meta.spanHz / 2 : null;
   const markers = useMemo(() => {
@@ -124,8 +134,9 @@ export function Waterfall({ variant, sources, activeSourceId, onListen, onUnname
       .map((m) => ({ ...m, d: Math.abs(m.x * rect.width - px) }))
       .filter((m) => m.d <= HIT_PX)
       .sort((a, b) => a.d - b.d || Number(b.source.listenable.ok) - Number(a.source.listenable.ok))[0];
-    if (nearest) onListen(nearest.source);
-    else onUnnamed(frequency);
+    if (!nearest) onUnnamed(frequency);
+    else if (nearest.source.listenable.ok) onListen(nearest.source);
+    else onAbout(nearest.source);
   };
 
   const empty = !meta.bins;

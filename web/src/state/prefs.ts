@@ -52,6 +52,11 @@ export const prefs = {
   toggleMute(id: string) {
     prefsStore.set((p) => ({ ...p, muted: toggle(p.muted, id), followed: p.followed.filter((x) => x !== id) }));
   },
+  /** A source got a new id (it was named): carry follow and mute over. */
+  renameSource(from: string, to: string) {
+    const swap = (list: string[]) => (list.includes(from) ? [...new Set(list.map((id) => (id === from ? to : id)))] : list);
+    prefsStore.set((p) => ({ ...p, followed: swap(p.followed), muted: swap(p.muted) }));
+  },
   set<K extends keyof Prefs>(key: K, value: Prefs[K]) {
     prefsStore.set((p) => ({ ...p, [key]: value }));
   },

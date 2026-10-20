@@ -1,6 +1,6 @@
 import { Play } from "lucide-react";
 import { useMemo, useState } from "react";
-import { usePlayer } from "@/app/player-context";
+import { usePlayerInstance } from "@/app/player-context";
 import { openSheet, useNow } from "@/app/ui";
 import { CallLane } from "@/components/bits";
 import { CallItem } from "@/components/Sheets";
@@ -21,11 +21,11 @@ function groupOf(call: Call, now: number) {
 /** Recent calls newest first, like a podcast queue: playback continues down the list. */
 export function CatchUpScreen({ timeline, embedded = false }: { timeline: boolean; embedded?: boolean }) {
   const Title = embedded ? "h2" : "h1";
-  const { calls, recorded } = useCalls();
+  const { calls, recorded, failed } = useCalls();
   const sources = useSources();
   const { followed, muted } = usePrefs();
   const [onlyFollowed, setOnlyFollowed] = useState(false);
-  const [player] = usePlayer();
+  const player = usePlayerInstance();
   const now = useNow();
   const names = useMemo(() => new Map(sources.map((s) => [s.id, s.name])), [sources]);
   const visible = calls.filter(
@@ -82,8 +82,9 @@ export function CatchUpScreen({ timeline, embedded = false }: { timeline: boolea
       </div>
       {!recorded && (
         <p className="mx-4 mb-3 rounded-lg bg-secondary p-3 text-sm text-secondary-foreground">
-          The radio box doesn't record calls yet, so this list only shows calls heard while this page has been open,
-          without audio.
+          {failed
+            ? "Couldn't load recorded calls from the radio box; trying again. Meanwhile this shows calls heard while this page has been open."
+            : "The radio box doesn't record calls yet, so this list only shows calls heard while this page has been open, without audio."}
         </p>
       )}
       {timeline && visible.length > 0 && <Timeline calls={visible} sources={sources} now={now} />}
@@ -99,7 +100,8 @@ export function CatchUpScreen({ timeline, embedded = false }: { timeline: boolea
                 call={c}
                 name={nameOf(c.sourceId)}
                 now={now}
-                queue={playable.slice(playable.indexOf(c) + 1)}
+                queueAfter={() => playable.slice(playable.indexOf(c) + 1)}
+                nameFor={nameOf}
               />
             ))}
           </ul>

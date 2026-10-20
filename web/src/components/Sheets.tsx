@@ -3,7 +3,7 @@ import { BellRing, ChevronRight, Lock, Pause, Play, Star, VolumeX } from "lucide
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import type { WireCatalogEntry } from "@/api/needs";
-import { usePlayer } from "@/app/player-context";
+import { usePlayer, usePlayerInstance, usePlayerSelect } from "@/app/player-context";
 import { navigate, openSheet, sheetStore, useNow, useSheet } from "@/app/ui";
 import { LevelMeter } from "@/components/bits";
 import { playerLine } from "@/components/PlayerBar";
@@ -73,16 +73,25 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
 
 const modeNames = { dmr: "DMR", nxdn: "NXDN", p25: "P25", fm: "Analog FM", unknown: "Not identified" } as const;
 
+/**
+ * Save a name. `previousId` is the source's id before it had this entry; follow,
+ * mute and an open sheet move to the new id so naming something doesn't lose them.
+ */
 export function useSaveLabel() {
   const backend = useBackend();
   const client = useQueryClient();
   return useMutation({
-    mutationFn: async (entry: WireCatalogEntry) => {
+    mutationFn: async ({ entry }: { entry: WireCatalogEntry; previousId?: string }) => {
       const saved = await backend.saveCatalogEntry(entry);
       if (!saved) localCatalog.set((list) => [...list.filter((e) => e.id !== entry.id), entry]);
       return saved;
     },
-    onSuccess: (saved, entry) => {
+    onSuccess: (saved, { entry, previousId }) => {
+      if (previousId && previousId !== entry.id) {
+        prefs.renameSource(previousId, entry.id);
+        const sheet = sheetStore.get();
+        if (sheet?.type === "source" && sheet.id === previousId) sheetStore.set({ type: "source", id: entry.id });
+      }
       void client.invalidateQueries({ queryKey: keys.catalog });
       toast.success(saved ? `Named it "${entry.name}"` : `Named it "${entry.name}" on this device`);
     },
@@ -90,13 +99,14 @@ export function useSaveLabel() {
   });
 }
 
+/** A label keyed by frequency (and DMR line), so it still applies after the engine identifies the signal. */
 function entryFor(source: Source, name: string): WireCatalogEntry {
   return {
-    id: source.named ? source.id : `label-${source.channelIds[0]}`,
+    id: source.named ? source.id : `label-${source.id}`,
     kind: source.kind,
-    channel_ids: source.channelIds,
+    channel_ids: [],
     frequency_hz: source.frequencyHz,
-    slot: source.slot,
+    slot: source.mode === "dmr" ? source.slot : null,
     system: source.system,
     talkgroup_id: source.talkgroupId,
     name,
@@ -116,7 +126,7 @@ function NameIt({ source }: { source: Source }) {
       className="mt-3 flex gap-2"
       onSubmit={(e) => {
         e.preventDefault();
-        if (name.trim()) save.mutate(entryFor(source, name.trim()));
+        if (name.trim()) save.mutate({ entry: entryFor(source, name.trim()), previousId: source.id });
       }}
     >
       <label htmlFor="name-it" className="sr-only">
@@ -210,7 +220,7 @@ function SourceSheet({ id }: { id: string | null }) {
           <h3 className="mt-6 text-base font-semibold text-heading">Recent calls</h3>
           <ul className="mt-1">
             {mine.map((c) => (
-              <CallItem key={c.id} call={c} name={source.name} now={now} queue={[]} compact />
+              <CallItem key={c.id} call={c} name={source.name} now={now} compact />
             ))}
           </ul>
         </>
@@ -242,18 +252,20 @@ export function CallItem({
   call,
   name,
   now,
-  queue,
+  queueAfter,
+  nameFor,
   compact,
 }: {
   call: Call;
   name: string;
   now: number;
-  queue: Call[];
+  /** Calls to play after this one, worked out when tapped. */
+  queueAfter?: () => Call[];
+  nameFor?: (sourceId: string) => string;
   compact?: boolean;
 }) {
-  const [player, state] = usePlayer();
-  const sources = useSources();
-  const playing = state.kind === "call" && state.callId === call.id;
+  const player = usePlayerInstance();
+  const playing = usePlayerSelect((s) => s.kind === "call" && s.callId === call.id);
   const seconds = call.endedAt ? Math.max(1, Math.round((call.endedAt - call.startedAt) / 1000)) : null;
   const when = new Date(call.startedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   const live = call.endedAt === null;
@@ -267,7 +279,7 @@ export function CallItem({
           aria-label={playing ? `Stop this call from ${name}` : `Play call from ${name} at ${when}`}
           onClick={() => {
             if (playing) void player.stop();
-            else player.playCall(call, name, queue, (id) => sources.find((s) => s.id === id)?.name ?? "Recorded call");
+            else player.playCall(call, name, queueAfter?.() ?? [], nameFor);
           }}
         >
           {playing ? <Pause className="size-4" /> : <Play className="size-4 fill-current" />}
@@ -371,8 +383,9 @@ function AlertsSheet({ open }: { open: boolean }) {
       <div className="divide-y divide-border/60">
         <label className="flex min-h-14 items-center gap-3 py-2">
           <span className="flex-1">
-            <span className="block text-heading">A channel I follow starts talking</span>
+            <span className="block text-heading">A channel I follow gets busy</span>
             <span className="block text-sm text-muted-foreground">
+              Three or more calls within ten minutes.{" "}
               {followed.length ? `You follow ${followed.length}.` : "Follow channels with the star to use this."}
             </span>
           </span>
@@ -392,7 +405,7 @@ function AlertsSheet({ open }: { open: boolean }) {
           ? "Notifications are blocked for this site. Allow them in your browser settings to get alerts."
           : permission === "unsupported"
             ? "This browser can't show notifications, so alerts appear inside the app only."
-            : "Alerts work while this page is open, even in the background. Alerts with the app fully closed need the radio box to send them, which is coming."}
+            : "Alerts work while this page is open. Alerts with the app closed or the phone locked need the radio box to send them, which is coming."}
       </p>
     </Sheet>
   );
@@ -484,8 +497,11 @@ function PlayerSheet({ open }: { open: boolean }) {
       </div>
       {state.kind === "live" && (
         <p className="mt-5 text-sm text-muted-foreground">
-          Keeps playing with the screen locked. The radio plays one live channel at a time for everyone in the house, so
-          if someone else picks a channel, you'll see it here.
+          {state.background === true && "Keeps playing with the screen locked. "}
+          {state.background === false &&
+            "This browser won't keep playing with the screen locked, so leave the screen on while you listen. "}
+          The radio plays one live channel at a time for everyone in the house, so if someone else picks a channel,
+          you'll see it here.
         </p>
       )}
     </Sheet>

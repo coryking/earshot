@@ -1,4 +1,4 @@
-import type { Activity, Call, Source } from "@/domain/model";
+import type { Call } from "@/domain/model";
 import { cn } from "@/lib/utils";
 
 /** Three bars that move while a source is talking. */
@@ -14,74 +14,6 @@ export function LevelMeter({ active, className }: { active: boolean; className?:
       ))}
     </span>
   );
-}
-
-/**
- * Activity lane: talk-time per bucket over the last `minutes`, drawn as small
- * bars. Borrowed from observability timelines.
- */
-export function ActivityLane({
-  series,
-  activity,
-  minutes = 30,
-  now,
-  className,
-  label,
-}: {
-  series: number[] | undefined;
-  activity: Activity | null;
-  minutes?: number;
-  now: number;
-  className?: string;
-  label: string;
-}) {
-  if (!activity) return null;
-  const bars = 24;
-  const window = minutes * 60_000;
-  const values = new Array(bars).fill(0);
-  (series ?? []).forEach((v, i) => {
-    const t = activity.start + i * activity.bucketMs;
-    const age = now - t;
-    if (age < 0 || age > window) return;
-    const slot = Math.min(bars - 1, Math.floor(((window - age) / window) * bars));
-    values[slot] += v;
-  });
-  const max = Math.max(30, ...values);
-  return (
-    <svg
-      viewBox={`0 0 ${bars * 4} 12`}
-      preserveAspectRatio="none"
-      className={cn("h-3 w-full", className)}
-      role="img"
-      aria-label={label}
-    >
-      {values.map((v, i) => {
-        const h = v > 0 ? Math.max(2, (v / max) * 12) : 1;
-        return (
-          <rect
-            key={i}
-            x={i * 4}
-            y={12 - h}
-            width={3}
-            height={h}
-            rx={0.8}
-            className={v > 0 ? "fill-signal/70" : "fill-muted-foreground/25"}
-          />
-        );
-      })}
-    </svg>
-  );
-}
-
-export function laneLabel(source: Source, series: number[] | undefined, activity: Activity | null, now: number) {
-  if (!activity) return `${source.name}: no history yet`;
-  let seconds = 0;
-  (series ?? []).forEach((v, i) => {
-    if (now - (activity.start + i * activity.bucketMs) <= 30 * 60_000) seconds += v;
-  });
-  return seconds < 1
-    ? `${source.name}: no talking in the last 30 minutes`
-    : `${source.name}: about ${Math.max(1, Math.round(seconds / 60))} min of talking in the last 30 minutes`;
 }
 
 /**

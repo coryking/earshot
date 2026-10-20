@@ -83,6 +83,8 @@ export interface SpectrumRow {
 }
 
 export interface SpectrumBatch {
+  /** Engine source generation; history from another generation is a different band. */
+  generation: number;
   centerHz: number | null;
   spanHz: number | null;
   lowDb: number;

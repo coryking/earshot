@@ -3,14 +3,19 @@ import { useState, type ReactNode } from "react";
 import type { Backend } from "@/backend/types";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useApplyTheme } from "@/lib/theme";
-import { BackendProvider, RadioSync } from "@/state/radio";
+import { BackendProvider, CatalogMigration, RadioSync } from "@/state/radio";
 import { useSpectrumFeed } from "@/waterfall/feed";
 import { PlayerProvider } from "./player-context";
 
 function Live() {
   useApplyTheme();
   useSpectrumFeed();
-  return <RadioSync />;
+  return (
+    <>
+      <RadioSync />
+      <CatalogMigration />
+    </>
+  );
 }
 
 export function Providers({ backend, children }: { backend: Backend; children: ReactNode }) {

@@ -35,8 +35,13 @@ export default async function globalSetup() {
   };
   loop();
   process.env.FIXTURE_ENGINE = "1";
-  return async () => {
+  const stop = () => {
     stopped = true;
     children.forEach((c) => c.kill());
   };
+  // Also when the run is interrupted, so no private engine is left on 8830.
+  process.once("exit", stop);
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  return async () => stop();
 }

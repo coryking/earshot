@@ -5,18 +5,19 @@ import { App } from "@/app/App";
 import { ErrorBoundary } from "@/app/ErrorBoundary";
 import { Providers } from "@/app/Providers";
 import { HttpBackend } from "@/backend/http";
-import { MockBackend } from "@/backend/mock";
+import type { Backend } from "@/backend/types";
 
 // `?demo` runs the whole UI on the typed mock (sample data, clearly badged).
+// The mock is loaded only then, so the real app doesn't ship it.
 const demo = new URLSearchParams(location.search).has("demo");
-const backend = demo ? new MockBackend() : new HttpBackend();
+const backend: Backend = demo ? new (await import("@/backend/mock")).MockBackend() : new HttpBackend();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <Providers backend={backend}>
-      <ErrorBoundary>
+    <ErrorBoundary>
+      <Providers backend={backend}>
         <App />
-      </ErrorBoundary>
-    </Providers>
+      </Providers>
+    </ErrorBoundary>
   </StrictMode>,
 );

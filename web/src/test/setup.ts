@@ -4,11 +4,15 @@ import { afterEach, vi } from "vitest";
 
 import { paletteStore, sheetStore } from "@/app/ui";
 import { prefsStore } from "@/state/prefs";
-import { sessionCalls } from "@/state/radio";
+import { localCatalog, sessionActivity, sessionCalls } from "@/state/radio";
 
 const initialPrefs = prefsStore.get();
+const initialActivity = sessionActivity.get();
 afterEach(() => {
   cleanup();
+  location.hash = "";
+  sessionActivity.set(initialActivity);
+  localCatalog.set([]);
   sheetStore.set(null);
   paletteStore.set(false);
   prefsStore.set(initialPrefs);
@@ -69,3 +73,7 @@ HTMLCanvasElement.prototype.getContext = (() => null) as unknown as HTMLCanvasEl
 Element.prototype.setPointerCapture ??= () => {};
 Element.prototype.releasePointerCapture ??= () => {};
 Element.prototype.hasPointerCapture ??= () => false;
+// jsdom doesn't implement media playback.
+HTMLMediaElement.prototype.play = () => Promise.resolve();
+HTMLMediaElement.prototype.pause = () => {};
+HTMLMediaElement.prototype.load = () => {};

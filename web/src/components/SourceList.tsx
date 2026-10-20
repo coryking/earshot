@@ -1,6 +1,6 @@
 import { ChevronDown, Lock, MoreHorizontal, Star } from "lucide-react";
-import { useRef, useState } from "react";
-import { usePlayer } from "@/app/player-context";
+import { useEffect, useRef, useState } from "react";
+import { usePlayerInstance, usePlayerSelect } from "@/app/player-context";
 import { openSheet } from "@/app/ui";
 import { CallLane, LevelMeter } from "@/components/bits";
 import type { Call, Source } from "@/domain/model";
@@ -61,8 +61,8 @@ export function SourceList({ sources, callsBySource, followed, muted, now }: Pro
 }
 
 function SourceRow({ source, calls, followed, now }: { source: Source; calls: Call[]; followed: boolean; now: number }) {
-  const [player, state] = usePlayer();
-  const playing = state.kind === "live" && state.sourceId === source.id;
+  const player = usePlayerInstance();
+  const playing = usePlayerSelect((s) => s.kind === "live" && s.sourceId === source.id);
   const press = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressed = useRef(false);
   const startPress = () => {
@@ -74,12 +74,16 @@ function SourceRow({ source, calls, followed, now }: { source: Source; calls: Ca
   };
   const endPress = () => {
     if (press.current) clearTimeout(press.current);
+    press.current = null;
   };
+  useEffect(() => endPress, []);
   const right = source.talking ? (
     <span className="flex items-center gap-2 text-xs font-semibold text-lamp">
       {source.encryption === "encrypted" ? <Lock className="size-3.5" aria-hidden /> : <LevelMeter active />}
       <span>{source.encryption === "encrypted" ? "Private call" : "Talking"}</span>
     </span>
+  ) : source.signal ? (
+    <span className="text-xs text-muted-foreground">Signal, no voice</span>
   ) : (
     <span className="tabular text-xs text-muted-foreground">
       {source.lastHeardAt ? relativeTime(source.lastHeardAt, now) : source.inRange ? "Not heard yet" : "Out of range"}
@@ -97,13 +101,16 @@ function SourceRow({ source, calls, followed, now }: { source: Source; calls: Ca
         data-source-row
         className="flex min-w-0 flex-1 flex-col gap-1 py-3 pr-2 pl-4 text-left focus-visible:-outline-offset-2"
         onClick={() => {
-          if (longPressed.current) return;
+          const long = longPressed.current;
+          longPressed.current = false;
+          if (long) return;
           if (source.listenable.ok || playing) void player.listen(source);
           else openSheet({ type: "source", id: source.id });
         }}
         onPointerDown={startPress}
         onPointerUp={endPress}
         onPointerLeave={endPress}
+        onPointerCancel={endPress}
         onContextMenu={(e) => {
           e.preventDefault();
           openSheet({ type: "source", id: source.id });

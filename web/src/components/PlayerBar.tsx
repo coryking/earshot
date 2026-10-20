@@ -22,6 +22,8 @@ export function playerLine(state: PlayerState, takenName: string | null): string
       return "Live. Waiting for someone to talk.";
     case "playing":
       return "Live. Talking now.";
+    case "reconnecting":
+      return "Reconnecting to the radio…";
     case "taken":
       return `Someone on another device switched the radio to ${takenName ?? "another channel"}.`;
     case "error":
@@ -49,7 +51,7 @@ export function PlayerBar() {
           disabled={errorOnly}
         >
           {!errorOnly && <span className="sr-only">Open player:</span>}{" "}
-          {state.phase === "starting" ? (
+          {state.phase === "starting" || state.phase === "reconnecting" ? (
             <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" aria-hidden />
           ) : (
             <LevelMeter active={state.phase === "playing"} className="shrink-0" />

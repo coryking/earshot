@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { EngineChannel } from "@/api/engine";
 import type { WireCatalogEntry } from "@/api/needs";
 import { healthOf, numberName, rankSources, toSources } from "./adapt";
+import { STARTER_CATALOG } from "./starter";
 import type { Activity } from "./model";
 import { busyness, headline } from "./summary";
 
@@ -57,7 +58,8 @@ describe("toSources", () => {
       [channel("454029223-Unknown-1", { protocol: "Unknown" }), channel("454029223-DMR-2", { speech_active: true })],
       null,
     );
-    expect(sources.map((s) => s.id)).toEqual(["454029223-DMR-2"]);
+    expect(sources.map((s) => s.id)).toEqual(["ch-454029223-2"]);
+    expect(sources[0].channelIds).toEqual(["454029223-DMR-2"]);
     expect(sources[0].talking).toBe(true);
     expect(sources[0].summary).toBe("Unknown business radio");
   });
@@ -88,7 +90,7 @@ describe("toSources", () => {
     expect(s.listenable.ok).toBe(false);
   });
 
-  it("ranks talking, then followed, then listenable", () => {
+  it("ranks followed first (pinned), then talking, then listenable", () => {
     const sources = toSources(
       [
         channel("451000000-Unknown-1", { protocol: "Unknown", last_rf: 200 }),
@@ -98,8 +100,51 @@ describe("toSources", () => {
       ],
       null,
     );
-    const ranked = rankSources(sources, new Set(["454000000-DMR-1"])).map((s) => s.id);
-    expect(ranked).toEqual(["453000000-DMR-1", "454000000-DMR-1", "452000000-DMR-1", "451000000-Unknown-1"]);
+    const ranked = rankSources(sources, new Set(["ch-454000000-1"])).map((s) => s.id);
+    expect(ranked).toEqual(["ch-454000000-1", "ch-453000000-1", "ch-452000000-1", "ch-451000000"]);
+  });
+});
+
+describe("catalog joins", () => {
+  it("names channels from the starter list by frequency, whatever the slot or protocol", () => {
+    const sources = toSources(
+      [channel("454029223-Unknown-1", { protocol: "Unknown" }), channel("454029223-DMR-2", { speech_active: true })],
+      STARTER_CATALOG,
+    );
+    expect(sources).toHaveLength(1);
+    expect(sources[0].name).toBe("Columbia Tower shared radio");
+    expect(sources[0].channelIds[0]).toBe("454029223-DMR-2");
+    expect(sources[0].listenable.ok).toBe(true);
+  });
+
+  it("leaves out catalog entries that cover nothing currently heard", () => {
+    expect(toSources([], STARTER_CATALOG)).toEqual([]);
+  });
+
+  it("keeps a label made on an unidentified signal once the engine identifies it", () => {
+    const label = entry({ id: "label-ch-454347600", frequency_hz: 454_347_600, name: "Mystery" });
+    const before = toSources([channel("454347600-Unknown-1", { protocol: "Unknown" })], [label]);
+    expect(before[0].name).toBe("Mystery");
+    expect(before[0].listenable.ok).toBe(false);
+    const after = toSources(
+      [channel("454347600-Unknown-1", { protocol: "Unknown" }), channel("454347600-DMR-1")],
+      [label],
+    );
+    expect(after.map((s) => s.name)).toEqual(["Mystery"]);
+    expect(after[0].channelIds).toEqual(["454347600-DMR-1"]);
+    expect(after[0].listenable.ok).toBe(true);
+  });
+
+  it("gives each channel to the first entry that covers it (device labels before starter names)", () => {
+    const mine = entry({ id: "label-mine", frequency_hz: 452_685_504, name: "Sidewalk crew" });
+    const [source] = toSources([channel("452685504-DMR-1")], [mine, ...STARTER_CATALOG]);
+    expect(source.name).toBe("Sidewalk crew");
+  });
+
+  it("offers analog FM only when the producer says it can play it", () => {
+    const fm = [channel("451773100-FM-1")];
+    expect(toSources(fm, null)[0].listenable.ok).toBe(false);
+    expect(toSources(fm, null, { fmAudio: true })[0].listenable.ok).toBe(true);
   });
 });
 

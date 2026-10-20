@@ -46,24 +46,28 @@ async function getJson<T>(path: string, schema: z.ZodType<T>): Promise<T> {
 }
 
 /** A "frontend needs" endpoint: null when the engine doesn't serve it yet. */
+/** 404/405/501 on a "frontend needs" path mean the engine hasn't built it yet. */
+function notBuilt(status: number) {
+  return status === 404 || status === 405 || status === 501;
+}
+
 async function optional<T>(path: string, schema: z.ZodType<T>): Promise<T | null> {
   try {
     return await getJson(path, schema);
   } catch (error) {
-    if (error instanceof BackendError && (error.status === 404 || error.status === 405 || error.status === 501))
-      return null;
+    if (error instanceof BackendError && notBuilt(error.status)) return null;
     throw error;
   }
 }
 
 /**
- * Probe whether the engine serves a path. ServeDir answers unknown GETs with
- * 404, so a 404 means "not built yet"; anything else means the route exists.
+ * Probe whether the engine serves a path, for the operator view. ServeDir
+ * answers unknown GETs with 404; only a successful non-HTML answer counts.
  */
 async function probe(path: string): Promise<boolean> {
   try {
     const response = await fetch(path, { signal: AbortSignal.timeout(4000) });
-    return response.status !== 404 && response.status !== 405 && response.status !== 501;
+    return response.ok && !(response.headers.get("content-type") ?? "").includes("text/html");
   } catch {
     return false;
   }
@@ -82,29 +86,40 @@ export class HttpBackend implements Backend {
     let closed = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let attempt = 0;
+    let lastMessage = 0;
     const connect = () => {
-      socket = new WebSocket(wsUrl("/api/events"));
-      socket.onopen = () => {
-        attempt = 0;
-        onConnection(true);
+      const current = new WebSocket(wsUrl("/api/events"));
+      socket = current;
+      lastMessage = Date.now();
+      current.onopen = () => {
+        if (socket === current) onConnection(true);
       };
-      socket.onmessage = (message) => {
+      current.onmessage = (message) => {
+        if (socket !== current) return;
+        lastMessage = Date.now();
+        attempt = 0;
         if (typeof message.data !== "string") return;
         const event = parseJson(engineEventSchema, message.data);
         if (event) onEvent(event);
       };
-      socket.onclose = () => {
+      current.onclose = () => {
+        if (closed || socket !== current) return;
+        socket = null;
         onConnection(false);
-        if (closed) return;
         attempt += 1;
-        retry = setTimeout(connect, Math.min(10_000, 500 * 2 ** attempt));
+        retry = setTimeout(connect, Math.min(10_000, 500 * 2 ** attempt) * (0.8 + Math.random() * 0.4));
       };
     };
+    // The engine sends a heartbeat every second; a half-open socket goes quiet.
+    const watchdog = setInterval(() => {
+      if (socket && socket.readyState === WebSocket.OPEN && Date.now() - lastMessage > 5000) socket.close();
+    }, 1000);
     connect();
     return {
       close() {
         closed = true;
         clearTimeout(retry);
+        clearInterval(watchdog);
         socket?.close();
       },
     };
@@ -118,7 +133,10 @@ export class HttpBackend implements Backend {
         const batch = decodeRsp1(await response.arrayBuffer());
         this.binarySpectrum = true;
         if (batch) return batch;
-      } else this.binarySpectrum = false;
+      } else if (notBuilt(response.status) || (response.ok && this.binarySpectrum === null)) {
+        // Not served (ServeDir 404, or the SPA answering with HTML): use the JSON rows.
+        this.binarySpectrum = false;
+      } else if (!response.ok) throw new BackendError(`spectrum ${response.status}`, response.status);
     }
     return fromJson(await getJson(`/api/spectrum?after=${after}`, engineSpectrumSchema));
   }
@@ -188,7 +206,7 @@ export class HttpBackend implements Backend {
       await request(`/api/catalog/${encodeURIComponent(entry.id)}`, { method: "PUT", body: JSON.stringify(entry) });
       return true;
     } catch (error) {
-      if (error instanceof BackendError && [404, 405, 501].includes(error.status)) return false;
+      if (error instanceof BackendError && notBuilt(error.status)) return false;
       throw error;
     }
   }
@@ -211,7 +229,7 @@ export class HttpBackend implements Backend {
       probe("/api/catalog"),
       probe("/api/calls?limit=1"),
       probe("/api/activity?window_s=300&bucket_s=300"),
-      probe("/api/spectrum.bin?after=0"),
+      probe("/api/spectrum.bin?after=999999999999"),
     ]);
     return { blocks, catalog, calls, activity, spectrumBinary };
   }

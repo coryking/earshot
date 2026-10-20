@@ -15,8 +15,8 @@ secondary detail or in the operator view.
 | 1 | See what's happening now | **Now** tab (home). A plain sentence at the top ("Two channels talking. Busier than usual for a Tuesday evening."), the live strip, then the source list: talking now first, then recently heard, then quiet. | Open the app. Pull to refresh is unnecessary because the list is live. |
 | 2 | Tap to listen | Any row in the Now list, any trace in the live strip, any call in Catch up. The **player bar** docks above the tab bar with stop, mute and volume. | One tap on a row listens. Tapping the playing row again stops. The player bar's stop button is in thumb reach. Volume lives in the expanded player sheet (swipe the bar up). |
 | 3 | Catch up on what I missed | **Catch up** tab: recent calls newest first, grouped by "Just now / Earlier this hour / Today", each with a play button and duration. | Tap a call to play it. Playback continues down the list (autoplay next) like a podcast queue, so a listener can catch up hands-free. |
-| 4 | Follow or mute a source | Star and mute in the source sheet and the expanded player. Followed sources pin to the top of Now; muted ones sink into a collapsed "Muted" group and never alert. | Long-press a row (or tap its ⋯) to open the source sheet. |
-| 5 | Get alerted | Bell in the header opens the alerts sheet: "Tell me when a followed channel starts talking", "Tell me when it's much busier than normal". Uses browser notifications. | Toggle switches. The bell shows a dot when alerts are on. |
+| 4 | Follow or mute a source | Star and mute in the source sheet and the expanded player. Followed sources pin to the top of Now, like pinned chats; muted ones sink into a collapsed "Muted" group and never alert. Naming a source keeps its follow or mute. | Long-press a row (or tap its ⋯) to open the source sheet. |
+| 5 | Get alerted | Bell in the header opens the alerts sheet: "A channel I follow gets busy" (three or more calls within ten minutes) and "It's much busier than normal" (the area moves into busier-than-usual). Only activity since the page opened counts, with a 30-minute cooldown. In-page notifications today; closed-app push needs the engine. | Toggle switches. The bell turns amber when alerts are on. |
 | 6 | Change block | Tap the block name in the header ("Downtown business radio"). A sheet explains that the radio hears one stretch of the airwaves at a time, lists the blocks in plain terms, and asks for confirmation. | Deliberately two taps plus a confirm. Never a swipe. |
 | 7 | Is it working? / What is this? | The status dot next to the block name ("Listening", "Paused", "Not connected"); tap it for a plain explanation. Each source sheet has "What is this?": probable user, kind of traffic, and, for encrypted sources, why you can't hear them. | Tap. |
 
@@ -205,10 +205,46 @@ engine's wire types (typed in `src/api/engine.ts`, with nulls handled) into it.
 The engine today gives live channels, status, global listener selection, live
 PCM audio and JSON spectrum rows. The rest is defined in
 `engine/README.md` § "Frontend needs" and on issue #1. Until the engine
-answers those endpoints, the app uses honest in-browser fallbacks in live
-mode (a session-only call log derived from events, without audio; frequency
-names; activity since the page opened) and a complete typed mock in demo mode
-(`?demo`), which tests and screenshots use.
+answers those endpoints, live mode uses honest in-browser fallbacks:
+
+- **Names:** labels saved on this device, then starter names from the RF
+  research (`src/domain/starter.ts`), matched by frequency within 3 kHz.
+  Anything unmatched shows its number. When the engine gains a catalog, the
+  device labels are uploaded and the starter list steps aside.
+- **Catch up:** a session-only call log built from speech transitions, with no
+  audio, and a banner saying so.
+- **Busy vs normal:** activity since the page opened, and "Still learning what
+  normal sounds like here" until there is a baseline.
+
+Demo mode (`?demo`) runs everything on a typed mock, which tests and
+screenshots use; it's badged "Demo" and loaded only on request.
+
+## Shared listener selection
+
+The engine plays one channel for every browser. The player only clears a
+selection it made, quietly re-selects when the engine releases the selection
+(restart, someone else stopping), and shows "Someone on another device switched
+the radio to …" with "Switch back" only when another channel was chosen.
+Per-client listening is Frontend needs #1.
+
+## Spectrum feed
+
+The spectrum rows live in a module-level ring buffer (`src/waterfall/feed.ts`),
+not TanStack Query: they arrive incrementally by `after=` cursor and are read
+by the WebGL renderer, so there's nothing to cache or refetch. The feed pauses
+while the page is hidden and starts the picture over on a retune or engine
+restart.
+
+## Not yet verified
+
+- **Lock-screen playback on a real phone.** Live audio on touch devices goes
+  through an `<audio>` element fed by a MediaStream, with Media Session
+  metadata and controls, which is the route iOS Safari and Android Chrome keep
+  alive when locked. It has only been exercised in desktop Chromium. If a
+  browser refuses that route, the player falls back to the speakers and the
+  expanded player says the screen has to stay on. Acceptance test: start a
+  live channel on an iPhone and an Android phone, lock the screen, and confirm
+  audio continues for two minutes and the lock-screen stop works.
 
 ## Prototype decision
 

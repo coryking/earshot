@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { usePlayer } from "@/app/player-context";
+import { usePlayerInstance } from "@/app/player-context";
 import {
   navigate,
   openSheet,
@@ -45,7 +45,7 @@ export const shortcuts: [string, string][] = [
 export function Palette() {
   const open = useStore(paletteStore);
   const sources = useSources();
-  const [player] = usePlayer();
+  const player = usePlayerInstance();
   const run = (fn: () => void) => () => {
     paletteStore.set(false);
     fn();
@@ -162,8 +162,7 @@ function rows(): HTMLButtonElement[] {
 
 /** Global keyboard shortcuts. Ignored while typing or when a dialog is open. */
 export function useShortcuts() {
-  const [player] = usePlayer();
-  const sources = useSources();
+  const player = usePlayerInstance();
   const route = useRoute();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -231,5 +230,5 @@ export function useShortcuts() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [player, sources, route]);
+  }, [player, route]);
 }
