@@ -605,7 +605,17 @@ impl Radio for Pluto {
             return Restore::Verified;
         }
         // Receive controls only, one at a time, every write attempted.
-        let writes = ["rx_sampling_frequency", "rx_rf_bandwidth", "rx_lo", "rx_gain_control_mode", "rx_filter_fir_en"];
+        // The ADI low-rate helper the producer runs enables both FIRs; a producer that was killed
+        // leaves them on. They go first (a rate change is refused while a FIR is on). These are
+        // filter enable bits, not transmit controls.
+        let writes = [
+            "rx_filter_fir_en",
+            "tx_filter_fir_en",
+            "rx_sampling_frequency",
+            "rx_rf_bandwidth",
+            "rx_lo",
+            "rx_gain_control_mode",
+        ];
         let table = attributes();
         let mut errors = Vec::new();
         for name in writes {
