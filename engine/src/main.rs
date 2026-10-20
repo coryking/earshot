@@ -128,6 +128,10 @@ async fn main() -> Result<()> {
                 freq_correction_ppm.abs() <= 500.,
                 "freq-correction-ppm must be within +-500"
             );
+            if let Some(dir) = &state_dir {
+                radio_engine::store::probe_dir(dir)
+                    .with_context(|| format!("state dir {} is not writable", dir.display()))?;
+            }
             let labels = match labels {
                 Some(path) => radio_engine::freq::Labels::load(&path)
                     .with_context(|| format!("cannot load labels {}", path.display()))?,

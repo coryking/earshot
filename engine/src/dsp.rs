@@ -556,7 +556,6 @@ mod tests {
         let leak = wide.filter(&fm(n, rate, 6250., 10000., 500., 1050.));
         assert!(power(&leak[leak.len() / 2..]) > 1e5, "wide filter unexpectedly rejects 6.25 kHz");
     }
-    /// The ARM gate emits blocks of at most 256 samples; the meter must still work on them.
     /// The carrier estimate must land within 150 Hz of the truth wherever in the +-3 kHz
     /// range the carrier sits inside its channel, for voice-modulated FM at 2.5 kHz deviation.
     #[test]
@@ -583,6 +582,7 @@ mod tests {
         }
         assert!(meter.targets[0].carrier_hz.is_none());
     }
+    /// The ARM gate emits blocks of at most 256 samples; the meter must still work on them.
     #[test]
     fn slice_meter_accumulates_short_packets() {
         let rate = 100000.;

@@ -1,7 +1,7 @@
 use crate::{
     codec::Decoder,
     dsp::{ChannelDsp, ChannelSpec, SliceMeter, TargetBand},
-    fm::{FmAudio, Squelch},
+    fm::AnalogGate,
     freq::{Calibration, Labels, label_fields, snap},
     store::Store,
     wire::{DISCONTINUITY, Frame, OVERFLOW, PREROLL, START},
@@ -88,6 +88,8 @@ pub(crate) struct Engine {
     pub(crate) listener: Value,
     pub(crate) psd: VecDeque<(u64, f64, Vec<f32>)>,
     pub(crate) psd_seq: u64,
+    /// Waterfall range last handed to clients (see api::held_range).
+    pub(crate) psd_range: Option<(f64, f64)>,
     pub(crate) started: Option<f64>,
     pub(crate) error: Option<String>,
     pub(crate) frames: u64,
@@ -126,6 +128,7 @@ impl App {
                 listener: json!({"status":"stopped","state":"stopped","voice_active":false,"audio_chunks":0,"sequence":0,"dropped_blocks":0,"input_dropped":0,"queue_blocks":0,"error":null}),
                 psd: VecDeque::new(),
                 psd_seq: 0,
+                psd_range: None,
                 started: None,
                 error: None,
                 frames: 0,
@@ -139,12 +142,17 @@ impl App {
             labels: Arc::new(labels),
         }
     }
+    /// The engine state. A panic in another thread must not turn the whole engine into a
+    /// permanent outage, so a poisoned lock is recovered rather than propagated.
+    pub(crate) fn engine(&self) -> std::sync::MutexGuard<'_, Engine> {
+        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
     /// The calibrated, raster-snapped frequency for a device reading, and whether it snapped.
     pub(crate) fn display_frequency(&self, reading_hz: f64) -> (f64, bool) {
         snap(self.calibration.true_hz(reading_hz))
     }
     pub fn error(&self, msg: String) {
-        let mut e = self.inner.lock().unwrap();
+        let mut e = self.engine();
         e.error = Some(msg);
         e.active = false;
         e.decoder_generation += 1;
@@ -187,6 +195,7 @@ fn wanted_logicals(e: &Engine) -> HashSet<u64> {
     wanted_ids(e)
         .iter()
         .filter_map(|id| e.channels.get(id))
+        .filter(|c| c["in_range"] == true)
         .filter_map(|c| c["logical_hz"].as_f64())
         .map(|v| v.round() as u64)
         .collect()
@@ -198,6 +207,7 @@ pub(crate) fn sync_pins(e: &mut Engine) {
     let wanted: HashSet<u32> = wanted_ids(e)
         .iter()
         .filter_map(|id| e.channels.get(id))
+        .filter(|c| c["in_range"] == true)
         .filter_map(|c| c["stream_id"].as_u64())
         .filter(|s| *s > 0)
         .map(|s| s as u32)
@@ -245,6 +255,8 @@ fn refresh_rf(c: &mut Value) {
         c["slice_level_db"].clone()
     };
 }
+/// Catalog source id of a channel: its id's nominal frequency plus the slot.
+use crate::api::source_id;
 fn make_channel(app: &App, stream: u32, reading: f64, protocol: &str, slot: u8) -> Value {
     let (frequency, snapped) = app.display_frequency(reading);
     let mut channel = make_channel_json(stream, reading, frequency, snapped, protocol, slot);
@@ -306,7 +318,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
     let stream = cfg["stream_id"].as_u64().context("stream_id missing")? as u32;
     let epoch = WORKER_EPOCH.fetch_add(1, Ordering::Relaxed);
     {
-        let mut e = app.inner.lock().unwrap();
+        let mut e = app.engine();
         e.worker_epochs.insert(logical, epoch);
         if wanted_logicals(&e).contains(&logical) {
             e.decoder_generation += 1;
@@ -322,10 +334,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
         let mut decoders = Vec::new();
         let mut dsps: Vec<(ChannelSpec, ChannelDsp)> = Vec::new();
         let analog_capable = modes.iter().any(|&p| p != "NXDN48");
-        let mut fm = FmAudio::new();
-        let mut squelch = Squelch::default();
-        let mut fm_run = 0u32;
-        let mut digital_hold = 0f32;
+        let mut gate = AnalogGate::default();
         let mut generation = None;
 
         let mut expected_sample = None;
@@ -366,10 +375,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                     .unwrap_or(frame.rate as f64);
                 // One channel filter per channel class: NXDN48 (6.25 kHz) must not
                 // share the 12.5 kHz filter or its 6.25 kHz neighbors leak in.
-                fm = FmAudio::new();
-                squelch = Squelch::default();
-                fm_run = 0;
-                digital_hold = 0.;
+                gate = AnalogGate::default();
                 dsps.clear();
                 for &protocol in &modes {
                     let spec = spec_for(protocol);
@@ -384,7 +390,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                 rate = frame.rate;
                 live_samples = 0;
                 saw_preroll = false;
-                let mut e = app.inner.lock().unwrap();
+                let mut e = app.engine();
                 if gap {
                     if frame.flags & START != 0 && frame.flags & (DISCONTINUITY | OVERFLOW) == 0 {
                         e.source["intentional_gate_restarts"] =
@@ -433,23 +439,19 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                 }
             }
             // Analog FM shares the 12.5 kHz channel filter's discriminator. It is muted while
-            // DMR/NXDN signalling is present (3 s hold) and needs a quieted carrier with voice
-            // energy for three consecutive blocks before the channel is called analog voice.
+            // DMR/NXDN signalling is present and needs a quieted voice carrier for 0.3 s before
+            // the channel is called analog voice (see fm::AnalogGate).
             if analog_capable
                 && let Some((_, pcm)) = outputs.iter().find(|(s, _)| *s == ChannelSpec::CHANNEL_12_5)
             {
-                let seconds = pcm.len() as f32 / 48000.;
-                digital_hold = if digital_sync { 3. } else { (digital_hold - seconds).max(0.) };
-                let block = fm.push(pcm);
-                let open = squelch.update(&block) && digital_hold <= 0.;
-                fm_run = if open { fm_run + 1 } else { 0 };
-                let audio = if open { block.audio } else { Vec::new() };
-                heard.push(("FM", 1, audio, fm_run >= 3));
+                for (audio, confirmed) in gate.push(pcm, digital_sync) {
+                    heard.push(("FM", 1, audio, confirmed));
+                }
             }
             for (protocol, slot, audio, confirmed) in heard {
                 let speech = confirmed && !audio.is_empty() && frame.flags & PREROLL == 0;
                 let id = channel_id(app.display_frequency(frequency).0, protocol, slot);
-                let mut e = app.inner.lock().unwrap();
+                let mut e = app.engine();
                 if frame.generation != e.generation
                     || !e.active
                     || e.worker_epochs.get(&logical) != Some(&epoch)
@@ -479,6 +481,13 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                         .channels
                         .entry(id.clone())
                         .or_insert_with(|| make_channel(&app, stream, frequency, protocol, slot));
+                    // An entry restored from disk (or heard earlier under another stream) is
+                    // live again: re-attach it to this stream.
+                    entry["stream_id"] = json!(stream);
+                    entry["in_range"] = json!(true);
+                    entry["logical_hz"] = json!(frequency);
+                    entry["reading_hz"] = json!(frequency);
+                    entry["persisted"] = json!(false);
                     if let Some(sibling) = &sibling {
                         for key in [
                             "slice_rf_active",
@@ -498,6 +507,17 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                             "label_kind",
                             "label_detail",
                         ] {
+                            // A sibling that has not measured or labeled anything must not
+                            // erase what this entry already knows (e.g. restored from disk).
+                            let identity = matches!(
+                                key,
+                                "label" | "label_kind" | "label_detail" | "frequency_hz"
+                                    | "frequency_snapped" | "carrier_hz" | "carrier_offset_hz"
+                                    | "carrier_snapped"
+                            );
+                            if identity && sibling[key].is_null() {
+                                continue;
+                            }
                             entry[key] = sibling[key].clone();
                         }
                     }
@@ -535,6 +555,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                         .unwrap_or((frequency, Value::Null, None));
                     let events = e.store.record(
                         &id,
+                        &source_id(&id, slot as u64),
                         protocol,
                         slot as u64,
                         call_frequency,
@@ -636,7 +657,7 @@ fn schedule(
     workers: &mut HashMap<u64, Worker>,
     iq_seen: &HashMap<u32, Instant>,
 ) -> Result<()> {
-    let e = app.inner.lock().unwrap();
+    let e = app.engine();
     let wanted = wanted_logicals(&e);
     let pin_pending = e.listen_changed_at.elapsed() < PIN_GRACE;
     let mut effective = configs.clone();
@@ -649,6 +670,8 @@ fn schedule(
                     c["logical_hz"].as_f64().map(|v| v.round() as u64) == Some(stream)
                         && c["in_range"] == true
                         && c["decoded"] == true
+                        && c["persisted"] != true
+                        && matches!(c["protocol"].as_str(), Some("DMR" | "NXDN48"))
                 })
                 .and_then(|c| c["protocol"].as_str())
         {
@@ -699,7 +722,7 @@ fn schedule(
             e.insert(worker(app.clone(), stream, effective[&stream].clone())?);
         }
     }
-    let mut e = app.inner.lock().unwrap();
+    let mut e = app.engine();
     e.worker_epochs
         .retain(|stream, _| workers.contains_key(stream));
     e.source["queue_depth"] = json!(
@@ -765,11 +788,13 @@ fn apply_carrier(app: &App, c: &mut Value, reading_hz: f64, offset_hz: f64) -> b
     c["carrier_hz"] = json!(truth.round());
     c["carrier_snapped"] = json!(snapped);
     if snapped {
-        let label = app.labels.lookup(truth).cloned();
         c["frequency_hz"] = json!(frequency);
         c["frequency_snapped"] = json!(true);
-        if let (Some(fields), Some(extra)) =
-            (c.as_object_mut(), label_fields(label.as_ref()).as_object())
+        // A found label replaces the old one; no label found leaves what is there (a name the
+        // channel was restored with, for instance).
+        if let Some(label) = app.labels.lookup(truth)
+            && let (Some(fields), Some(extra)) =
+                (c.as_object_mut(), label_fields(Some(label)).as_object())
         {
             fields.extend(extra.clone());
         }
@@ -779,11 +804,11 @@ fn apply_carrier(app: &App, c: &mut Value, reading_hz: f64, offset_hz: f64) -> b
 pub fn attach_control(stream: &TcpStream, app: &App) -> Result<()> {
     let mut writer = stream.try_clone()?;
     let (tx, rx) = mpsc::sync_channel::<Value>(32);
-    app.inner.lock().unwrap().control = Some(tx);
+    app.engine().control = Some(tx);
     let app = app.clone();
     thread::spawn(move || {
         for (sequence, value) in rx.into_iter().enumerate() {
-            let generation = app.inner.lock().unwrap().generation;
+            let generation = app.engine().generation;
             let frame = Frame {
                 kind: 6,
                 flags: 0,
@@ -824,9 +849,9 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
                 ) =>
             {
-                let stopped = app.inner.lock().unwrap().source["receiver_state"] == "stopped";
+                let stopped = app.engine().source["receiver_state"] == "stopped";
                 if stopped {
-                    let mut e = app.inner.lock().unwrap();
+                    let mut e = app.engine();
                     e.active = false;
                     e.control = None;
                     e.worker_epochs.clear();
@@ -866,7 +891,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                 iq_seen.clear();
                 meters.clear();
             }
-            let mut e = app.inner.lock().unwrap();
+            let mut e = app.engine();
             e.source = config.clone();
             e.generation = frame.generation;
             e.active = config["receiver_state"].as_str() != Some("stopped");
@@ -875,6 +900,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                 e.pinned_streams.clear(); // a new source generation starts with nothing pinned
                 e.decoder_generation += 1;
                 e.psd.clear();
+                e.psd_range = None;
                 if e.started.is_none() {
                     e.started = Some(now());
                 }
@@ -982,7 +1008,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                 json!({"type":"source_config","generation":frame.generation,"source":config}),
             );
             schedule(&app, &configs, &mut workers, &iq_seen)?;
-            sync_pins(&mut app.inner.lock().unwrap());
+            sync_pins(&mut app.engine());
             rebuild_meters(&configs, &mut meters);
             transport_sequences.insert(frame.stream_id, frame.sequence);
             config_generation = Some(frame.generation);
@@ -996,13 +1022,13 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
             && frame.sequence != previous.wrapping_add(1)
         {
             pending_gaps.insert(frame.stream_id);
-            app.inner.lock().unwrap().drops += 1;
+            app.engine().drops += 1;
         }
         if frame.kind == 1 && pending_gaps.remove(&frame.stream_id) {
             frame.flags |= DISCONTINUITY;
         }
         {
-            let mut e = app.inner.lock().unwrap();
+            let mut e = app.engine();
             e.frames += 1;
             if frame.rate > 0 && matches!(frame.kind, 1 | 2) {
                 let position = frame.first_sample as f64 / frame.rate as f64;
@@ -1042,7 +1068,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     }
                     let full_scale = 2f64.powi(frame.valid_bits.clamp(1, 16) as i32 - 1);
                     if meter.measure(&iq, frame.rate as f64, full_scale) {
-                        let mut e = app.inner.lock().unwrap();
+                        let mut e = app.engine();
                         for target in &meter.targets {
                             for c in e.channels.values_mut().filter(|c| {
                                 c["stream_id"] == frame.stream_id
@@ -1086,7 +1112,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     }
                 }
                 if missed {
-                    app.inner.lock().unwrap().drops += 1;
+                    app.engine().drops += 1;
                     pending_gaps.insert(shared.stream_id);
                 }
             }
@@ -1103,7 +1129,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
                     .collect();
                 anyhow::ensure!(row.iter().all(|x| x.is_finite()), "nonfinite PSD");
-                let mut e = app.inner.lock().unwrap();
+                let mut e = app.engine();
                 e.psd_seq += 1;
                 let seq = e.psd_seq;
                 e.psd.push_back((
@@ -1132,7 +1158,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                         target.active = false;
                     }
                 }
-                let mut e = app.inner.lock().unwrap();
+                let mut e = app.engine();
                 for c in e
                     .channels
                     .values_mut()
@@ -1168,7 +1194,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                 } else {
                     workers.retain(|_, worker| worker.stream != frame.stream_id);
                 }
-                let mut e = app.inner.lock().unwrap();
+                let mut e = app.engine();
                 e.drops += 1;
                 if frame.stream_id == 0 {
                     e.worker_epochs.clear();
@@ -1176,11 +1202,11 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                 } else {
                     e.worker_epochs
                         .retain(|logical, _| workers.contains_key(logical));
-                    if e.selected
-                        .as_deref()
-                        .and_then(|id| e.channels.get(id))
-                        .is_some_and(|c| c["stream_id"] == frame.stream_id)
-                    {
+                    let wanted_here = wanted_ids(&e)
+                        .iter()
+                        .filter_map(|id| e.channels.get(id))
+                        .any(|c| c["stream_id"] == frame.stream_id);
+                    if wanted_here {
                         e.decoder_generation += 1;
                     }
                 }
@@ -1229,7 +1255,7 @@ fn persisted_entry(c: &Value) -> Value {
 /// Put catalog entries saved by an earlier run back, marked out of range until a source
 /// declares them again.
 pub fn restore_catalog(app: &App) {
-    let mut e = app.inner.lock().unwrap();
+    let mut e = app.engine();
     let known: Vec<(String, Value)> = e.store.known.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     for (id, saved) in known {
         let mut entry = make_channel_json(0, 0., saved["frequency_hz"].as_f64().unwrap_or(0.), false, saved["protocol"].as_str().unwrap_or("Unknown"), saved["slot"].as_u64().unwrap_or(1) as u8);
@@ -1255,26 +1281,36 @@ pub fn spawn_janitor(app: App) {
             let dt = last.elapsed().as_secs_f32();
             last = Instant::now();
             let at = now();
-            let mut e = app.inner.lock().unwrap();
+            let mut e = app.engine();
             let events = e.store.close_idle(at);
             for event in events {
                 let _ = app.events.send(json!({"type":"call","phase":event.phase,"generation":e.generation,"call":event.call}));
             }
-            let observed: Vec<(String, bool, bool, Option<Value>)> = e
+            // Every entry at one frequency (Unknown, DMR slots, FM) sees the same slice RF; credit
+            // it once per (stream, frequency) so the block's RF total is not multiplied.
+            let mut rf_credited: HashSet<(u64, u64)> = HashSet::new();
+            let observed: Vec<(String, bool, bool, bool, Option<Value>)> = e
                 .channels
                 .values()
                 .map(|c| {
                     let keep = c["decoded"] == true || c["carrier_snapped"] == true;
+                    let rf = c["rf_active"] == true;
+                    let first_rf = rf
+                        && rf_credited.insert((
+                            c["stream_id"].as_u64().unwrap_or(0),
+                            c["logical_hz"].as_f64().map_or(0, |v| v.round() as u64),
+                        ));
                     (
                         c["id"].as_str().unwrap_or("").to_string(),
-                        c["rf_active"] == true,
+                        first_rf,
                         c["speech_active"] == true,
+                        rf,
                         keep.then(|| persisted_entry(c)),
                     )
                 })
                 .collect();
-            for (id, rf, talk, entry) in observed {
-                e.store.add_activity(&id, at, if rf { dt } else { 0. }, if talk { dt } else { 0. });
+            for (id, first_rf, talk, _rf, entry) in observed {
+                e.store.add_activity(&id, at, if first_rf { dt } else { 0. }, if talk { dt } else { 0. });
                 if let Some(entry) = entry
                     && e.store.known.get(&id) != Some(&entry)
                 {
@@ -1284,6 +1320,7 @@ pub fn spawn_janitor(app: App) {
             }
             if last_save.elapsed() > Duration::from_secs(10) {
                 e.store.save();
+                e.store.prune(at);
                 last_save = Instant::now();
             }
         }
@@ -1291,7 +1328,11 @@ pub fn spawn_janitor(app: App) {
 }
 /// Flush persistent state now (graceful shutdown).
 pub fn flush(app: &App) {
-    app.inner.lock().unwrap().store.save();
+    let mut e = app.engine();
+    // Calls still open when the engine stops keep their audio.
+    e.store.close_all();
+    e.store.save();
+    e.store.sync();
 }
 
 #[cfg(test)]
@@ -1349,7 +1390,7 @@ mod tests {
             f.write(&mut bytes).unwrap();
         }
         ingest(&bytes[..], app.clone()).unwrap();
-        let e = app.inner.lock().unwrap();
+        let e = app.engine();
         assert_eq!(e.drops, 0);
         assert_eq!(e.psd.len(), 1);
         assert_eq!(e.source["psd"]["unit"], "dBFS");
@@ -1399,7 +1440,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let admitted = loop {
             let admitted: Vec<u64> = {
-                let e = app.inner.lock().unwrap();
+                let e = app.engine();
                 e.channels
                     .values()
                     .filter(|c| c["decoder_admitted"] == true)
@@ -1411,7 +1452,7 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(10));
         };
-        let metadata_only = app.inner.lock().unwrap().source["metadata_only_streams"].clone();
+        let metadata_only = app.engine().source["metadata_only_streams"].clone();
         release.send(()).unwrap();
         runner.join().unwrap().unwrap();
         assert_eq!(admitted, vec![50], "forwarded stream must hold the decoder budget");
@@ -1494,7 +1535,7 @@ mod tests {
         };
         let deadline = Instant::now() + Duration::from_secs(5);
         let admitted = loop {
-            let n = app.inner.lock().unwrap().channels.values().filter(|c| c["decoder_admitted"] == true).count();
+            let n = app.engine().channels.values().filter(|c| c["decoder_admitted"] == true).count();
             if n >= 3 || Instant::now() > deadline {
                 break n;
             }
@@ -1507,6 +1548,10 @@ mod tests {
     /// 25 ksps IQ of a quiet narrowband-FM carrier (1 kHz tone, 1.5 kHz deviation) or, with
     /// `voice` false, receiver noise only.
     fn fm_stream_payload(voice: bool, first: u64) -> Vec<u8> {
+        fm_payload(voice, first, 0., 1000.)
+    }
+    /// A carrier `offset_hz` from the stream center, modulated by a `tone_hz` tone.
+    fn fm_payload(voice: bool, first: u64, offset_hz: f64, tone_hz: f64) -> Vec<u8> {
         let mut state = 0xC0FF_EE11u32 ^ first as u32;
         let mut noise = move || {
             state ^= state << 13;
@@ -1518,8 +1563,9 @@ mod tests {
         for i in 0..2500u64 {
             let t = (first + i) as f64 / 25000.;
             let (re, im) = if voice {
-                let phase = 2. * std::f64::consts::PI * 1000. * t;
-                let carrier = 1.5 / 1.0 * phase.sin() * 1.0; // modulation index 1.5 (1.5 kHz dev / 1 kHz tone)
+                // Modulation index 1.5 kHz deviation / tone frequency.
+                let carrier = 2. * std::f64::consts::PI * offset_hz * t
+                    + (1500. / tone_hz) * (2. * std::f64::consts::PI * tone_hz * t).sin();
                 (3000. * carrier.cos() + 30. * noise(), 3000. * carrier.sin() + 30. * noise())
             } else {
                 (4000. * noise(), 4000. * noise())
@@ -1530,6 +1576,9 @@ mod tests {
         out
     }
     fn fm_session(voice: bool, pin_unknown: bool) -> (Option<Value>, Vec<String>, bool, Vec<Value>) {
+        fm_session_in(App::new(8), voice, pin_unknown, true)
+    }
+    fn fm_session_in(app: App, voice: bool, pin_unknown: bool, rf_active: bool) -> (Option<Value>, Vec<String>, bool, Vec<Value>) {
         let config = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,
             "streams":[{"stream_id":1,"center_hz":454000000u64,"target_hz":454000000u64,"rate_hz":25000,"protocol":"Unknown","iq_forwarded":true}],"psd":{"unit":"dBFS"}});
         let mut bytes = Vec::new();
@@ -1541,7 +1590,8 @@ mod tests {
         for _ in 0..30 {
             let at = sample as f64 / 25000.;
             let mut bytes = Vec::new();
-            let mut act = frame(3, 1, 1, sequence, sample, br#"{"rf_active":true,"level_db":-20.0}"#.to_vec());
+            let active = if rf_active { &br#"{"rf_active":true,"level_db":-20.0}"#[..] } else { &br#"{"rf_active":false,"level_db":-90.0}"#[..] };
+            let mut act = frame(3, 1, 1, sequence, sample, active.to_vec());
             act.center_hz = 454_000_000;
             act.write(&mut bytes).unwrap();
             let mut iq = frame(1, 1, 1, sequence + 1, sample, fm_stream_payload(voice, sample));
@@ -1552,7 +1602,6 @@ mod tests {
             sample += 2500;
         }
         let (release, rx) = mpsc::channel();
-        let app = App::new(8);
         let mut audio_rx = app.audio.subscribe();
         let runner = {
             let app = app.clone();
@@ -1569,7 +1618,7 @@ mod tests {
             // Pin the unconfirmed bin entry (no 422): audio must follow it.
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                let mut e = app.inner.lock().unwrap();
+                let mut e = app.engine();
                 if e.channels.contains_key("454000000-Unknown-1") {
                     e.selected = Some("454000000-Unknown-1".into());
                     e.selected_at = Instant::now() - Duration::from_secs(1);
@@ -1590,10 +1639,10 @@ mod tests {
                 Err(_) => break,
             }
         }
-        let fm = app.inner.lock().unwrap().channels.get("454000000-FM-1").cloned();
-        let digital = app.inner.lock().unwrap().channels.values().any(|c| c["protocol"] != "Unknown" && c["protocol"] != "FM" && c["decoded"] == true);
+        let fm = app.engine().channels.get("454000000-FM-1").cloned();
+        let digital = app.engine().channels.values().any(|c| c["protocol"] != "Unknown" && c["protocol"] != "FM" && c["decoded"] == true);
         let calls = {
-            let mut e = app.inner.lock().unwrap();
+            let mut e = app.engine();
             e.store.close_idle(now() + 10.);
             e.store.list(None, 10, None).0
         };
@@ -1606,7 +1655,8 @@ mod tests {
         let (fm, _, digital, calls) = fm_session(true, false);
         // The speaking channel is recorded as a call even though nobody pinned it.
         assert_eq!(calls.len(), 1, "{calls:?}");
-        assert_eq!(calls[0]["source"], "454000000-FM-1");
+        assert_eq!(calls[0]["channel_id"], "454000000-FM-1");
+        assert_eq!(calls[0]["source_id"], "454000000-1");
         assert!(calls[0]["duration_s"].as_f64().unwrap() >= 0.8);
         let fm = fm.expect("analog voice entry");
         assert_eq!(fm["protocol"], "FM");
@@ -1649,7 +1699,7 @@ mod tests {
         };
         let deadline = Instant::now() + Duration::from_secs(5);
         let channel = loop {
-            let c = app.inner.lock().unwrap().channels.values().find(|c| c["label"].is_string()).cloned();
+            let c = app.engine().channels.values().find(|c| c["carrier_offset_hz"].is_number()).cloned();
             if c.is_some() || Instant::now() > deadline {
                 break c;
             }
@@ -1671,10 +1721,10 @@ mod tests {
     fn listeners_pin_their_streams_once_and_unpin_when_the_last_one_leaves() {
         let app = App::new(3);
         let (tx, rx) = mpsc::sync_channel::<Value>(16);
-        let mut e = app.inner.lock().unwrap();
+        let mut e = app.engine();
         e.control = Some(tx);
         for (id, stream) in [("a", 5u64), ("b", 5), ("c", 6)] {
-            e.channels.insert(id.into(), json!({"id":id,"stream_id":stream,"logical_hz":454000000.0 + stream as f64}));
+            e.channels.insert(id.into(), json!({"id":id,"stream_id":stream,"in_range":true,"logical_hz":454000000.0 + stream as f64}));
         }
         e.listeners.insert(1, "a".into());
         e.listeners.insert(2, "b".into()); // same physical stream as "a"
@@ -1714,7 +1764,9 @@ mod tests {
                 let mut act = frame(3, 1, stream, sequence, sample, br#"{"rf_active":true,"level_db":-20.0}"#.to_vec());
                 act.center_hz = center;
                 act.write(&mut bytes).unwrap();
-                let mut iq = frame(1, 1, stream, sequence + 1, sample, fm_stream_payload(true, sample + stream as u64));
+                // Stream 1 carries a 700 Hz tone and stream 2 a 1500 Hz tone, so cross-routed audio is audible in the test.
+                let tone = if stream == 1 { 700. } else { 1500. };
+                let mut iq = frame(1, 1, stream, sequence + 1, sample, fm_payload(true, sample + stream as u64, 0., tone));
                 iq.center_hz = center;
                 iq.write(&mut bytes).unwrap();
             }
@@ -1731,21 +1783,24 @@ mod tests {
             thread::spawn(move || ingest(input, app))
         };
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !app.inner.lock().unwrap().channels.contains_key("454012500-Unknown-1") {
+        while !app.engine().channels.contains_key("454012500-Unknown-1") {
             assert!(Instant::now() < deadline);
             thread::sleep(Duration::from_millis(2));
         }
         {
-            let mut e = app.inner.lock().unwrap();
+            let mut e = app.engine();
             e.listeners.insert(1, "454000000-Unknown-1".into());
             e.listeners.insert(2, "454012500-Unknown-1".into());
         }
         thread::sleep(Duration::from_millis(1200));
         let mut ids = std::collections::HashSet::new();
+        let mut pcm: HashMap<String, Vec<i16>> = HashMap::new();
         loop {
             match audio_rx.try_recv() {
                 Ok(a) => {
-                    ids.insert(a.meta["channel_id"].as_str().unwrap().to_string());
+                    let id = a.meta["channel_id"].as_str().unwrap().to_string();
+                    pcm.entry(id.clone()).or_default().extend(a.pcm.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])));
+                    ids.insert(id);
                 }
                 Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
                 Err(_) => break,
@@ -1758,6 +1813,95 @@ mod tests {
             ["454000000-Unknown-1", "454012500-Unknown-1"].iter().map(|s| s.to_string()).collect(),
             "each listener hears its own channel"
         );
+        // And the audio under each id is that stream's own tone (zero-crossing estimate).
+        let tone = |samples: &[i16]| {
+            let crossings = samples.windows(2).filter(|w| (w[0] >= 0) != (w[1] >= 0)).count();
+            crossings as f64 / 2. / (samples.len() as f64 / 8000.)
+        };
+        let (low, high) = (tone(&pcm["454000000-Unknown-1"]), tone(&pcm["454012500-Unknown-1"]));
+        assert!((low - 700.).abs() < 120., "stream 1 should carry its 700 Hz tone, got {low}");
+        assert!((high - 1500.).abs() < 200., "stream 2 should carry its 1500 Hz tone, got {high}");
+    }
+    #[test]
+    fn a_speaking_channel_without_slice_rf_activity_is_not_recorded() {
+        let (fm, _, _, calls) = fm_session_in(App::new(8), true, false, false);
+        assert!(calls.is_empty(), "no call without slice RF activity: {calls:?}");
+        assert!(fm.is_none_or(|c| c["speech_active"] != true));
+    }
+    #[test]
+    fn a_catalog_restored_from_disk_reattaches_when_the_channel_is_heard_again() {
+        let dir = std::env::temp_dir().join(format!("restore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("catalog.json"),
+            json!({"454000000-FM-1": {"id":"454000000-FM-1","protocol":"FM","slot":1,"kind":"voice","decoded":true,
+                "frequency_hz":454000000.0,"frequency_snapped":true,"label":"Garage door","audio_seconds":12.5,
+                "last_heard":1000.0,"carrier_snapped":true}}).to_string(),
+        )
+        .unwrap();
+        let app = App::configured(AppConfig { state_dir: Some(dir.clone()), ..AppConfig::new(8) });
+        restore_catalog(&app);
+        let restored = app.engine().channels["454000000-FM-1"].clone();
+        assert_eq!(restored["persisted"], true);
+        assert_eq!(restored["in_range"], false, "not in range until a source declares it");
+        assert_eq!(restored["available"], false);
+        assert_eq!(restored["label"], "Garage door");
+        assert_eq!(restored["audio_seconds"], 12.5);
+        // The status payload still satisfies the browser schema with restored entries present.
+        for key in ["kind", "audio_seconds", "sequence", "rf_active", "decoded", "speech_active", "in_range", "available"] {
+            assert!(!restored[key].is_null(), "{key} must not be null");
+        }
+        let (fm, _, _, _) = fm_session_in(app.clone(), true, false, true);
+        let live = fm.expect("heard live again");
+        assert_eq!(live["in_range"], true);
+        assert_eq!(live["persisted"], false);
+        assert_eq!(live["stream_id"], 1);
+        assert_eq!(live["logical_hz"], 454_000_000.0);
+        assert_eq!(live["label"], "Garage door", "the restored label survives");
+        assert!(live["audio_seconds"].as_f64().unwrap() > 12.5, "audio keeps accumulating on the restored entry");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// A carrier 3 kHz off the raster does not snap: the entry keeps its nominal frequency and
+    /// id, and only `carrier_hz` records the measurement.
+    #[test]
+    fn an_off_raster_carrier_does_not_rename_or_relabel_the_channel() {
+        let app = App::new(8);
+        let config = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,
+            "streams":[{"stream_id":1,"center_hz":454000000u64,"target_hz":454000000u64,"rate_hz":25000,"protocol":"Unknown","iq_forwarded":true}],"psd":{"unit":"dBFS"}});
+        let mut bytes = Vec::new();
+        let mut cfg = frame(4, 1, 0, 0, 0, config.to_string().into_bytes());
+        cfg.center_hz = 454_000_000;
+        cfg.write(&mut bytes).unwrap();
+        let mut sample = 0u64;
+        for packet in 0..8u64 {
+            let mut iq = frame(1, 1, 1, packet + 1, sample, fm_payload(true, sample, 3000., 1000.));
+            iq.center_hz = 454_000_000;
+            iq.write(&mut bytes).unwrap();
+            sample += 2500;
+        }
+        let (release, rx) = mpsc::channel();
+        let runner = {
+            let app = app.clone();
+            let input = HeldOpen { data: std::io::Cursor::new(bytes), release: rx };
+            thread::spawn(move || ingest(input, app))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let channel = loop {
+            let c = app.engine().channels.values().find(|c| c["carrier_offset_hz"].is_number()).cloned();
+            if c.is_some() || Instant::now() > deadline {
+                break c;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        release.send(()).unwrap();
+        runner.join().unwrap().unwrap();
+        let channel = channel.expect("carrier measured");
+        assert!((channel["carrier_offset_hz"].as_f64().unwrap() - 3000.).abs() < 250., "{channel}");
+        assert_eq!(channel["carrier_snapped"], false);
+        assert_eq!(channel["frequency_hz"], 454_000_000.0, "keeps the nominal frequency");
+        assert_eq!(channel["id"], "454000000-Unknown-1");
+        assert_eq!(channel["frequency_snapped"], true, "the nominal bin center is itself on the raster");
     }
     #[test]
     fn rf_active_metadata_only_streams_do_not_starve_forwarded_stream() {
@@ -1856,7 +2000,7 @@ mod tests {
                 let mut analog = 0f64;
                 for _ in 0..400 {
                     thread::sleep(Duration::from_millis(25));
-                    let e = app.inner.lock().unwrap();
+                    let e = app.engine();
                     for c in e.channels.values() {
                         let seconds = c["audio_seconds"].as_f64().unwrap_or(0.);
                         if c["protocol"] == "FM" {
@@ -1943,7 +2087,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let snapshot = loop {
             let snap: HashMap<u64, Value> = {
-                let e = app.inner.lock().unwrap();
+                let e = app.engine();
                 e.channels
                     .values()
                     .filter(|c| c["protocol"] == "DMR" && c["slot"] == 1)
@@ -1958,7 +2102,7 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         };
         let (out_of_slice, slot2_active) = {
-            let e = app.inner.lock().unwrap();
+            let e = app.engine();
             (
                 e.source["out_of_slice_targets"].as_u64().unwrap_or(0),
                 e.channels.get("454087500-DMR-2").map(|c| c["rf_active"] == true),
@@ -1991,7 +2135,7 @@ mod tests {
             .write(&mut bytes)
             .unwrap();
         ingest(&bytes[..], app.clone()).unwrap();
-        let e = app.inner.lock().unwrap();
+        let e = app.engine();
         assert_eq!(e.channels.len(), 2);
         assert_eq!(e.channels["454029200-Unknown-1"]["in_range"], false);
         assert_eq!(e.channels["452685500-Unknown-1"]["in_range"], true);

@@ -12,7 +12,7 @@
 //!
 //! Noise squelch (the standard FM receiver method): with no carrier the discriminator
 //! output is dominated by noise whose spectrum rises with frequency, so the energy in a
-//! band above the voice passband (about 4 to 7 kHz) is large; a quieted signal has little
+//! band above the voice passband (a band-pass at 5.4 kHz, Q 1.8) is large; a quieted signal has little
 //! there. The metric is that band's RMS in Hz of deviation, compared with open/close
 //! thresholds. Data bursts (DMR/NXDN) are kept out by the caller using decoder sync.
 use crate::dsp::{ChannelSpec, Resampler};
@@ -75,9 +75,10 @@ impl Biquad {
 pub struct FmBlock {
     /// 8 kHz signed16 audio, de-emphasized and band-limited.
     pub audio: Vec<i16>,
-    /// RMS of the 4 to 7 kHz noise band, in Hz of deviation.
+    /// RMS of the noise band (band-pass at 5.4 kHz, Q 1.8), in Hz of deviation.
     pub noise_hz: f32,
-    /// RMS of the 300 Hz to 3.4 kHz voice band after de-emphasis, in Hz of deviation.
+    /// RMS of the audio after de-emphasis and the 300 Hz highpass (before decimation), in Hz
+    /// of deviation.
     pub voice_hz: f32,
 }
 pub struct FmAudio {
@@ -193,6 +194,63 @@ impl Squelch {
         self.open
     }
 }
+/// Block the analog path works in. The squelch thresholds were calibrated on blocks of this
+/// length (100 ms), so producers that deliver tiny packets are batched up to it.
+pub const BLOCK_SAMPLES: usize = 4800;
+/// Analog audio for a channel: FM demodulation, noise squelch, and the rule that digital
+/// signalling mutes it. Time-based, independent of how the producer chunks its IQ.
+pub struct AnalogGate {
+    fm: FmAudio,
+    squelch: Squelch,
+    pending: Vec<i16>,
+    digital_hold_s: f32,
+    sync_seen: bool,
+    open_s: f32,
+    /// Digital sync mutes analog audio for this long.
+    pub digital_hold: f32,
+    /// A quieted voice carrier must hold this long before the channel counts as analog voice.
+    pub confirm_s: f32,
+}
+impl Default for AnalogGate {
+    fn default() -> Self {
+        Self {
+            fm: FmAudio::new(),
+            squelch: Squelch::default(),
+            pending: Vec::new(),
+            digital_hold_s: 0.,
+            sync_seen: false,
+            open_s: 0.,
+            digital_hold: 3.,
+            confirm_s: 0.3,
+        }
+    }
+}
+impl AnalogGate {
+    /// Feed 48 kHz discriminator audio; `digital_sync` says DMR/NXDN signalling was seen in
+    /// the same span. Returns (8 kHz audio, confirmed analog voice) per completed block.
+    pub fn push(&mut self, pcm: &[i16], digital_sync: bool) -> Vec<(Vec<i16>, bool)> {
+        self.sync_seen |= digital_sync;
+        self.pending.extend_from_slice(pcm);
+        let mut out = Vec::new();
+        while self.pending.len() >= BLOCK_SAMPLES {
+            let rest = self.pending.split_off(BLOCK_SAMPLES);
+            let block = std::mem::replace(&mut self.pending, rest);
+            let seconds = BLOCK_SAMPLES as f32 / 48000.;
+            self.digital_hold_s = if self.sync_seen {
+                self.digital_hold
+            } else {
+                (self.digital_hold_s - seconds).max(0.)
+            };
+            self.sync_seen = false;
+            let measured = self.fm.push(&block);
+            let open = self.squelch.update(&measured) && self.digital_hold_s <= 0.;
+            self.open_s = if open { self.open_s + seconds } else { 0. };
+            let audio = if open { measured.audio } else { Vec::new() };
+            out.push((audio, self.open_s >= self.confirm_s - 1e-6));
+        }
+        out
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -274,6 +332,49 @@ mod tests {
         let mut quiet = FmAudio::new();
         let silent = quiet.push(&[0i16; 4800]);
         assert!(!Squelch::default().update(&silent));
+    }
+    fn voice_pcm(seconds: f32) -> Vec<i16> {
+        tone(900., 1800., (48000. * seconds) as usize)
+    }
+    #[test]
+    fn digital_sync_mutes_analog_for_the_hold_time_then_releases() {
+        let mut gate = AnalogGate::default();
+        // 0.5 s of clear voice: audio and confirmation arrive after 0.3 s.
+        let blocks = gate.push(&voice_pcm(0.5), false);
+        assert_eq!(blocks.len(), 5);
+        assert!(blocks.iter().filter(|b| b.1).count() >= 2, "confirmed after 0.3 s of voice");
+        assert!(blocks.iter().any(|b| !b.0.is_empty()));
+        // A DMR sync arrives: for the next 3 s the same voice-like signal stays muted.
+        let muted = gate.push(&voice_pcm(0.1), true);
+        assert!(muted.iter().all(|b| b.0.is_empty() && !b.1), "muted on sync");
+        let still = gate.push(&voice_pcm(2.8), false);
+        assert!(still.iter().all(|b| b.0.is_empty() && !b.1), "held for 3 s: {}", still.len());
+        // Hold expired: audio returns, and must re-confirm.
+        let after = gate.push(&voice_pcm(0.6), false);
+        assert!(after.iter().any(|b| !b.0.is_empty()), "audio returns after the hold");
+        assert!(!after[0].1 || after.len() > 3);
+    }
+    #[test]
+    fn tiny_producer_packets_give_the_same_decisions_as_whole_blocks() {
+        let pcm = voice_pcm(1.0);
+        let mut whole = AnalogGate::default();
+        let a: Vec<(Vec<i16>, bool)> = whole.push(&pcm, false);
+        let mut small = AnalogGate::default();
+        let b: Vec<(Vec<i16>, bool)> = pcm.chunks(120).flat_map(|c| small.push(c, false)).collect();
+        assert_eq!(a, b, "256-sample ARM-gate packets are batched to 100 ms blocks");
+    }
+    #[test]
+    fn squelch_hysteresis_holds_between_the_thresholds() {
+        let measure = |noise_hz: f32| FmBlock { audio: vec![], noise_hz, voice_hz: 800. };
+        let mut sq = Squelch::default();
+        assert!(!sq.update(&measure(900.)), "900 Hz is above the 700 Hz open threshold");
+        assert!(sq.update(&measure(500.)), "opens below 700");
+        assert!(sq.update(&measure(900.)), "stays open between 700 and 1100");
+        assert!(sq.update(&measure(1050.)));
+        for _ in 0..4 {
+            sq.update(&measure(1200.));
+        }
+        assert!(!sq.update(&measure(1200.)), "closes above 1100");
     }
     #[test]
     fn squelch_hangs_through_a_short_gap_then_closes() {

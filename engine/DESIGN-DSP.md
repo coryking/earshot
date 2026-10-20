@@ -147,3 +147,19 @@ voice band above 120 Hz and a 3-block hang. The channel is only called analog vo
 three consecutive open blocks, and stays muted for 3 s after any DMR/NXDN sync so data
 bursts never play as buzz. `fm_noise_squelch_on_real_channels` (ignored, needs the
 recording) reproduces the numbers.
+
+## Carrier estimate (`SliceMeter`)
+
+Each target's carrier is the power-weighted centroid of the bins that stand 4 dB above the
+slice noise within +-6.25 kHz of the nominal frequency, from the same averaged 1024-point
+spectrum as the activity measure. It is smoothed over packets (0.25 per packet) once the
+in-band power is 10 dB over noise (and ignored below 6 dB). The calibrated estimate snaps to
+the 6.25 kHz raster when within 1.5 kHz; otherwise the channel keeps its nominal frequency,
+id and label and only `carrier_hz` records the measurement. Accuracy: within 24 Hz on
+synthetic carriers across +-3 kHz, and on real 454 MHz carriers (corrected by 23.3 ppm) within
+35 to 172 Hz of the RadioReference-listed channels (454.01875, 454.20625, 454.25 MHz). Limits:
+a coarse 12.5 kHz producer bin can hold several emitters (the live stream-1 bin sees
+neighbors 6 kHz either side, and its estimate lands 1.8 kHz off), and then the centroid is
+not a carrier; the 100 ksps slices of the FPGA channelizer will need peak picking per raster
+channel instead. The ppm itself was fitted from five ATSC pilots (22.8 to 24.1 ppm, median
+23.35) and from raster agreement of 15 carriers (research branch, about 23.2 ppm).

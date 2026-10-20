@@ -114,6 +114,25 @@ mod tests {
         assert_eq!(label_fields(None)["label"], Value::Null);
     }
     #[test]
+    fn label_lookup_edges_and_negative_ppm() {
+        let dir = std::env::temp_dir().join(format!("labels-edge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("labels.json");
+        std::fs::write(&path, r#"{"channels":{"454206250":{"name":"A"},"not-a-number":{"name":"B"}}}"#).unwrap();
+        let labels = Labels::load(&path).unwrap();
+        assert_eq!(labels.len(), 1, "non-numeric keys are skipped");
+        // Midway between raster points nothing snaps, so a neighbor's label is not borrowed.
+        assert!(labels.lookup(454_203_125.).is_none());
+        assert!(labels.lookup(454_209_375.).is_none());
+        std::fs::write(&path, r#"{"nothing":true}"#).unwrap();
+        assert!(Labels::load(&path).is_err(), "a file without channels is an error");
+        // A radio that reads LOW needs a negative ppm; the formula is sign-symmetric.
+        let cal = Calibration { ppm: -23.3 };
+        let truth = cal.true_hz(454_196_000.);
+        assert!((truth - 454_206_582.).abs() < 5., "{truth}");
+        assert_eq!(snap(truth).1, true);
+    }
+    #[test]
     fn the_shipped_labels_file_parses_and_names_known_channels() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/channel-labels.json");
         let labels = Labels::load(&path).unwrap();

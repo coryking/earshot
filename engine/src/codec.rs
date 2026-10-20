@@ -81,7 +81,10 @@ impl Decoder {
         self.time += pcm.len() as f64 / 48000.;
         let end = log.iter().position(|&b| b == 0).unwrap_or(log.len());
         self.tail.push_str(&String::from_utf8_lossy(&log[..end]));
-        let mut sync = false;
+        // Sign-prefixed sync prints (" +NXDN48"/" -NXDN48") are NXDN frame syncs, control
+        // and data included; the bare token also appears in the start-up log line.
+        let mut sync = self.protocol == "NXDN48"
+            && (self.tail.contains("+NXDN48") || self.tail.contains("-NXDN48"));
         for token in ["DMRv", "DMRd", "NXDN48", "MBE:", "parity error"] {
             let count = self.tail.matches(token).count();
             // DMR voice/data sync, or NXDN decoded voice frames. (The "NXDN48" token also

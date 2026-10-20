@@ -2,7 +2,7 @@
 
 Pluto sends channelized complex IQ, RF activity, and measured spectrum over RIQ1.
 Rust keeps each admitted decoder alive, catalogs DMR/NXDN activity, and sends only
-new audio from the selected frequency and slot to the browser. The source can
+new audio for each listened channel to the browsers. The source can
 be the ARM prototype or the upcoming FPGA channelizer; the host does not need
 the entire ADC stream. There is no transmit path.
 
@@ -16,6 +16,13 @@ cargo build --release --locked
   --source tcp:192.168.10.10:9010 \
   --web-dir ../web/dist
 ```
+
+Useful flags: `--freq-correction-ppm 23.3` (how many ppm high the radio reads; true =
+reading / (1 + ppm e-6)), `--labels data/channel-labels.json` (plain channel names),
+`--state-dir DIR` (calls, activity and catalog survive restarts; the directory must be
+writable at startup), `--call-memory-mb 64`, `--max-decoders 8`. Channel ids are built from
+the calibrated nominal frequency, so changing the ppm re-keys channels and orphans saved
+catalog edits.
 
 The HTTP/WebSocket server binds only `127.0.0.1:8810`. Without `--source`, a
 fixture TCP listener binds only `127.0.0.1:8811`. Startup does not connect to
@@ -57,7 +64,7 @@ transport continuity does not establish ADC continuity.
 
 The host resamples each admitted complex stream, mixes the target's offset,
 limits the channel bandwidth, FM demodulates, removes DC, and feeds a persistent
-48 kHz DSDcc decoder. Unknown streams probe both DMR slots and NXDN48. The
+48 kHz DSDcc decoder. Unknown streams probe DMR (both slots from one instance) and NXDN48, and run an analog FM audio path. The
 rolling confirmation gate requires repeated DMR voice sync, or sustained NXDN
 voice evidence with parity-error checks. An accidental sync does not directly
 unmute audio. Data-only channels are not promoted to voice by an empty codec
@@ -133,51 +140,67 @@ that advertised capacity rather than treating every requested width as applied.
 
 ## API for the household UI
 
-All JSON unless noted. A 404 from a route means the feature is not built yet; none of these
-require a source to be connected.
+All JSON unless noted; errors are `{detail}`. Missing resources use 410 or 422, because the
+frontend reads a 404 on these paths as "endpoint not built". Wire types the frontend expects
+are in `web/src/api/needs.ts` on the frontend branch.
 
 * `GET /api/status`, `GET /api/spectrum` (JSON rows), `GET /api/listener`, `POST /api/monitor`,
-  `POST /api/stop`, `POST /api/source`, `WS /api/events` as before. Channel entries now carry
+  `POST /api/stop`, `POST /api/source`, `WS /api/events` as before. Channel entries carry
   `frequency_hz` (calibrated true frequency, snapped to the 6.25 kHz raster when a measured
-  carrier lands on it; `frequency_snapped`), `reading_hz`/`logical_hz` (what the radio reported),
-  `carrier_hz`/`carrier_offset_hz`/`carrier_snapped` (the measured carrier), `label`,
-  `label_kind`, `label_detail` (plain name from RadioReference/FCC data, see
-  `offload/build_labels.py`), and `user` (operator edits) with `display_name`
-  (user name, else label). Status also reports `calibration_ppm`, `labels_loaded`, `listeners`.
+  carrier lands on it, see `frequency_snapped`), `reading_hz`/`logical_hz` (what the radio
+  reported), `carrier_hz`/`carrier_offset_hz`/`carrier_snapped` (the measured carrier),
+  `label`/`label_kind`/`label_detail` (plain name from RadioReference/FCC data, see
+  `offload/build_labels.py`), `user` and `display_name` (operator edits). Status reports
+  `center_hz` as the true (calibrated) frequency and `center_reading_hz` as the radio's, plus
+  `calibration_ppm`, `labels_loaded`, `listeners` and `persistence`; `source.capabilities`
+  gains `fm_audio` and `per_client_listening`.
 * **Per-browser listening.** `WS /api/listen?channel_id=ID` listens to that channel on its own;
-  several browsers can listen to different channels at once. The engine pins the producer
-  streams for every listened channel (and unpins when the last listener leaves), admits
-  decoders for them first, and sends audio labeled with the requested id. Without
-  `channel_id` the socket follows the shared `/api/monitor` selection. Pinning an `Unknown`
-  channel works; audio follows whatever is heard on it (digital or analog `FM`).
-* **Recent calls.** `GET /api/calls?before=&limit=&source=` returns
-  `{calls, next_before, in_progress}`, newest first (`before` is an exclusive id cursor).
-  Each call: `id`, `source` (channel id), `protocol`, `slot`, `frequency_hz`, `label`,
-  `started_at` (unix s), `duration_s`, `level_db`, `audio_url`
-  (`/api/calls/{id}/audio.wav`, 8 kHz mono signed16 WAV), `talker` and `transcript` (null),
-  `encrypted` (false). Every speaking channel is recorded, not only the one being heard. A
-  call ends 2 s after its audio stops; bursts under 0.8 s are discarded. `WS /api/events` sends
-  `{type:"call", phase:"start"|"end", call}`.
-* **Catalog.** `GET /api/catalog` lists located, decoded or edited channels
-  (`kind: "channel"`; `channel_kind` is voice/data/unidentified). `PUT /api/catalog/{id}`
-  accepts `name` (80 chars, or null), `notes` (500), `followed`, `muted`; edits persist.
-* **Activity.** `GET /api/activity?window_s=86400&bucket_s=300` returns talk-seconds per
-  bucket for the block (`total`), per source (`sources`), RF-active seconds (`rf_total`) and
-  a `baseline` (mean of the same bucket one or two weeks earlier, else one to six days
-  earlier; null without history). Buckets are 5 minutes, kept 14 days.
-* **Compact spectrum.** `GET /api/spectrum.bin?after=N&limit=` returns RSP1: a 32-byte
-  little-endian header (`RSP1`, version u16 = 1, bins u16, rows u16, flags u16 = 0, low_db f32,
-  high_db f32, center_hz f64, span_hz f32), then per row `seq u64, time f64, bins x u8` with
-  `level = round(255 * (clamp(db, low, high) - low) / (high - low))`. `low`/`high` are fitted
-  to the data like `/api/spectrum`. `X-Sequence` carries the newest sequence number.
-* **Block.** `GET /api/blocks` reports the parked block and whether the producer can retune
-  (`can_change`; the ARM producer cannot). `POST /api/blocks/current` goes through the same
-  acknowledged path as `/api/source` and returns 501 for producers without it.
+  up to 16 browsers can listen to different channels at once. The engine pins the producer
+  streams for every listened channel (unpinning when the last listener leaves), admits
+  decoders for them first, and sends audio labeled with the requested id. An unknown id is
+  refused with 422 before the upgrade. Without `channel_id` the socket follows the shared
+  `/api/monitor` selection and its heartbeat reports that selection (null when released).
+  Pinning an `Unknown` channel works; audio follows whatever is heard on it (digital or `FM`).
+  `/api/listener` and `decode_latency_s` describe the shared selection only.
+* **Recent calls.** `GET /api/calls?before=<unix s>&limit=&source=` returns
+  `{calls, next_before, in_progress}`, newest first; pass `next_before` back as `before`.
+  A call: `id` (string), `source_id` (catalog source), `channel_id`, `protocol`, `slot`,
+  `frequency_hz`, `label`, `started_at`, `ended_at` (null while in progress), `duration_s`,
+  `level_db`, `audio_url` (`/api/calls/{id}/audio.wav`, 8 kHz mono signed16 WAV, null in
+  progress), `talker` and `transcript` (null), `encrypted` (false). Every speaking channel is
+  recorded, not only the one being heard. A call ends 2 s after its audio stops, is split at 10
+  minutes, and bursts under 0.8 s are discarded with no events at all. `WS /api/events` sends
+  `{type:"call", phase:"start"|"end", call}` with the same `id` at both ends. Retention: 500
+  calls or 7 days, audio memory bounded by `--call-memory-mb` (older audio is served from the
+  state dir). Call ids are clock-seeded, so they are unique across restarts.
+* **Catalog.** `GET /api/catalog` returns `{sources: [...]}`, one per frequency and slot that was
+  located, decoded or edited: `id` (`{nominal frequency}-{slot}`, the same for `...-Unknown-1`
+  and `...-DMR-2`), `kind: "channel"`, `channel_ids`, `frequency_hz`, `slot`, `system`,
+  `talkgroup_id` (null), `name`, `description`, `probable_user`, `traffic_kind`,
+  `mode` (fm|dmr|nxdn|p25|unknown), `encryption` ("unknown"), plus `followed`, `muted`, `notes`.
+  `PUT /api/catalog/{id}` is an upsert: send the whole entry; read-only fields are ignored,
+  `name`, `description`, `probable_user`, `traffic_kind` (length-limited strings or null), `notes`,
+  `followed`, `muted` are applied, `frequency_hz`/`slot` are remembered for sources not heard yet.
+  Edits persist (`--state-dir`).
+* **Activity.** `GET /api/activity?window_s=86400&bucket_s=300` returns `{bucket_s, start, block,
+  sources, baseline, rf_total, ...}`: talk-seconds per bucket for the block and per source id,
+  and `baseline[i]` (mean of the same bucket 1 or 2 weeks earlier, else 1 to 6 days earlier; 0
+  where unobserved; null until any history exists). Buckets are 5 minutes, kept 14 days.
+* **Compact spectrum.** `GET /api/spectrum.bin?after=N&limit=` returns RSP1, 48-byte little-endian
+  header (`RSP1`, bins u16, rows u16, center_hz f64, span_hz f64, low_db f32, high_db f32,
+  latest sequence u64, generation u32, reserved u32), then per row `seq u64, time f64, bins x u8`.
+  The display range is held steady and only moves when the data moves it by 3 dB. `center_hz`
+  is the true (calibrated) center. `X-Sequence` carries the newest sequence number.
+* **Blocks.** `GET /api/blocks` returns `{current_id, blocks:[{id, name, description, center_hz,
+  span_hz}]}` with the one block the receiver is parked on (`can_change` says whether the
+  producer can retune; the ARM prototype cannot). `POST /api/blocks/current {id}` accepts the
+  current id and answers 422 for any other until a retunable producer exists.
 
-Persistence: with `--state-dir DIR` the call index and WAVs (`calls/`), activity buckets,
-the catalog and operator edits survive restarts and shutdown flushes on SIGTERM. Without it
-everything stays in memory. `--call-memory-mb` bounds the call audio held in RAM (older audio
-is served from disk). Retention: 500 calls, 7 days.
+Persistence: with `--state-dir DIR` the call index and WAVs (`calls/`), activity (one file per
+day), the catalog and operator edits survive restarts. All writes go through one writer thread (never
+under the engine lock); a failed write is retried and counted in `persistence.write_errors`;
+a state file that cannot be parsed is moved aside as `.corrupt`; shutdown (SIGTERM or Ctrl-C)
+closes open calls and flushes. Without `--state-dir` everything is in memory.
 
 ## Live acceptance and status
 

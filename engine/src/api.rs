@@ -1,4 +1,5 @@
 use crate::runtime::{App, sync_pins};
+use crate::store::AudioSource;
 use axum::{
     Json, Router,
     extract::{
@@ -36,7 +37,7 @@ fn now_s() -> f64 {
 /// The browser validates this payload strictly (web/src/lib/radio.ts), so every numeric
 /// field must be a number even before the first CONFIG or sample arrives.
 fn status_json(app: &App) -> Value {
-    let e = app.inner.lock().unwrap();
+    let e = app.engine();
     let number = |v: &Value| json!(v.as_f64().unwrap_or(0.));
     let position = number(&e.source["source_position_s"]);
     // Host ingress age of the latest delivered audio while audio is flowing (the last
@@ -49,7 +50,13 @@ fn status_json(app: &App) -> Value {
     } else {
         0.
     };
-    json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":number(&e.source["input_center_hz"]),"rate_hz":number(&e.source["input_rate_hz"]),"bandwidth_hz":number(&e.source["input_bandwidth_hz"]),"generation":e.generation,"channels":e.channels.values().map(|c| with_user(c, &e.store.user)).collect::<Vec<_>>(),"received_seconds":position,"source_position_s":position,"decode_latency_s":latency,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":number(&e.source["queue_depth"]),"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"calibration_ppm":app.calibration.ppm,"labels_loaded":app.labels.len(),"listeners":e.listeners.len(),"source":e.source})
+    // The engine adds what it can do on top of what the producer advertises.
+    let mut source = e.source.clone();
+    if source.is_object() {
+        source["capabilities"]["fm_audio"] = json!(true);
+        source["capabilities"]["per_client_listening"] = json!(true);
+    }
+    json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":json!(app.calibration.true_hz(e.source["input_center_hz"].as_f64().unwrap_or(0.))),"center_reading_hz":number(&e.source["input_center_hz"]),"rate_hz":number(&e.source["input_rate_hz"]),"bandwidth_hz":number(&e.source["input_bandwidth_hz"]),"generation":e.generation,"channels":e.channels.values().map(|c| with_user(c, &e.store.user)).collect::<Vec<_>>(),"received_seconds":position,"source_position_s":position,"decode_latency_s":latency,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":number(&e.source["queue_depth"]),"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"calibration_ppm":app.calibration.ppm,"labels_loaded":app.labels.len(),"listeners":e.listeners.len(),"persistence":{"enabled":e.store.persistent(),"write_errors":e.store.io_errors()},"source":source})
 }
 async fn status(State(app): State<App>) -> Json<Value> {
     Json(status_json(&app))
@@ -62,7 +69,7 @@ async fn monitor(
     State(app): State<App>,
     Json(m): Json<Monitor>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let mut e = app.inner.lock().unwrap();
+    let mut e = app.engine();
     if let Some(ref id) = m.channel_id {
         if !e.channels.values().any(|c| c["id"] == *id) {
             return Err((StatusCode::NOT_FOUND, "channel not in catalog".into()));
@@ -86,7 +93,7 @@ async fn monitor(
     Ok(Json(e.listener.clone()))
 }
 async fn listener(State(app): State<App>) -> Json<Value> {
-    let e = app.inner.lock().unwrap();
+    let e = app.engine();
     let mut value = e.listener.clone();
     value["generation"] = json!(e.decoder_generation);
     value["source_generation"] = json!(e.generation);
@@ -115,10 +122,24 @@ fn display_range(unit: &str, rows: &std::collections::VecDeque<(u64, f64, Vec<f3
     let high = (at(0.999) + 2.).max(low + 30.);
     (low, high)
 }
+/// The display range handed to clients, held steady between responses: it only moves when
+/// the fitted range differs from the held one by 3 dB or more, so quantized rows from
+/// consecutive batches share one scale.
+pub(crate) fn held_range(e: &mut crate::runtime::Engine, unit: &str) -> (f64, f64) {
+    let fitted = display_range(unit, &e.psd);
+    match e.psd_range {
+        Some((low, high)) if (fitted.0 - low).abs() < 3. && (fitted.1 - high).abs() < 3. => (low, high),
+        _ => {
+            e.psd_range = Some(fitted);
+            fitted
+        }
+    }
+}
 async fn spectrum(State(app): State<App>, Query(q): Query<After>) -> Json<Value> {
-    let e = app.inner.lock().unwrap();
-    let unit = e.source["psd"]["unit"].as_str().unwrap_or("uncalibrated");
-    let (low_db, high_db) = display_range(unit, &e.psd);
+    let mut e = app.engine();
+    let unit = e.source["psd"]["unit"].as_str().unwrap_or("uncalibrated").to_string();
+    let (low_db, high_db) = held_range(&mut e, &unit);
+    let unit = unit.as_str();
     let rows: Vec<_> = e
         .psd
         .iter()
@@ -126,7 +147,7 @@ async fn spectrum(State(app): State<App>, Query(q): Query<After>) -> Json<Value>
         .take(60)
         .collect();
     Json(
-        json!({"sequence":rows.last().map(|x|x.0).unwrap_or(e.psd_seq),"generation":e.generation,"rows":rows.iter().map(|x|&x.2).collect::<Vec<_>>(),"times":rows.iter().map(|x|x.1).collect::<Vec<_>>(),"center_hz":e.source["input_center_hz"],"span_hz":e.source["input_bandwidth_hz"],"low_db":low_db,"high_db":high_db,"unit":unit,"source":if e.active{"live"}else{"disconnected"}}),
+        json!({"sequence":rows.last().map(|x|x.0).unwrap_or(e.psd_seq),"generation":e.generation,"rows":rows.iter().map(|x|&x.2).collect::<Vec<_>>(),"times":rows.iter().map(|x|x.1).collect::<Vec<_>>(),"center_hz":app.calibration.true_hz(e.source["input_center_hz"].as_f64().unwrap_or(0.)),"center_reading_hz":e.source["input_center_hz"],"span_hz":e.source["input_bandwidth_hz"],"low_db":low_db,"high_db":high_db,"unit":unit,"source":if e.active{"live"}else{"disconnected"}}),
     )
 }
 #[derive(Deserialize)]
@@ -136,9 +157,22 @@ struct Listen {
 /// Audio for one browser. With `?channel_id=` this socket listens to that channel on its
 /// own (several browsers can listen to different channels at once); without it the socket
 /// follows the shared `/api/monitor` selection.
-async fn ws(State(app): State<App>, Query(q): Query<Listen>, ws: WebSocketUpgrade) -> impl IntoResponse {
+const MAX_LISTENERS: usize = 16;
+async fn ws(State(app): State<App>, Query(q): Query<Listen>, ws: WebSocketUpgrade) -> axum::response::Response {
+    let requested = q.channel_id.filter(|id| !id.is_empty());
+    if let Some(id) = &requested {
+        let e = app.engine();
+        if !e.channels.contains_key(id) {
+            // 422, not 404: the frontend reads 404 on its paths as "not built yet".
+            return api_error(StatusCode::UNPROCESSABLE_ENTITY, format!("unknown channel {id}")).into_response();
+        }
+        if e.listeners.len() >= MAX_LISTENERS {
+            return api_error(StatusCode::TOO_MANY_REQUESTS, "too many listeners").into_response();
+        }
+    }
     ws.max_message_size(8192)
-        .on_upgrade(move |s| socket(s, app, q.channel_id))
+        .on_upgrade(move |s| socket(s, app, requested))
+        .into_response()
 }
 static NEXT_CONNECTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 /// Registers a per-socket listener and removes it (and its pin) when the socket ends.
@@ -148,7 +182,7 @@ struct ListenerGuard {
 }
 impl Drop for ListenerGuard {
     fn drop(&mut self) {
-        let mut e = self.app.inner.lock().unwrap();
+        let mut e = self.app.engine();
         e.listeners.remove(&self.connection);
         sync_pins(&mut e);
     }
@@ -157,7 +191,7 @@ async fn socket(mut socket: WebSocket, app: App, requested: Option<String>) {
     let joined = Instant::now();
     let connection = NEXT_CONNECTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _guard = requested.as_ref().map(|id| {
-        let mut e = app.inner.lock().unwrap();
+        let mut e = app.engine();
         e.listeners.insert(connection, id.clone());
         sync_pins(&mut e);
         ListenerGuard { app: app.clone(), connection }
@@ -167,7 +201,7 @@ async fn socket(mut socket: WebSocket, app: App, requested: Option<String>) {
     loop {
         tokio::select! {
                 audio=rx.recv()=>{match audio{Ok(a)=>{
-                    let current={let e=app.inner.lock().unwrap();
+                    let current={let e=app.engine();
                         let want=requested.clone().or_else(||e.selected.clone());
                         // Never play audio made before this listener (or the shared selection) began.
                         let since=if requested.is_some(){joined}else{e.selected_at};
@@ -177,7 +211,7 @@ async fn socket(mut socket: WebSocket, app: App, requested: Option<String>) {
         let sent=tokio::time::timeout(Duration::from_millis(250),async{socket.send(Message::Text(a.meta.to_string().into())).await?;socket.send(Message::Binary(a.pcm.into())).await}).await;
         if !matches!(sent,Ok(Ok(()))){break;}
         }},Err(broadcast::error::RecvError::Lagged(n))=>{rx=app.audio.subscribe();if socket.send(Message::Text(json!({"type":"gap","dropped_chunks":n}).to_string().into())).await.is_err(){break;}},Err(_)=>break}},
-                _=tick.tick()=>{let value={let e=app.inner.lock().unwrap();json!({"type":"heartbeat","generation":e.decoder_generation,"source_generation":e.generation,"channel_id":requested.clone().or_else(||e.selected.clone()),"listeners":e.listeners.len()})};if socket.send(Message::Text(value.to_string().into())).await.is_err(){break;}},
+                _=tick.tick()=>{let value={let e=app.engine();json!({"type":"heartbeat","generation":e.decoder_generation,"source_generation":e.generation,"channel_id":requested.clone().or_else(||e.selected.clone()),"listeners":e.listeners.len()})};if !matches!(tokio::time::timeout(Duration::from_millis(250),socket.send(Message::Text(value.to_string().into()))).await,Ok(Ok(()))){break;}},
                 msg=socket.recv()=>{if matches!(msg,None|Some(Err(_))|Some(Ok(Message::Close(_)))){break;}}
                }
     }
@@ -192,7 +226,7 @@ async fn event_socket(mut socket: WebSocket, app: App) {
     loop {
         let outgoing = tokio::select! {
         event=events.recv()=>{match event{Ok(value)=>value,Err(broadcast::error::RecvError::Lagged(n))=>{events=app.events.subscribe();json!({"type":"gap","dropped_events":n,"recover":"GET /api/status and /api/spectrum"})},Err(_)=>break}},
-        _=tick.tick()=>{let e=app.inner.lock().unwrap();json!({"type":"heartbeat","generation":e.decoder_generation,"source_generation":e.generation})},
+        _=tick.tick()=>{let e=app.engine();json!({"type":"heartbeat","generation":e.decoder_generation,"source_generation":e.generation})},
         input=socket.recv()=>{if matches!(input,None|Some(Err(_))|Some(Ok(Message::Close(_)))){break;}continue;}
         };
         if !matches!(
@@ -221,7 +255,7 @@ async fn source_request(app: &App, mut command: Value) -> ApiResult {
     );
     command["request_id"] = json!(request_id);
     let sender = {
-        let e = app.inner.lock().unwrap();
+        let e = app.engine();
         let capability = match command["action"].as_str() {
             Some("configure") => "configure_supported",
             Some("stop") => "stop_supported",
@@ -252,7 +286,7 @@ async fn source_request(app: &App, mut command: Value) -> ApiResult {
     let started = Instant::now();
     loop {
         {
-            let e = app.inner.lock().unwrap();
+            let e = app.engine();
             let ack = &e.source["control_ack"];
             if ack["request_id"] == request_id {
                 if ack["ok"] != true {
@@ -292,7 +326,7 @@ async fn configure_source(State(app): State<App>, Json(config): Json<Value>) -> 
         .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "center_hz must be an integer"))?;
     let bandwidth = config["bandwidth_hz"].as_u64().unwrap_or(rate);
     {
-        let e = app.inner.lock().unwrap();
+        let e = app.engine();
         if let Some(max) = e.source["capabilities"]["max_input_rate_hz"].as_u64()
             && rate > max
         {
@@ -312,10 +346,11 @@ async fn configure_source(State(app): State<App>, Json(config): Json<Value>) -> 
 }
 async fn stop(State(app): State<App>) -> ApiResult {
     let supported = {
-        let mut e = app.inner.lock().unwrap();
+        let mut e = app.engine();
         e.active = false;
         e.decoder_generation += 1;
         e.selected = None;
+        sync_pins(&mut e);
         e.listener["status"] = json!("stopped");
         e.listener["state"] = json!("stopped");
         e.listener["voice_active"] = json!(false);
@@ -334,87 +369,194 @@ async fn stop(State(app): State<App>) -> ApiResult {
 
 #[derive(Deserialize)]
 struct CallsQuery {
-    before: Option<u64>,
+    /// Unix seconds; only calls that started before this.
+    before: Option<f64>,
     limit: Option<usize>,
     source: Option<String>,
 }
-/// Recent calls, newest first. `next_before` is the cursor for the next (older) page.
+/// Recent calls, newest first. `next_before` is the cursor (unix seconds) for the next, older
+/// page, null on the last page.
 async fn calls(State(app): State<App>, Query(q): Query<CallsQuery>) -> Json<Value> {
-    let e = app.inner.lock().unwrap();
-    let (calls, next) = e.store.list(q.before, q.limit.unwrap_or(50).clamp(1, 200), q.source.as_deref());
-    let in_progress = e.store.open_calls();
-    Json(json!({"calls":calls,"next_before":next,"in_progress":in_progress}))
+    let e = app.engine();
+    let before = q.before.filter(|b| b.is_finite());
+    let (calls, next) = e.store.list(before, q.limit.unwrap_or(50).clamp(1, 200), q.source.as_deref());
+    Json(json!({"calls":calls,"next_before":next,"in_progress":e.store.open_calls()}))
 }
-async fn call_audio(State(app): State<App>, Path(id): Path<String>) -> impl IntoResponse {
-    let audio = id
-        .parse::<u64>()
-        .ok()
-        .and_then(|n| app.inner.lock().unwrap().store.audio(n));
-    match audio {
-        Some(samples) => (
+async fn call_audio(State(app): State<App>, Path(id): Path<String>) -> axum::response::Response {
+    // Decide where the audio lives under the lock; read and encode outside it.
+    let source = id.parse::<u64>().ok().and_then(|n| app.engine().store.audio_source(n));
+    let bytes = match source {
+        Some(AudioSource::Memory(samples)) => Some(crate::store::wav_bytes(&samples)),
+        Some(AudioSource::File(path)) => tokio::task::spawn_blocking(move || std::fs::read(path).ok())
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    match bytes {
+        Some(bytes) => (
             [
                 (header::CONTENT_TYPE, HeaderValue::from_static("audio/wav")),
-                (header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=86400")),
+                (header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=3600")),
             ],
-            crate::store::wav_bytes(&samples),
+            bytes,
         )
             .into_response(),
-        None => (StatusCode::NOT_FOUND, Json(json!({"detail":"no audio for that call"}))).into_response(),
+        // 410, not 404: the frontend reads 404 as "endpoint not built yet".
+        None => api_error(StatusCode::GONE, "no audio for that call").into_response(),
     }
 }
-/// The persisted catalog: channels that were located, decoded or edited, with operator edits.
+/// Catalog source id for a channel entry: the calibrated nominal frequency and slot, so it
+/// stays the same when the engine identifies the protocol (`...-Unknown-1` to `...-DMR-2`).
+pub(crate) fn source_id(channel_id: &str, slot: u64) -> String {
+    format!("{}-{}", channel_id.split('-').next().unwrap_or(channel_id), slot)
+}
+fn mode_of(c: &Value) -> &'static str {
+    match c["protocol"].as_str().unwrap_or("Unknown") {
+        "FM" => "fm",
+        "DMR" => "dmr",
+        "NXDN48" => "nxdn",
+        _ => match c["label_detail"]["protocol"].as_str() {
+            Some("DMR") => "dmr",
+            Some("NXDN48") => "nxdn",
+            Some("P25") => "p25",
+            _ => "unknown",
+        },
+    }
+}
+/// One catalog entry (the shape the household UI reads) from the channel entries sharing a
+/// source id, with operator edits applied.
+fn catalog_entry(id: &str, group: &[&Value], user: Option<&Value>) -> Value {
+    let rep = group
+        .iter()
+        .max_by(|a, b| {
+            let key = |c: &&Value| (c["decoded"] == true, c["last_heard"].as_f64().unwrap_or(0.) as i64);
+            key(a).cmp(&key(b))
+        })
+        .copied();
+    let text = |key: &str| user.and_then(|u| u[key].as_str()).map(String::from);
+    let frequency = rep
+        .and_then(|c| c["frequency_hz"].as_f64())
+        .or_else(|| user.and_then(|u| u["frequency_hz"].as_f64()));
+    let label_name = rep.and_then(|c| c["label"].as_str()).map(String::from);
+    let detail = rep.map(|c| &c["label_detail"]);
+    let licensees: Vec<&str> = detail
+        .and_then(|d| d["licensees"].as_array())
+        .map(|l| l.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let description = text("description").unwrap_or_else(|| match (label_name.as_deref(), licensees.len()) {
+        (Some(_), 0) => detail.and_then(|d| d["kind"].as_str()).map(|k| format!("{k} channel (RadioReference)")).unwrap_or_default(),
+        (Some(_), n) => format!("Licensed to {}{}", licensees.iter().take(2).copied().collect::<Vec<_>>().join(", "), if n > 2 { " and others" } else { "" }),
+        _ => String::new(),
+    });
+    json!({
+        "id": id,
+        "kind": "channel",
+        "channel_ids": group.iter().filter_map(|c| c["id"].as_str()).collect::<Vec<_>>(),
+        "frequency_hz": frequency,
+        "slot": rep.and_then(|c| c["slot"].as_u64()).or_else(|| user.and_then(|u| u["slot"].as_u64())),
+        "system": detail.and_then(|d| d["system"].as_str()).map(|s| json!({"id": s, "name": label_name})),
+        "talkgroup_id": null,
+        "name": text("name").or(label_name.clone()).unwrap_or_else(|| frequency.map_or_else(|| id.to_string(), |f| format!("{:.4} MHz", f / 1e6))),
+        "description": description,
+        "probable_user": text("probable_user").or_else(|| licensees.first().map(|s| s.to_string())).or(label_name),
+        "traffic_kind": text("traffic_kind").or_else(|| detail.and_then(|d| d["kind"].as_str()).map(|k| match k {
+            "control" => "control channel (data)".to_string(),
+            "voice" => "voice".to_string(),
+            other => format!("{other} channel"),
+        })),
+        "mode": rep.map_or("unknown", mode_of),
+        "encryption": "unknown",
+        "followed": user.and_then(|u| u["followed"].as_bool()).unwrap_or(false),
+        "muted": user.and_then(|u| u["muted"].as_bool()).unwrap_or(false),
+        "notes": user.and_then(|u| u["notes"].as_str()),
+        "last_heard": rep.map(|c| c["last_heard"].clone()),
+        "edited": user.is_some(),
+    })
+}
+/// The catalog: one source per frequency and slot that was located, decoded or edited.
 async fn catalog(State(app): State<App>) -> Json<Value> {
-    let e = app.inner.lock().unwrap();
-    let mut entries: Vec<Value> = e
-        .channels
-        .values()
-        .filter(|c| {
-            c["decoded"] == true
-                || c["carrier_snapped"] == true
-                || c["id"].as_str().is_some_and(|id| e.store.user.contains_key(id))
-        })
-        .map(|c| {
-            let mut v = with_user(c, &e.store.user);
-            // `kind` is channel|talkgroup for the catalog (talkgroups arrive with trunking);
-            // the engine's own voice/data/unidentified classification moves to `channel_kind`.
-            v["channel_kind"] = c["kind"].clone();
-            v["kind"] = json!("channel");
-            v
-        })
+    let e = app.engine();
+    let mut groups: std::collections::BTreeMap<String, Vec<&Value>> = std::collections::BTreeMap::new();
+    for c in e.channels.values() {
+        let located = c["decoded"] == true || c["carrier_snapped"] == true;
+        let id = source_id(c["id"].as_str().unwrap_or(""), c["slot"].as_u64().unwrap_or(1));
+        if located || e.store.user.contains_key(&id) {
+            groups.entry(id).or_default().push(c);
+        }
+    }
+    for id in e.store.user.keys() {
+        groups.entry(id.clone()).or_default();
+    }
+    let mut sources: Vec<Value> = groups
+        .iter()
+        .map(|(id, group)| catalog_entry(id, group, e.store.user.get(id)))
         .collect();
-    entries.sort_by(|a, b| {
+    sources.sort_by(|a, b| {
         let key = |v: &Value| v["last_heard"].as_f64().unwrap_or(0.);
         key(b).total_cmp(&key(a))
     });
-    Json(json!({"entries":entries,"count":entries.len()}))
+    Json(json!({"sources":sources,"count":sources.len()}))
 }
+/// Upsert the operator's edits for a source. The body may be the whole catalog entry the
+/// UI read: read-only fields (id, kind, channel_ids, system, mode, ...) are ignored, the
+/// editable ones (name, description, probable_user, traffic_kind, notes, followed, muted)
+/// are validated, and frequency_hz/slot are remembered so a source that has not been heard
+/// yet still lists.
 async fn catalog_edit(State(app): State<App>, Path(id): Path<String>, Json(body): Json<Value>) -> ApiResult {
-    let mut e = app.inner.lock().unwrap();
-    if !e.channels.contains_key(&id) && !e.store.known.contains_key(&id) {
-        return Err(api_error(StatusCode::NOT_FOUND, "channel not in catalog"));
+    let valid_id = (1..=80).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+    if !valid_id {
+        return Err(api_error(StatusCode::UNPROCESSABLE_ENTITY, "source id must be 1-80 characters of letters, digits, - _ ."));
     }
     let object = body.as_object().ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "body must be an object"))?;
-    let mut edits = e.store.user.get(&id).cloned().unwrap_or_else(|| json!({}));
+    let mut e = app.engine();
+    if !e.store.can_add_user(&id) {
+        return Err(api_error(StatusCode::UNPROCESSABLE_ENTITY, "too many edited sources"));
+    }
+    let mut edits = match e.store.user.get(&id) {
+        Some(Value::Object(o)) => Value::Object(o.clone()),
+        _ => json!({}),
+    };
+    let limits = [("name", 80usize), ("description", 300), ("probable_user", 80), ("traffic_kind", 80), ("notes", 500)];
     for (key, value) in object {
-        match (key.as_str(), value) {
-            ("name", Value::String(n)) if n.chars().count() <= 80 => edits["name"] = json!(n.trim()),
-            ("name", Value::Null) => {
-                edits.as_object_mut().map(|o| o.remove("name"));
+        if let Some((_, max)) = limits.iter().find(|(k, _)| *k == key.as_str()) {
+            match value {
+                Value::String(text) if text.chars().count() <= *max => {
+                    let text = text.trim();
+                    if text.is_empty() {
+                        edits.as_object_mut().map(|o| o.remove(key));
+                    } else {
+                        edits[key] = json!(text);
+                    }
+                }
+                Value::Null => {
+                    edits.as_object_mut().map(|o| o.remove(key));
+                }
+                _ => return Err(api_error(StatusCode::BAD_REQUEST, format!("{key} must be a string of at most {max} characters, or null"))),
             }
-            ("notes", Value::String(n)) if n.chars().count() <= 500 => edits["notes"] = json!(n),
-            ("followed" | "muted", Value::Bool(b)) => edits[key] = json!(b),
-            _ => {
-                return Err(api_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("cannot set {key}: allowed are name (<=80 chars or null), notes (<=500), followed, muted"),
-                ));
+        } else if matches!(key.as_str(), "followed" | "muted") {
+            match value {
+                Value::Bool(b) => edits[key] = json!(b),
+                Value::Null => {
+                    edits.as_object_mut().map(|o| o.remove(key));
+                }
+                _ => return Err(api_error(StatusCode::BAD_REQUEST, format!("{key} must be a boolean"))),
+            }
+        } else if matches!(key.as_str(), "frequency_hz" | "slot") {
+            if let Some(n) = value.as_f64().filter(|n| n.is_finite()) {
+                edits[key] = json!(n);
             }
         }
+        // Anything else is a read-only field of the entry the UI read: ignored.
     }
     e.store.user.insert(id.clone(), edits);
     e.store.user_dirty = true;
-    let current = e.channels.get(&id).cloned().unwrap_or_else(|| e.store.known[&id].clone());
-    Ok(Json(with_user(&current, &e.store.user)))
+    let group: Vec<&Value> = e
+        .channels
+        .values()
+        .filter(|c| source_id(c["id"].as_str().unwrap_or(""), c["slot"].as_u64().unwrap_or(1)) == id)
+        .collect();
+    Ok(Json(catalog_entry(&id, &group, e.store.user.get(&id))))
 }
 #[derive(Deserialize)]
 struct ActivityQuery {
@@ -423,7 +565,7 @@ struct ActivityQuery {
 }
 /// Talk-seconds per bucket (block total and per source) with a same-time baseline.
 async fn activity(State(app): State<App>, Query(q): Query<ActivityQuery>) -> Json<Value> {
-    let e = app.inner.lock().unwrap();
+    let e = app.engine();
     Json(e.store.activity(now_s(), q.window_s.unwrap_or(86400), q.bucket_s.unwrap_or(300)))
 }
 #[derive(Deserialize)]
@@ -432,31 +574,40 @@ struct SpectrumBin {
     after: u64,
     limit: Option<usize>,
 }
-/// Compact spectrum rows, RSP1. 32-byte little-endian header: magic `RSP1`, version u16 (1),
-/// bins u16, rows u16, flags u16 (0), low_db f32, high_db f32, center_hz f64, span_hz f32.
-/// Then per row: seq u64, time f64 (producer seconds), bins x u8 where
-/// level = round(255 * (clamp(db, low, high) - low) / (high - low)). Rows with seq > `after`,
-/// oldest first. `X-Sequence` is the newest sequence number the engine holds.
+/// Compact spectrum rows, RSP1 (the layout the frontend decodes). 48-byte little-endian
+/// header: magic `RSP1`, bins u16, rows u16, center_hz f64 (true, calibrated), span_hz f64,
+/// low_db f32 (byte 0), high_db f32 (byte 255), latest sequence u64 (also with zero rows),
+/// source generation u32, reserved u32. Then per row: seq u64, time f64 (producer
+/// seconds), bins x u8 levels. Rows with seq > `after`, oldest first. The display range is
+/// held steady between responses and only moves when the data moves it by 3 dB or more.
 async fn spectrum_bin(State(app): State<App>, Query(q): Query<SpectrumBin>) -> impl IntoResponse {
-    let e = app.inner.lock().unwrap();
-    let unit = e.source["psd"]["unit"].as_str().unwrap_or("uncalibrated");
-    let (low, high) = display_range(unit, &e.psd);
-    let rows: Vec<_> = e.psd.iter().filter(|(n, _, _)| *n > q.after).take(q.limit.unwrap_or(60).clamp(1, 120)).collect();
-    let bins = rows.first().map_or(0, |r| r.2.len());
-    let mut out = Vec::with_capacity(32 + rows.len() * (16 + bins));
+    let mut e = app.engine();
+    let unit = e.source["psd"]["unit"].as_str().unwrap_or("uncalibrated").to_string();
+    let (low, high) = held_range(&mut e, &unit);
+    let first_len = e.psd.iter().find(|(n, _, _)| *n > q.after).map_or(0, |r| r.2.len());
+    // A reconfigure can change the row width: send only rows that match the first one.
+    let rows: Vec<_> = e
+        .psd
+        .iter()
+        .filter(|(n, _, row)| *n > q.after && row.len() == first_len)
+        .take(q.limit.unwrap_or(60).clamp(1, 120))
+        .collect();
+    let bins = first_len.min(u16::MAX as usize);
+    let mut out = Vec::with_capacity(48 + rows.len() * (16 + bins));
     out.extend_from_slice(b"RSP1");
-    out.extend_from_slice(&1u16.to_le_bytes());
     out.extend_from_slice(&(bins as u16).to_le_bytes());
     out.extend_from_slice(&(rows.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&app.calibration.true_hz(e.source["input_center_hz"].as_f64().unwrap_or(0.)).to_le_bytes());
+    out.extend_from_slice(&e.source["input_bandwidth_hz"].as_f64().unwrap_or(0.).to_le_bytes());
     out.extend_from_slice(&(low as f32).to_le_bytes());
     out.extend_from_slice(&(high as f32).to_le_bytes());
-    out.extend_from_slice(&e.source["input_center_hz"].as_f64().unwrap_or(0.).to_le_bytes());
-    out.extend_from_slice(&(e.source["input_bandwidth_hz"].as_f64().unwrap_or(0.) as f32).to_le_bytes());
+    out.extend_from_slice(&e.psd_seq.to_le_bytes());
+    out.extend_from_slice(&((e.generation & 0xffff_ffff) as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
     for (seq, time, row) in &rows {
         out.extend_from_slice(&seq.to_le_bytes());
         out.extend_from_slice(&time.to_le_bytes());
-        out.extend(row.iter().map(|v| {
+        out.extend(row.iter().take(bins).map(|v| {
             (255. * ((*v as f64).clamp(low, high) - low) / (high - low)).round() as u8
         }));
     }
@@ -468,22 +619,38 @@ async fn spectrum_bin(State(app): State<App>, Query(q): Query<SpectrumBin>) -> i
         out,
     )
 }
-/// The block currently parked on. Changing it needs a producer that can retune live.
+/// Listening areas. The parked block is the only one this producer can offer; choosing a
+/// different one needs a producer that retunes live (the ARM prototype cannot).
 async fn blocks(State(app): State<App>) -> Json<Value> {
-    let e = app.inner.lock().unwrap();
+    let e = app.engine();
+    let center = app.calibration.true_hz(e.source["input_center_hz"].as_f64().unwrap_or(0.));
+    let span = e.source["input_bandwidth_hz"].as_f64().unwrap_or(0.);
     Json(json!({
-        "current": {
-            "center_hz": e.source["input_center_hz"],
-            "rate_hz": e.source["input_rate_hz"],
-            "bandwidth_hz": e.source["input_bandwidth_hz"],
-            "calibration_ppm": app.calibration.ppm,
-        },
+        "current_id": "current",
+        "blocks": [{
+            "id": "current",
+            "name": "Current listening area",
+            "description": "The block of spectrum the radio is parked on now.",
+            "center_hz": center,
+            "span_hz": span,
+        }],
         "can_change": e.source["capabilities"]["configure_supported"] == true,
-        "presets": [],
+        "calibration_ppm": app.calibration.ppm,
     }))
 }
-async fn set_block(State(app): State<App>, Json(config): Json<Value>) -> ApiResult {
-    configure_source(State(app), Json(config)).await
+async fn set_block(State(app): State<App>, Json(body): Json<Value>) -> ApiResult {
+    // Legacy form: a raw receiver configuration goes through the acknowledged source path.
+    if body["mode"] == "live" {
+        return configure_source(State(app), Json(body)).await;
+    }
+    match body["id"].as_str() {
+        Some("current") => Ok(Json(json!({"status": "unchanged", "current_id": "current"}))),
+        Some(other) => Err(api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("unknown listening area {other:?}; this receiver can only stay on its current block"),
+        )),
+        None => Err(api_error(StatusCode::BAD_REQUEST, "body needs an id")),
+    }
 }
 
 pub fn router(app: App, web_dir: Option<PathBuf>) -> Router {
@@ -537,7 +704,7 @@ mod tests {
                 assert!(status[key].is_number(), "phase {phase}: {key} = {}", status[key]);
             }
             assert!(status["channels"].is_array() && status["continuity"].is_string());
-            let mut e = app.inner.lock().unwrap();
+            let mut e = app.engine();
             e.source = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,"queue_depth":0});
         }
     }
@@ -554,108 +721,268 @@ mod tests {
     fn seeded_app() -> App {
         let app = App::new(3);
         {
-            let mut e = app.inner.lock().unwrap();
+            let mut e = app.engine();
             let ch = json!({"id":"454018750-DMR-2","protocol":"DMR","slot":2,"kind":"voice","decoded":true,
-                "frequency_hz":454018750.0,"label":"Day Wireless (business trunked)","last_heard":1.0,"carrier_snapped":true});
+                "frequency_hz":454018750.0,"label":"Day Wireless (business trunked)","last_heard":1.0,"carrier_snapped":true,
+                "label_detail":{"name":"Day Wireless (business trunked)","kind":"control","system":"trbowest","protocol":"DMR","licensees":["Day Management"]}});
             e.channels.insert("454018750-DMR-2".into(), ch);
-            let noise = json!({"id":"454054498-Unknown-1","protocol":"Unknown","kind":"unidentified","decoded":false});
+            let twin = json!({"id":"454018750-Unknown-1","protocol":"Unknown","slot":1,"kind":"unidentified","decoded":false});
+            e.channels.insert("454018750-Unknown-1".into(), twin);
+            let noise = json!({"id":"454054498-Unknown-1","protocol":"Unknown","slot":1,"kind":"unidentified","decoded":false});
             e.channels.insert("454054498-Unknown-1".into(), noise);
         }
         app
     }
     #[tokio::test]
-    async fn calls_list_newest_first_and_serve_wav_audio() {
+    async fn calls_list_newest_first_page_by_unix_seconds_and_serve_wav_audio() {
         let app = seeded_app();
         {
-            let mut e = app.inner.lock().unwrap();
+            let mut e = app.engine();
             for (i, id) in ["454018750-DMR-2", "454018750-DMR-1"].iter().enumerate() {
-                e.store.record(id, "DMR", 2, 454018750., &json!("Day Wireless"), Some(-30.), &vec![500i16; 16000], 100. + i as f64 * 50.);
+                e.store.record(id, "454018750-2", "DMR", 2, 454018750., &json!("Day Wireless"), Some(-30.), &vec![500i16; 16000], 100. + i as f64 * 50.);
             }
             e.store.close_idle(1000.);
         }
-        let Json(list) = calls(State(app.clone()), Query(CallsQuery { before: None, limit: Some(10), source: None })).await;
+        let Json(list) = calls(State(app.clone()), Query(CallsQuery { before: None, limit: Some(1), source: None })).await;
         let items = list["calls"].as_array().unwrap();
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0]["source"], "454018750-DMR-1", "newest first");
-        assert_eq!(items[0]["audio_url"], "/api/calls/2/audio.wav");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["channel_id"], "454018750-DMR-1", "newest first");
+        assert_eq!(items[0]["source_id"], "454018750-2");
+        assert!(items[0]["id"].is_string() && items[0]["ended_at"].is_number());
         assert_eq!(items[0]["duration_s"], 2.0);
         assert!(items[0]["talker"].is_null() && items[0]["transcript"].is_null());
-        let response = call_audio(State(app.clone()), Path("2".into())).await.into_response();
+        // The cursor is a unix timestamp that pages back to the older call.
+        let cursor = list["next_before"].as_f64().expect("another page exists");
+        let Json(page2) = calls(State(app.clone()), Query(CallsQuery { before: Some(cursor), limit: Some(10), source: None })).await;
+        assert_eq!(page2["calls"][0]["channel_id"], "454018750-DMR-2");
+        assert!(page2["next_before"].is_null());
+        let url = items[0]["audio_url"].as_str().unwrap().to_string();
+        let id = url.trim_start_matches("/api/calls/").trim_end_matches("/audio.wav").to_string();
+        let response = call_audio(State(app.clone()), Path(id)).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CONTENT_TYPE], "audio/wav");
         let body = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
         assert_eq!(&body[..4], b"RIFF");
         assert_eq!(body.len(), 44 + 32000);
-        assert_eq!(call_audio(State(app), Path("99".into())).await.into_response().status(), StatusCode::NOT_FOUND);
+        // 410, not 404 (404 means "endpoint not built" to the frontend).
+        assert_eq!(call_audio(State(app), Path("99".into())).await.status(), StatusCode::GONE);
     }
     #[tokio::test]
-    async fn catalog_lists_located_channels_and_applies_operator_edits() {
+    async fn catalog_groups_channels_into_sources_and_upserts_operator_edits() {
         let app = seeded_app();
         let Json(before) = catalog(State(app.clone())).await;
-        assert_eq!(before["count"], 1, "unconfirmed noise bins are not catalog entries");
-        assert_eq!(before["entries"][0]["display_name"], "Day Wireless (business trunked)");
-        let edited = catalog_edit(
-            State(app.clone()),
-            Path("454018750-DMR-2".into()),
-            Json(json!({"name":"Day Wireless dispatch","followed":true})),
-        )
-        .await
-        .unwrap();
-        assert_eq!(edited.0["display_name"], "Day Wireless dispatch");
-        assert_eq!(edited.0["user"]["followed"], true);
+        let sources = before["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 1, "unconfirmed noise bins are not sources, and the Unknown twin joins its source");
+        let entry = &sources[0];
+        assert_eq!(entry["id"], "454018750-2");
+        assert_eq!(entry["kind"], "channel");
+        assert_eq!(entry["mode"], "dmr");
+        assert_eq!(entry["encryption"], "unknown");
+        assert_eq!(entry["name"], "Day Wireless (business trunked)");
+        assert_eq!(entry["system"]["id"], "trbowest");
+        assert_eq!(entry["channel_ids"], json!(["454018750-DMR-2"]));
+        // The UI sends back the whole entry it read: read-only fields are ignored, edits apply.
+        let mut upload = entry.clone();
+        upload["name"] = json!("  Day Wireless dispatch ");
+        upload["followed"] = json!(true);
+        let edited = catalog_edit(State(app.clone()), Path("454018750-2".into()), Json(upload)).await.unwrap();
+        assert_eq!(edited.0["name"], "Day Wireless dispatch");
+        assert_eq!(edited.0["followed"], true);
+        assert_eq!(edited.0["mode"], "dmr", "read-only fields are not editable");
+        // Clearing a name falls back to the label; whitespace-only counts as cleared.
+        let cleared = catalog_edit(State(app.clone()), Path("454018750-2".into()), Json(json!({"name":"   "}))).await.unwrap();
+        assert_eq!(cleared.0["name"], "Day Wireless (business trunked)");
+        // An edit for a source not heard yet is kept and listed.
+        catalog_edit(State(app.clone()), Path("452000000-1".into()), Json(json!({"name":"Garage","frequency_hz":452000000.0,"slot":1}))).await.unwrap();
         let Json(after) = catalog(State(app.clone())).await;
-        assert_eq!(after["entries"][0]["display_name"], "Day Wireless dispatch");
-        assert_eq!(after["entries"][0]["kind"], "channel");
+        let garage = after["sources"].as_array().unwrap().iter().find(|s| s["id"] == "452000000-1").expect("user-only source listed");
+        assert_eq!(garage["name"], "Garage");
+        assert_eq!(garage["frequency_hz"], 452000000.0);
         let status = status_json(&app);
-        assert_eq!(status["channels"][0]["user"].is_object() || status["channels"][1]["user"].is_object(), true);
-        let bad = catalog_edit(State(app.clone()), Path("454018750-DMR-2".into()), Json(json!({"frequency_hz":1}))).await;
-        assert_eq!(bad.unwrap_err().0, StatusCode::BAD_REQUEST);
-        let missing = catalog_edit(State(app), Path("nope".into()), Json(json!({"name":"x"}))).await;
-        assert_eq!(missing.unwrap_err().0, StatusCode::NOT_FOUND);
+        assert!(status["channels"].as_array().unwrap().iter().any(|c| c["user"].is_object() || c["display_name"].is_string()));
     }
     #[tokio::test]
-    async fn spectrum_bin_is_rsp1_with_levels_scaled_to_the_data_range() {
+    async fn catalog_edit_validation_matrix() {
+        let app = seeded_app();
+        let put = |id: &'static str, body: Value| {
+            let app = app.clone();
+            async move { catalog_edit(State(app), Path(id.into()), Json(body)).await }
+        };
+        assert!(put("454018750-2", json!({"name":"x".repeat(80)})).await.is_ok());
+        assert_eq!(put("454018750-2", json!({"name":"x".repeat(81)})).await.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert!(put("454018750-2", json!({"notes":"n".repeat(500)})).await.is_ok());
+        assert_eq!(put("454018750-2", json!({"notes":"n".repeat(501)})).await.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert_eq!(put("454018750-2", json!({"followed":"yes"})).await.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert_eq!(put("454018750-2", json!(["not","an","object"])).await.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert_eq!(put("../etc/passwd", json!({"name":"x"})).await.unwrap_err().0, StatusCode::UNPROCESSABLE_ENTITY);
+        // A bad later key leaves no partial commit.
+        let before = app.engine().store.user.get("454018750-2").cloned();
+        assert!(put("454018750-2", json!({"name":"changed","followed":123})).await.is_err());
+        assert_eq!(app.engine().store.user.get("454018750-2").cloned(), before);
+        assert!(put("454018750-2", json!({"name":null})).await.is_ok());
+        // A hand-damaged state file (an edit that is not an object) cannot panic the handler.
+        app.engine().store.user.insert("454018750-2".into(), json!("garbage"));
+        assert!(put("454018750-2", json!({"followed":true})).await.is_ok());
+    }
+    #[tokio::test]
+    async fn spectrum_bin_is_rsp1_in_the_frontend_layout() {
         let app = App::new(3);
         {
-            let mut e = app.inner.lock().unwrap();
+            let mut e = app.engine();
             e.source = json!({"input_center_hz":454216998,"input_bandwidth_hz":800000,"psd":{"unit":"dBFS"}});
+            e.generation = 7;
             for n in 1..=3u64 {
                 let row: Vec<f32> = (0..64).map(|k| if k == 10 { -12. } else { -60. }).collect();
                 e.psd.push_back((n, n as f64, row));
                 e.psd_seq = n;
             }
         }
-        let response = spectrum_bin(State(app), Query(SpectrumBin { after: 1, limit: None })).await.into_response();
+        let response = spectrum_bin(State(app.clone()), Query(SpectrumBin { after: 1, limit: None })).await.into_response();
         assert_eq!(response.headers()["x-sequence"], "3");
         let b = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let u16at = |o: usize| u16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+        let f64at = |o: usize| f64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+        let f32at = |o: usize| f32::from_le_bytes(b[o..o + 4].try_into().unwrap());
         assert_eq!(&b[..4], b"RSP1");
-        assert_eq!(u16::from_le_bytes([b[4], b[5]]), 1);
-        assert_eq!(u16::from_le_bytes([b[6], b[7]]), 64, "bins");
-        assert_eq!(u16::from_le_bytes([b[8], b[9]]), 2, "rows after seq 1");
-        let low = f32::from_le_bytes(b[12..16].try_into().unwrap());
-        let high = f32::from_le_bytes(b[16..20].try_into().unwrap());
+        assert_eq!(u16at(4), 64, "bins");
+        assert_eq!(u16at(6), 2, "rows after seq 1");
+        assert_eq!(f64at(8), 454216998.0, "center (ppm 0)");
+        assert_eq!(f64at(16), 800000.0, "span");
+        let (low, high) = (f32at(24), f32at(28));
         assert!(low < -58. && high > -12. - 0.1);
-        assert_eq!(f64::from_le_bytes(b[20..28].try_into().unwrap()), 454216998.);
-        assert_eq!(b.len(), 32 + 2 * (16 + 64));
-        let row = &b[32..32 + 16 + 64];
+        assert_eq!(u64::from_le_bytes(b[32..40].try_into().unwrap()), 3, "latest sequence");
+        assert_eq!(u32::from_le_bytes(b[40..44].try_into().unwrap()), 7, "generation");
+        assert_eq!(b.len(), 48 + 2 * (16 + 64));
+        let row = &b[48..48 + 16 + 64];
         assert_eq!(u64::from_le_bytes(row[..8].try_into().unwrap()), 2);
-        assert!(row[16 + 10] > 240, "the peak bin sits at the top of the range");
-        assert!(row[16] < 20, "floor bins sit at the bottom");
+        assert!(row[16 + 10] > 240 && row[16] < 20);
+        // Zero rows still carry the latest sequence; the range is held between responses.
+        let response = spectrum_bin(State(app.clone()), Query(SpectrumBin { after: 3, limit: None })).await.into_response();
+        let b2 = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(u16::from_le_bytes(b2[6..8].try_into().unwrap()), 0);
+        assert_eq!(u64::from_le_bytes(b2[32..40].try_into().unwrap()), 3);
+        assert_eq!(b2[24..32], b[24..32], "low/high unchanged");
+        // Calibrated center: the radio reads 23.3 ppm high.
+        let calibrated = App::configured(crate::runtime::AppConfig { ppm: 23.3, ..crate::runtime::AppConfig::new(3) });
+        calibrated.engine().source = json!({"input_center_hz":454216998,"input_bandwidth_hz":800000,"psd":{"unit":"dBFS"}});
+        let b3 = axum::body::to_bytes(spectrum_bin(State(calibrated), Query(SpectrumBin { after: 0, limit: None })).await.into_response().into_body(), 1 << 20).await.unwrap();
+        let center = f64::from_le_bytes(b3[8..16].try_into().unwrap());
+        assert!((center - 454_206_418.).abs() < 5., "{center}");
     }
     #[tokio::test]
-    async fn activity_reports_buckets_and_blocks_reflects_the_source() {
+    async fn activity_has_the_block_series_and_blocks_follow_the_contract() {
         let app = App::new(3);
         {
-            let mut e = app.inner.lock().unwrap();
+            let mut e = app.engine();
             e.store.add_activity("a", now_s(), 20., 12.);
             e.source = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,"capabilities":{"configure_supported":false}});
         }
         let Json(report) = activity(State(app.clone()), Query(ActivityQuery { window_s: Some(3600), bucket_s: Some(300) })).await;
-        let total: f64 = report["total"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum();
-        assert_eq!(total, 12.);
-        let Json(block) = blocks(State(app)).await;
-        assert_eq!(block["current"]["center_hz"], 454216998);
-        assert_eq!(block["can_change"], false);
+        let block: f64 = report["block"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum();
+        assert_eq!(block, 12.);
+        assert!(report["baseline"].is_null(), "nothing learned yet");
+        let Json(b) = blocks(State(app.clone())).await;
+        assert_eq!(b["current_id"], "current");
+        assert_eq!(b["blocks"][0]["center_hz"], 454216998.0);
+        assert_eq!(b["can_change"], false);
+        assert!(set_block(State(app.clone()), Json(json!({"id":"current"}))).await.is_ok());
+        assert_eq!(set_block(State(app), Json(json!({"id":"elsewhere"}))).await.unwrap_err().0, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    #[tokio::test]
+    async fn a_handler_panic_cannot_brick_the_engine_lock() {
+        let app = App::new(3);
+        let poisoner = app.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.engine();
+            panic!("simulated handler panic under the engine lock");
+        })
+        .join();
+        assert!(app.inner.is_poisoned());
+        // Everything still answers.
+        assert_eq!(status_json(&app)["mode"], "disconnected");
+        let Json(report) = activity(State(app), Query(ActivityQuery { window_s: Some(u64::MAX), bucket_s: Some(u64::MAX) })).await;
+        assert!(report["block"].is_array());
+    }
+    /// The listen sockets end to end: per-socket channel filtering, join-time filtering, pins on
+    /// connect and unpin when the socket closes, and rejection of unknown channels.
+    #[tokio::test]
+    async fn per_browser_listen_sockets_route_audio_and_manage_pins() {
+        type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+        /// (channel id, first PCM byte) of every audio message that arrives in 600 ms.
+        async fn read_audio(ws: &mut Socket) -> Vec<(String, u8)> {
+            use futures_util::StreamExt;
+            use tokio_tungstenite::tungstenite::Message as Wire;
+            let mut got = vec![];
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(600);
+            let mut channel = String::new();
+            while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, ws.next()).await {
+                match message {
+                    Wire::Text(t) => {
+                        let v: Value = serde_json::from_str(t.as_str()).unwrap();
+                        if v["type"] == "audio" {
+                            channel = v["channel_id"].as_str().unwrap().to_string();
+                        }
+                    }
+                    Wire::Binary(pcm) => got.push((channel.clone(), pcm[0])),
+                    _ => {}
+                }
+            }
+            got
+        }
+        let app = App::new(3);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(32);
+        {
+            let mut e = app.engine();
+            e.active = true;
+            e.generation = 5;
+            e.control = Some(tx);
+            for (id, stream) in [("A-1", 1u64), ("B-1", 2), ("C-1", 3)] {
+                e.channels.insert(id.into(), json!({"id":id,"stream_id":stream,"in_range":true,"logical_hz":454000000.0 + stream as f64,"protocol":"Unknown"}));
+            }
+        }
+        let router = router(app.clone(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let audio = |id: &str, tag: u8| crate::runtime::Audio {
+            meta: json!({"type":"audio","channel_id":id,"source_generation":5,"samples":2}),
+            pcm: vec![tag, 0, tag, 0],
+            created: Instant::now(),
+        };
+        // Audio made before anyone joined must never be played.
+        let _ = app.audio.send(audio("A-1", 9));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (mut a, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/api/listen?channel_id=A-1")).await.unwrap();
+        let (mut b, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/api/listen?channel_id=B-1")).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let pins: Vec<Value> = rx.try_iter().collect();
+        let pinned: std::collections::BTreeSet<u64> = pins.iter().filter(|p| p["pinned"] == true).map(|p| p["stream_id"].as_u64().unwrap()).collect();
+        assert_eq!(pinned, [1, 2].into(), "each socket pins its own stream: {pins:?}");
+        assert_eq!(app.engine().listeners.len(), 2);
+        let _ = app.audio.send(audio("A-1", 1));
+        let _ = app.audio.send(audio("C-1", 3)); // nobody is listening to C
+        let _ = app.audio.send(audio("B-1", 2));
+        // Each socket receives exactly its own channel's audio (metadata then PCM).
+        assert_eq!(read_audio(&mut a).await, vec![("A-1".to_string(), 1)]);
+        assert_eq!(read_audio(&mut b).await, vec![("B-1".to_string(), 2)]);
+        // Closing A releases its pin; B's stays.
+        a.close(None).await.ok();
+        drop(a);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let unpins: Vec<Value> = rx.try_iter().filter(|p| p["pinned"] == false).collect();
+        assert_eq!(unpins.len(), 1, "{unpins:?}");
+        assert_eq!(unpins[0]["stream_id"], 1);
+        assert_eq!(app.engine().listeners.len(), 1);
+        // An unknown channel is refused before the upgrade.
+        let refused = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/api/listen?channel_id=nope")).await;
+        assert!(refused.is_err(), "unknown channel must not upgrade");
+        // Without channel_id the socket follows the shared selection (legacy behavior).
+        let (mut legacy, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/api/listen")).await.unwrap();
+        app.engine().selected = Some("C-1".into());
+        app.engine().selected_at = Instant::now() - Duration::from_secs(1);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = app.audio.send(audio("C-1", 7));
+        assert_eq!(read_audio(&mut legacy).await, vec![("C-1".to_string(), 7)]);
     }
     #[tokio::test]
     async fn missing_source_controls_never_report_applied() {
@@ -673,7 +1000,7 @@ mod tests {
         let app = App::new(3);
         let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(1);
         {
-            let mut e = app.inner.lock().unwrap();
+            let mut e = app.engine();
             e.control = Some(tx);
             e.source = json!({"capabilities":{"stop_supported":true,"configure_supported":false}});
         }
@@ -681,7 +1008,7 @@ mod tests {
         std::thread::spawn(move || {
             let request = rx.recv().unwrap();
             assert_eq!(request["action"], "stop");
-            let mut e = other.inner.lock().unwrap();
+            let mut e = other.engine();
             e.source["control_ack"] = json!({"request_id":request["request_id"],"ok":true});
             e.source["receiver_state"] = json!("stopped");
         });
