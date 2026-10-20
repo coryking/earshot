@@ -113,7 +113,11 @@ async fn iq_status(State(app): State<App>, Path(id): Path<String>) -> ApiResult 
         "sample_rate_hz":null,"center_hz":null,"stream_id":null,"max_seconds":30,"last_received_at":null}));
     let e = app.engine();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
-    status["collecting"] = json!(e.active && crate::runtime::wanted_ids(&e).contains(&id)
+    // IQ belongs to a physical slice. A different target on that same slice
+    // can keep its buffer rolling after the queried target stops listening.
+    status["collecting"] = json!(e.active && status["stream_id"].as_u64().is_some_and(|stream|
+        crate::runtime::wanted_ids(&e).iter().any(|wanted| e.channels.get(wanted)
+            .is_some_and(|channel| channel["stream_id"].as_u64() == Some(stream))))
         && status["last_received_at"].as_f64().is_some_and(|last| now - last < 2.));
     Ok(Json(status))
 }
@@ -859,9 +863,23 @@ mod tests {
         std::io::Read::read_to_end(&mut data, &mut samples).unwrap();
         assert_eq!(samples, vec![1,2,3,4]);
         app.engine().selected = None;
-        let Json(stopped) = iq_status(State(app), Path("454000000-Raw-1".into())).await.unwrap();
+        let Json(stopped) = iq_status(State(app.clone()), Path("454000000-Raw-1".into())).await.unwrap();
         assert_eq!(stopped["collecting"], false);
         assert_eq!(stopped["samples"], 1, "Stop preserves the buffered capture");
+        {
+            let mut e = app.engine();
+            e.channels.insert("neighbor".into(), json!({"stream_id":7,"frequency_hz":454012500}));
+            e.selected = Some("neighbor".into());
+        }
+        let Json(shared) = iq_status(State(app.clone()), Path("454000000-Raw-1".into())).await.unwrap();
+        assert_eq!(shared["collecting"], true, "A listener on a neighboring target keeps the physical slice rolling");
+        {
+            let mut e = app.engine();
+            e.channels.insert("different-slice".into(), json!({"stream_id":8,"frequency_hz":454100000}));
+            e.selected = Some("different-slice".into());
+        }
+        let Json(other) = iq_status(State(app), Path("454000000-Raw-1".into())).await.unwrap();
+        assert_eq!(other["collecting"], false, "A different physical slice does not collect this buffer");
     }
 
     #[test]

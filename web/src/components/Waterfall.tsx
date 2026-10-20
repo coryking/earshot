@@ -6,6 +6,7 @@ import type { Source } from "@/domain/model";
 import { cn } from "@/lib/utils";
 import { createRenderer, type Renderer } from "@/waterfall/renderer";
 import { onSpectrumRows, spectrumRows, useSpectrumMeta } from "@/waterfall/feed";
+import { historyTicks } from "@/waterfall/ticks";
 
 interface Props {
   variant: "strip" | "full";
@@ -182,11 +183,7 @@ export function Waterfall({ variant, sources, talking, activeSourceId, tunedFreq
       frequencyTicks.push(hz);
   }
   const history = spectrumRows.slice(-visible).reverse();
-  const timeTicks = Array.from({ length: Math.max(2, Math.floor(height / 90)) }, (_, i) => {
-    const row = Math.floor(i * visible / Math.max(2, Math.floor(height / 90)));
-    const age = history[row] ? history[0].time - history[row].time : null;
-    return { row, age };
-  }).filter((tick) => tick.age !== null);
+  const timeTicks = historyTicks(history.map((row) => row.time), visible, height);
 
   return (
     <div className={cn("flex flex-col overflow-hidden bg-[#0f1a2b]", variant === "strip" ? "h-14 rounded-lg" : "h-full min-h-40 rounded-xl", className)}>
@@ -237,9 +234,9 @@ export function Waterfall({ variant, sources, talking, activeSourceId, tunedFreq
       data-waterfall={variant}
     >
       <canvas ref={canvas} className="absolute inset-0 h-full w-full" aria-hidden />
-      {variant === "full" && timeTicks.map(({ row, age }) => (
+      {variant === "full" && timeTicks.map(({ row, ageSeconds }) => (
         <span key={row} aria-hidden className="pointer-events-none absolute left-0 border-t border-white/30 bg-[#0f1a2b]/80 px-1 text-[10px] text-[#c9d4e5]" style={{ top: `${row / visible * 100}%` }}>
-          {row === 0 ? "Newest" : `−${age!.toFixed(1)} s`}
+          {ageSeconds === 0 ? "Newest" : `−${ageSeconds} s`}
         </span>
       ))}
       {variant === "full" && meta.bins > 0 && meta.spanHz && (
@@ -290,7 +287,7 @@ export function Waterfall({ variant, sources, talking, activeSourceId, tunedFreq
             )}
             style={{ left: center, top: (variant === "strip" ? 4 : 12) + lane * 34 }}
           >
-            <ChannelIdentity {...source} compact />
+            <ChannelIdentity {...source} name={source.id === activeSourceId ? `Held · ${source.name}` : source.name} compact />
           </span>
         ))}
       {variant === "full" && tunedFrequencyHz != null && low !== null && meta.spanHz && tunedFrequencyHz >= low && tunedFrequencyHz <= low + meta.spanHz && (
