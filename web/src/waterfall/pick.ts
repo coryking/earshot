@@ -2,6 +2,13 @@ import type { Source } from "@/domain/model";
 
 export interface WaterfallPick { frequencyHz: number; source?: Source; snapped: boolean }
 
+/** Nominal 6.25 kHz raster for this monitor's UHF land-mobile band.
+ * This is a tuning aid, not evidence of a licensed assignment. Exact tuning
+ * remains available for off-raster carriers and other bands. */
+export function roundChannel(hz: number): number {
+  return hz >= 450e6 && hz <= 470e6 ? Math.round(hz / 6250) * 6250 : Math.round(hz);
+}
+
 /** Pick from the row under the pointer, so a past transmission remains selectable. */
 export function pickSignal(frequencyHz: number, radiusHz: number, lowHz: number, spanHz: number,
   bins: Uint8Array | undefined, sources: Source[], exact = false): WaterfallPick {
@@ -23,9 +30,9 @@ export function pickSignal(frequencyHz: number, radiusHz: number, lowHz: number,
     if (peaks.length) {
       const peak = peaks[0];
       const source = nearest(peak.hz, Math.max(step / 2, 6250));
-      return { frequencyHz: source?.frequencyHz ?? peak.hz, source, snapped: true };
+      return { frequencyHz: source?.frequencyHz ?? roundChannel(peak.hz), source, snapped: true };
     }
   }
   const source = nearest(frequencyHz, radius);
-  return source ? { frequencyHz: source.frequencyHz!, source, snapped: true } : { frequencyHz, snapped: false };
+  return source ? { frequencyHz: source.frequencyHz!, source, snapped: true } : { frequencyHz: roundChannel(frequencyHz), snapped: roundChannel(frequencyHz) !== frequencyHz };
 }

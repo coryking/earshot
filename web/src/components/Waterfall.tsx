@@ -79,7 +79,7 @@ export function Waterfall({ variant, sources, talking, activeSourceId, onListen,
     if (!el || !meta.bins) return;
     let r: Renderer;
     try {
-      r = createRenderer(el, { bins: meta.bins, capacity: 512, visible, smoothing: 0.55 });
+      r = createRenderer(el, { bins: meta.bins, capacity: 512, visible, smoothing: 1 });
     } catch {
       return;
     }
@@ -160,13 +160,39 @@ export function Waterfall({ variant, sources, talking, activeSourceId, onListen,
   const empty = !meta.bins;
   const stale = !empty && Date.now() - meta.receivedAt > 10_000;
 
+  const tickCount = Math.max(2, Math.floor(width / 110));
+  const rawStep = (meta.spanHz ?? 1) / tickCount;
+  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+  const tickStep = [1, 2, 5, 10].find((n) => n * magnitude >= rawStep)! * magnitude;
+  const frequencyTicks: number[] = [];
+  if (low !== null && meta.spanHz) {
+    for (let hz = Math.ceil(low / tickStep) * tickStep; hz <= low + meta.spanHz; hz += tickStep)
+      frequencyTicks.push(hz);
+  }
+  const history = spectrumRows.slice(-visible).reverse();
+  const timeTicks = Array.from({ length: Math.max(2, Math.floor(height / 90)) }, (_, i) => {
+    const row = Math.floor(i * visible / Math.max(2, Math.floor(height / 90)));
+    const age = history[row] ? history[0].time - history[row].time : null;
+    return { row, age };
+  }).filter((tick) => tick.age !== null);
+
   return (
+    <div className={cn("flex flex-col overflow-hidden bg-[#0f1a2b]", variant === "strip" ? "h-14 rounded-lg" : "h-full min-h-40 rounded-xl", className)}>
+      {variant === "full" && low !== null && meta.spanHz && (
+        <div aria-label="Frequency scale (MHz)" className="relative h-7 shrink-0 border-b border-[#93a1b8]/30 text-[11px] text-[#c9d4e5]">
+          {frequencyTicks.map((hz) => (
+            <span key={hz} className="absolute bottom-0 h-2 border-l border-[#93a1b8]/60" style={{ left: `${(hz - low) / meta.spanHz! * 100}%` }}>
+              <span className="absolute bottom-2 -translate-x-1/2 whitespace-nowrap">{(hz / 1e6).toFixed(Math.max(0, Math.ceil(6 - Math.log10(tickStep))))}</span>
+            </span>
+          ))}
+          <span className="absolute top-0 right-1 bg-[#0f1a2b] px-1">MHz</span>
+        </div>
+      )}
     <div
       ref={box}
       className={cn(
         "relative overflow-hidden bg-[#0f1a2b] select-none",
-        variant === "strip" ? "h-14 rounded-lg" : "h-full min-h-40 rounded-xl",
-        className,
+        "min-h-0 flex-1",
       )}
       onPointerUp={interactive ? (e) => pick(e.clientX, e.clientY, e.shiftKey) : undefined}
       onPointerMove={interactive ? (e) => setHover(targetAt(e.clientX, e.clientY, e.shiftKey)) : undefined}
@@ -180,6 +206,14 @@ export function Waterfall({ variant, sources, talking, activeSourceId, onListen,
       data-waterfall={variant}
     >
       <canvas ref={canvas} className="absolute inset-0 h-full w-full" aria-hidden />
+      {variant === "full" && timeTicks.map(({ row, age }) => (
+        <span key={row} aria-hidden className="pointer-events-none absolute left-0 border-t border-white/30 bg-[#0f1a2b]/80 px-1 text-[10px] text-[#c9d4e5]" style={{ top: `${row / visible * 100}%` }}>
+          {row === 0 ? "Newest" : `−${age!.toFixed(1)} s`}
+        </span>
+      ))}
+      {variant === "full" && meta.bins > 0 && meta.spanHz && (
+        <span className="pointer-events-none absolute bottom-1 right-1 rounded bg-[#0f1a2b]/85 px-1 text-[10px] text-[#c9d4e5]">{(meta.spanHz / meta.bins / 1000).toFixed(2)} kHz/bin</span>
+      )}
       {empty && (
         <p className="absolute inset-0 grid place-items-center px-4 text-center text-xs text-[#93a1b8]">
           No signal
@@ -236,6 +270,7 @@ export function Waterfall({ variant, sources, talking, activeSourceId, onListen,
           {hover.snapped ? "Snap to " : "Tune "}<ChannelIdentity name={hover.source?.name} frequencyHz={hover.frequencyHz} mode={hover.source?.mode} slot={hover.source?.slot} compact />
         </span>
       )}
+    </div>
     </div>
   );
 }

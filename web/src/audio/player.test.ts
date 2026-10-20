@@ -104,7 +104,7 @@ describe("Player live listening", () => {
       frequency_hz: target.frequencyHz, protocol: "DMR", slot: 2, in_range: true }));
     const player = new Player(f.backend);
     await player.listen(target);
-    expect(f.backend.tune).toHaveBeenCalledWith(452675000, "452675000-DMR-2");
+    expect(f.backend.tune).toHaveBeenCalledWith(452675000, "452675000-DMR-2", false);
     expect(f.monitor).toHaveBeenCalledWith("452675000-DMR-2");
     expect(player.state.get()).toMatchObject({ frequencyHz: 452675000, slot: 2, phase: "waiting" });
     await player.stop();

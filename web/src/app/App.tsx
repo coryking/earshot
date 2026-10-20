@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect } from "react";
 import { usePlayerInstance, usePlayerSelect } from "@/app/player-context";
 import { useAlerts } from "@/app/alerts";
 import { Palette, ShortcutsDialog, useShortcuts } from "@/app/Palette";
-import { openSheet, useRoute, useWide } from "@/app/ui";
+import { useRoute, useWide } from "@/app/ui";
 import { Header, TabBar } from "@/components/Chrome";
 import { PlayerBar } from "@/components/PlayerBar";
 import { SheetHost } from "@/components/Sheets";
@@ -33,14 +33,14 @@ function WideNow() {
       <ResizablePanel defaultSize="62%" minSize="30%" className="min-h-0">
         <div className="flex h-full min-h-0 flex-col gap-3 p-3">
           <LiveSelection />
-          <p className="text-sm text-muted-foreground">Click a signal to tune. Nearby channels snap into place; hold Shift for an exact frequency.</p>
+          <p className="text-sm text-muted-foreground">Click a signal to tune. UHF tuning snaps to 6.25 kHz steps; hold Shift for an exact frequency.</p>
           <Waterfall
             variant="full"
             sources={view.all}
             talking={view.talking}
             activeSourceId={activeSourceId}
-            onListen={(s) => void player.listen(s)}
-            onUnnamed={(frequencyHz) => openSheet({ type: "unnamed", frequencyHz })}
+            onListen={(s) => void player.listen(s, { raw: !s.heardVoice || s.control || s.encryption === "encrypted" })}
+            onUnnamed={(frequencyHz) => void player.listenFrequency(frequencyHz)}
             className="flex-1"
           />
         </div>

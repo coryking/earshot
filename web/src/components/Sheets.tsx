@@ -1,5 +1,4 @@
 import { ChannelIdentity } from "@/components/ChannelIdentity";
-import { TuneForm } from "@/components/Tuning";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { BellRing, ChevronRight, Lock, Pause, Play, Star, VolumeX } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -59,7 +58,6 @@ export function SheetHost() {
       <AlertsSheet open={sheet?.type === "alerts"} />
       <StatusSheet open={sheet?.type === "status"} />
       <PlayerSheet open={sheet?.type === "player"} />
-      <UnnamedSheet frequencyHz={sheet?.type === "unnamed" ? sheet.frequencyHz : null} />
     </>
   );
 }
@@ -481,21 +479,6 @@ function PlayerSheet({ open }: { open: boolean }) {
       {state.kind === "live" && state.background === false && (
         <p className="mt-5 text-sm text-muted-foreground">Keep the screen on</p>
       )}
-    </Sheet>
-  );
-}
-
-function UnnamedSheet({ frequencyHz }: { frequencyHz: number | null }) {
-  return (
-    <Sheet
-      open={frequencyHz !== null}
-      title={<ChannelIdentity name="Tune signal" frequencyHz={frequencyHz} />}
-      description="Unidentified"
-    >
-      {frequencyHz !== null && <>
-        <p className="mb-4 text-sm text-muted-foreground">Tune this frequency, or adjust it to the channel you want. A signal may carry voice or data.</p>
-        <TuneForm key={frequencyHz} initialHz={frequencyHz} onTune={() => sheetStore.set(null)} />
-      </>}
     </Sheet>
   );
 }

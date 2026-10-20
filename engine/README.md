@@ -122,6 +122,30 @@ that produces `FM` slot 1 channels once a quieted voice carrier is heard; it is 
 sync is present. `POST /api/monitor` also accepts a channel whose protocol is still `Unknown`: the
 pin forwards its IQ and audio follows whatever is heard at that frequency, labeled with the pinned id.
 
+`POST /api/tune` accepts `{ "frequency_hz": 464912500, "raw": true }` to create an
+explicit `Raw` listener. Its WebSocket audio is mono signed16 **48 kHz FM discriminator**
+after the 12.5 kHz channel filter and DC removal, before squelch, de-emphasis or voice
+processing. Raw audio bypasses RF and protocol confirmation, including on control/data
+carriers; it is never promoted to decoded voice or added to the voice-call log. Normal
+voice listening retains its confirmation gates. `capabilities.raw_fm_audio` advertises it.
+Raw chunks carry `raw: true`, `first_sample` and `input_rate_hz` for gap diagnostics.
+Pre-roll and stale queued audio remain excluded. This is demodulated FM, not IQ, and
+cannot preserve modulation outside the selected channel filter.
+
+The web UI defaults unidentified signals and manual tuning to raw listening, and offers
+**Listen to raw signal** for decoded channels. It keeps the latest 120 seconds in browser
+memory; **Save raw WAV** downloads a 48 kHz WAV with frequency, processing and transport-gap
+metadata in its RIFF INFO comment. Stop retains that buffer; a new tuning selection
+replaces it, and closing the page discards it. Mute changes speaker volume only.
+
+The full waterfall uses native bins without interpolation or temporal averaging, with
+frequency ticks above and elapsed sample-time ticks down the side. Its resolution badge
+reports the actual producer spacing: the current 512-bin, 25.6 MHz FPGA spectrum is
+50 kHz/bin. Display changes cannot recover narrower spectral detail from those bins.
+UHF click tuning uses the nearest known channel or a nominal 6.25 kHz raster; Shift and
+manual frequency entry preserve exact input. Raster snapping is a tuning aid, not
+confirmation of a channel assignment.
+
 `POST /api/monitor` accepts `{ "channel_id": "frequency-protocol-slot" }` or null.
 It changes only the pinned listener and sends a RIQ1 CONTROL pin request to the
 source. Discovery continues. `/api/status` and `/api/listener` expose state and
@@ -133,7 +157,7 @@ the producer supports it. An acknowledgement timeout leaves hardware state
 explicitly unknown.
 
 `WS /api/listen` sends one JSON audio descriptor followed by one binary PCM
-message: signed16 little-endian, mono, 8 kHz. Metadata contains `samples`, stable
+message: signed16 little-endian, mono, 8 kHz for voice or 48 kHz for explicit raw listening. Metadata contains `samples`, stable
 `channel_id`, `sequence`, decoder `generation`, and `source_generation`.
 Heartbeats carry generation and selection; explicit `gap` messages flush a slow
 browser's queued audio. Queues hold at most 16 chunks. Ingress age measures time

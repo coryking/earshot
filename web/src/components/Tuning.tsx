@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useBackend, useSources } from "@/state/radio";
 
-export function TuneForm({ initialHz, onTune }: { initialHz?: number; onTune?(): void }) {
+export function TuneForm({ initialHz }: { initialHz?: number }) {
   const [frequency, setFrequency] = useState(initialHz ? (initialHz / 1e6).toFixed(5) : "");
   const player = usePlayerInstance();
   const backend = useBackend();
@@ -16,7 +16,6 @@ export function TuneForm({ initialHz, onTune }: { initialHz?: number; onTune?():
       e.preventDefault();
       if (!backend.tune || !frequency.trim() || !Number.isFinite(hz) || hz < 70e6 || hz > 6e9) return;
       void player.listenFrequency(hz);
-      onTune?.();
     }}>
       <label className="min-w-0 flex-1 text-sm text-muted-foreground">
         Frequency (MHz)
@@ -38,16 +37,21 @@ export function LiveSelection() {
         <>
           <ChannelIdentity name={state.sourceName} frequencyHz={state.frequencyHz} mode={state.mode} slot={state.slot} className="text-lg text-heading" />
           <p className="mt-2 text-sm" role="status">{playerLine(state, null)}</p>
-          {state.phase === "waiting" && <p className="mt-1 text-sm text-muted-foreground">
-            {source?.signal ? "Signal detected; no decoded audio yet." : "Audio will play when a transmission is decoded."}
+          {(state.raw || state.phase === "waiting") && <p className="mt-1 text-sm text-muted-foreground">
+            {state.raw ? "Raw FM · unsquelched. Noise and digital signals are audible." : source?.signal ? "Signal detected; no decoded audio yet." : "Audio will play when a transmission is decoded."}
           </p>}
-          <div className="mt-3 flex gap-2">
+          <div className="mt-3 flex flex-wrap gap-2">
             <Button variant="secondary" onClick={() => player.toggleMute()}>{state.muted ? "Unmute" : "Mute"}</Button>
             <Button variant="outline" onClick={() => void player.stop()}>Stop audio</Button>
+            {!state.raw && <Button variant="outline" onClick={() => void player.listenRaw()}>Listen to raw signal</Button>}
           </div>
         </>
       ) : <p className="text-sm text-muted-foreground">Choose a channel or enter a frequency to hear live audio.</p>}
-      <div className="mt-3"><TuneForm /></div>
+      {(state.raw || state.captureSeconds > 0) && <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <Button variant="outline" disabled={!state.captureSeconds} onClick={() => player.saveCapture()}>Save raw WAV</Button>
+        <span>{state.captureSeconds.toFixed(1)} s · 48 kHz · last 120 s kept in this browser</span>
+      </div>}
+      <div className="mt-3"><TuneForm key={state.frequencyHz ?? "manual"} initialHz={state.frequencyHz ?? undefined} /></div>
     </section>
   );
 }

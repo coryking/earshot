@@ -3,7 +3,7 @@ import { COLORMAP } from "./colormap";
 /**
  * Waterfall renderer. Rows go into a ring texture (one row per spectrum line,
  * newest at the top); the colormap is a lookup texture applied in the shader.
- * Per-bin exponential averaging smooths speckle before upload. Falls back to
+ * Native bins and rows are drawn without interpolation or temporal smearing. Falls back to
  * a 2D canvas when WebGL2 is unavailable.
  */
 export interface Renderer {
@@ -115,8 +115,8 @@ function webgl(canvas: HTMLCanvasElement, gl: WebGL2RenderingContext, o: Rendere
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, rows);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, o.bins, o.capacity, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(o.bins * o.capacity));
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
 
@@ -136,7 +136,7 @@ function webgl(canvas: HTMLCanvasElement, gl: WebGL2RenderingContext, o: Rendere
 
   let newest = 0;
   const levels = new Levels();
-  const smoother = new Smoother(o.smoothing ?? 0.6);
+  const smoother = new Smoother(o.smoothing ?? 1);
   return {
     push(row) {
       if (row.length !== o.bins) return;
@@ -170,7 +170,7 @@ function canvas2d(canvas: HTMLCanvasElement, o: RendererOptions): Renderer {
   const ctx = canvas.getContext("2d");
   const history: Uint8Array[] = [];
   const levels = new Levels();
-  const smoother = new Smoother(o.smoothing ?? 0.6);
+  const smoother = new Smoother(o.smoothing ?? 1);
   return {
     push(row) {
       const smoothed = smoother.apply(row);
@@ -200,7 +200,7 @@ function canvas2d(canvas: HTMLCanvasElement, o: RendererOptions): Renderer {
       });
       const scratch = new OffscreenCanvas(width, o.visible);
       scratch.getContext("2d")?.putImageData(image, 0, 0);
-      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingEnabled = false;
       ctx.drawImage(scratch, 0, 0, canvas.width, canvas.height);
     },
     dispose() {},

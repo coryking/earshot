@@ -1,3 +1,4 @@
+import { engineChannelSchema } from "@/api/engine";
 /**
  * Demo/test backend. Simulates the engine's real wire shapes (status, channel
  * events, listener audio, spectrum) and the "frontend needs" endpoints (blocks,
@@ -386,15 +387,18 @@ export class MockBackend implements Backend {
   private pumpAudio(ms: number) {
     if (!this.selected || this.state !== "receiving") return;
     const channel = this.channels.get(this.selected);
-    if (!channel?.speech_active || channel.protocol === "FM") return;
-    const samples = Math.round((8000 * ms) / 1000);
-    const pcm = synthVoice(channel.frequency_hz % 97, samples, 8000, this.audioOffset);
+    const raw = channel?.protocol === "Raw";
+    if (!channel || (!raw && (!channel.speech_active || channel.protocol === "FM"))) return;
+    const rate = raw ? 48000 : 8000;
+    const samples = Math.round((rate * ms) / 1000);
+    const pcm = synthVoice(channel.frequency_hz % 97, samples, rate, this.audioOffset);
     this.audioOffset += samples;
     const descriptor: AudioDescriptor = {
       type: "audio",
       encoding: "s16le",
       channels: 1,
-      rate_hz: 8000,
+      rate_hz: rate,
+      raw,
       samples,
       channel_id: this.selected,
       generation: this.decoderGeneration,
@@ -495,6 +499,14 @@ export class MockBackend implements Backend {
       sequence: rows.at(-1)?.sequence ?? after,
       rows,
     };
+  }
+
+  async tune(frequencyHz: number, channelId?: string, raw = false) {
+    if (!raw && channelId && this.channels.has(channelId)) return this.channels.get(channelId)!;
+    const id = `${frequencyHz}-${raw ? "Raw" : "Unknown"}-1`;
+    const channel = engineChannelSchema.parse({ id, frequency_hz: frequencyHz, protocol: raw ? "Raw" : "Unknown", in_range: true });
+    this.channels.set(id, channel);
+    return channel;
   }
 
   async monitor(channelId: string | null) {

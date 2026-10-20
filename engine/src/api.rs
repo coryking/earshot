@@ -57,6 +57,7 @@ pub(crate) fn status_json(app: &App) -> Value {
             source["capabilities"] = json!({});
         }
         source["capabilities"]["fm_audio"] = json!(true);
+        source["capabilities"]["raw_fm_audio"] = json!(true);
         source["capabilities"]["per_client_listening"] = json!(true);
     }
     json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":json!(app.calibration.true_hz(e.source["input_center_hz"].as_f64().unwrap_or(0.))),"center_reading_hz":number(&e.source["input_center_hz"]),"rate_hz":number(&e.source["input_rate_hz"]),"bandwidth_hz":number(&e.source["input_bandwidth_hz"]),"generation":e.generation,"channels":e.channels.values().map(|c| with_user(c, &e.store.user)).collect::<Vec<_>>(),"received_seconds":position,"source_position_s":position,"decode_latency_s":latency,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":number(&e.source["queue_depth"]),"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"calibration_ppm":app.calibration.ppm,"labels_loaded":app.labels.len(),"voice":{"vocoder":app.voice.vocoder.name(),"post":post_json(&app.voice.post)},"listeners":e.listeners.len(),"persistence":{"enabled":e.store.persistent(),"write_errors":e.store.io_errors()},"link":e.link.to_json(now_s()),"receiver":receiver,"source":source})
@@ -120,7 +121,8 @@ async fn tune(State(app): State<App>, Json(request): Json<Value>) -> ApiResult {
     if !e.active {
         return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, "Receiver is disconnected or stopped"));
     }
-    let requested = request["channel_id"].as_str();
+    let raw = request["raw"].as_bool().unwrap_or(false);
+    let requested = if raw { None } else { request["channel_id"].as_str() };
     if requested.is_some_and(|id| !e.channels.contains_key(id)) {
         return Err(api_error(StatusCode::NOT_FOUND, "Channel is no longer in the catalog"));
     }
@@ -130,7 +132,7 @@ async fn tune(State(app): State<App>, Json(request): Json<Value>) -> ApiResult {
     e.host_targets.retain(|old| app.display_frequency(*old as f64).0 != display);
     e.host_targets.insert(reading);
     let stream = cfg["stream_id"].as_u64().unwrap() as u32;
-    let channel = crate::runtime::make_channel(&app, stream, reading as f64, "Unknown", 1);
+    let channel = crate::runtime::make_channel(&app, stream, reading as f64, if raw { "Raw" } else { "Unknown" }, 1);
     let id = channel["id"].as_str().unwrap().to_string();
     let entry = e.channels.entry(id.clone()).or_insert(channel);
     entry["stream_id"] = json!(stream);
@@ -1257,6 +1259,12 @@ mod fpga_tests {
         assert_eq!(channel["stream_id"], 509);
         assert_eq!(channel["logical_hz"], 454029223.);
         assert!(app.engine().host_targets.contains(&454029223));
+        let Json(raw) = tune(State(app.clone()), Json(json!({"frequency_hz":454018750,"raw":true}))).await.unwrap();
+        assert_eq!(raw["protocol"], "Raw");
+        assert_eq!(raw["id"], "454018750-Raw-1");
+        assert_ne!(raw["decoded"], true);
+        let _ = monitor(State(app.clone()), Json(Monitor { channel_id: raw["id"].as_str().map(str::to_string) })).await.unwrap();
+        assert_eq!(app.engine().selected.as_deref(), Some("454018750-Raw-1"));
         let error = tune(State(app.clone()), Json(json!({"frequency_hz":470000000}))).await.unwrap_err();
         assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
         app.engine().active = false;

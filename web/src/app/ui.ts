@@ -7,7 +7,6 @@ export type Sheet =
   | { type: "alerts" }
   | { type: "status" }
   | { type: "player" }
-  | { type: "unnamed"; frequencyHz: number }
   | { type: "shortcuts" }
   | null;
 

@@ -1,3 +1,4 @@
+import { RawCapture } from "./capture";
 import { engineChannelSchema } from "@/api/engine";
 import { toSources } from "@/domain/adapt";
 import workletUrl from "./pcm-worklet.ts?worker&url";
@@ -10,6 +11,8 @@ export type Phase = "idle" | "starting" | "waiting" | "playing" | "reconnecting"
 
 export interface PlayerState {
   kind: "idle" | "live" | "call";
+  raw: boolean;
+  captureSeconds: number;
   phase: Phase;
   sourceId: string | null;
   sourceName: string | null;
@@ -36,6 +39,8 @@ export interface PlayerState {
 
 const idle = {
   kind: "idle",
+  raw: false,
+  captureSeconds: 0,
   phase: "idle",
   sourceId: null,
   sourceName: null,
@@ -82,6 +87,7 @@ export class Player {
     background: null,
   });
   private backend: Backend;
+  private capture: RawCapture | null = null;
   private context: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
   private gain: GainNode | null = null;
@@ -249,23 +255,23 @@ export class Player {
   }
 
   /** Tune a frequency even before it has a catalog entry. Unlock audio in the tap handler. */
-  listenFrequency(frequencyHz: number) {
+  listenFrequency(frequencyHz: number, raw = true) {
     const source = toSources([engineChannelSchema.parse({ id: `tune-${frequencyHz}`,
       frequency_hz: frequencyHz, protocol: "Unknown", in_range: true })], null)[0];
     source.channelIds = [];
-    return this.listen(source);
+    return this.listen(source, { raw });
   }
 
   /** Selection is idempotent; Stop is an explicit action. */
-  async listen(source: Source, { toggle = false }: { toggle?: boolean } = {}) {
+  async listen(source: Source, { toggle = false, raw = source.mode === "unknown" || source.control || (!source.heardVoice && source.encryption !== "encrypted") }: { toggle?: boolean; raw?: boolean } = {}) {
     const current = this.state.get();
-    if (current.kind === "live" && current.sourceId === source.id) {
+    if (current.kind === "live" && current.sourceId === source.id && current.raw === raw) {
       if (current.phase === "starting" || current.phase === "reconnecting") return;
       if (current.phase === "taken") return this.reclaim();
       if (current.phase !== "error") return toggle ? this.stop() : undefined;
     }
     const canTune = !!this.backend.tune && source.frequencyHz !== null;
-    if (!source.listenable.ok && !(canTune && source.listenable.reason === "Out of range")) {
+    if (!source.listenable.ok && !(raw && canTune) && !(canTune && source.listenable.reason === "Out of range")) {
       if (current.kind !== "idle") await this.stop();
       this.patch({ ...idle, error: source.listenable.reason, sourceName: source.name,
         frequencyHz: source.frequencyHz, mode: source.mode, slot: source.slot, phase: "error" });
@@ -274,10 +280,11 @@ export class Player {
     const clearPrevious = current.kind === "live" && (this.ownsSelection || this.selectionPending);
     if (current.kind !== "idle") this.teardown();
     const intent = ++this.intent;
-    let channelId = source.channelIds[0] ?? null;
+    let channelId = raw ? null : source.channelIds[0] ?? null;
+    this.capture = raw && source.frequencyHz !== null ? new RawCapture(source.frequencyHz) : null;
     this.lastSource = source;
     const unlocked = this.unlock();
-    this.patch({ ...idle, kind: "live", phase: "starting", sourceId: source.id, sourceName: source.name, frequencyHz: source.frequencyHz, mode: source.mode, slot: source.slot, channelId });
+    this.patch({ ...idle, kind: "live", raw, phase: "starting", sourceId: source.id, sourceName: source.name, frequencyHz: source.frequencyHz, mode: source.mode, slot: source.slot, channelId });
     this.updateSession(source.name, "Live");
     try {
       await unlocked;
@@ -294,7 +301,7 @@ export class Player {
       const run = this.monitorChain.catch(() => {}).then(async () => {
         if (intent !== this.intent) return;
         if (canTune) {
-          const tuned = await this.backend.tune!(source.frequencyHz!, channelId ?? undefined);
+          const tuned = await this.backend.tune!(source.frequencyHz!, channelId ?? undefined, raw);
           channelId = tuned.id;
         }
         if (intent !== this.intent) return;
@@ -387,6 +394,10 @@ export class Player {
           this.flush();
           this.decoderGeneration = descriptor.generation;
         }
+        if (s.raw && descriptor.raw === true && descriptor.rate_hz === 48000) {
+          this.capture?.push(descriptor, pcm);
+          this.patch({ captureSeconds: this.capture?.seconds ?? 0 });
+        }
         const data = new Float32Array(pcm.length);
         for (let i = 0; i < pcm.length; i++) data[i] = pcm[i] / 32768;
         this.node?.port.postMessage({ type: "pcm", data, rate: descriptor.rate_hz }, [data.buffer]);
@@ -401,11 +412,12 @@ export class Player {
         this.onHeartbeat(selected);
       },
       onGap: () => {
-        if (token === this.connectionToken) this.flush();
+        if (token === this.connectionToken) { this.flush(); this.capture?.gap("socket gap"); }
       },
       onClose: () => {
         if (token !== this.connectionToken) return;
         this.connection = null;
+        this.capture?.gap("socket closed");
         this.scheduleReconnect();
       },
     });
@@ -470,7 +482,7 @@ export class Player {
     this.ownsSelection = false;
     this.selectionPending = false;
     this.teardown();
-    this.patch({ ...idle });
+    this.patch({ ...idle, captureSeconds: this.capture?.seconds ?? 0 });
     this.updateSession(null, "");
     this.liveElement?.pause();
     if (clear) {
@@ -480,6 +492,21 @@ export class Player {
         /* nothing to undo */
       }
     }
+  }
+
+  listenRaw() {
+    const hz = this.state.get().frequencyHz;
+    if (hz !== null) return this.listenFrequency(hz, true);
+  }
+
+  saveCapture() {
+    if (!this.capture?.seconds) return;
+    const url = URL.createObjectURL(new Blob([this.capture.wav()], { type: "audio/wav" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `audio_${this.capture.frequencyHz}Hz_raw-fm_${this.capture.startedAt.replace(/[:.]/g, "-")}.wav`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   // ---------------------------------------------------------------- recorded calls

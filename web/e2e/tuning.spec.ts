@@ -17,9 +17,24 @@ test("desktop waterfall previews a nearby channel and Shift bypasses snapping", 
   await expect(selection).toContainText("452.6855 MHz");
   const selectedRect = (await waterfall.boundingBox())!;
   await waterfall.click({ position: { x, y: selectedRect.height * 0.5 }, modifiers: ["Shift"] });
-  const sheet = page.getByRole("dialog");
-  await expect(sheet).toContainText("Tune signal");
-  const entered = await sheet.getByRole("textbox", { name: "Frequency (MHz)" }).inputValue();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  const entered = await selection.getByRole("textbox", { name: "Frequency (MHz)" }).inputValue();
   // Browser pointer coordinates are rounded to fractional CSS pixels.
   expect(Number(entered)).toBeCloseTo(452.6955, 3);
+});
+
+test("desktop unnamed signals tune inline and retain a raw capture after stopping", async ({ page, isMobile }) => {
+  test.skip(isMobile, "the portrait strip is not interactive");
+  await page.goto("/?demo");
+  const waterfall = page.locator('[data-waterfall="full"]');
+  await expect(waterfall).toHaveAttribute("aria-label", /451\.2 to 457\.2/);
+  await waterfall.click({ position: { x: 35, y: 160 } });
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  const selection = page.getByRole("region", { name: "Live tuning" });
+  await expect(selection).toContainText("Raw FM · unsquelched");
+  const entered = Number(await selection.getByRole("textbox", { name: "Frequency (MHz)" }).inputValue()) * 1e6;
+  expect(Math.round(entered) % 6250).toBe(0);
+  await expect(selection.getByRole("button", { name: "Save raw WAV" })).toBeEnabled();
+  await selection.getByRole("button", { name: "Stop audio" }).click();
+  await expect(selection.getByRole("button", { name: "Save raw WAV" })).toBeEnabled();
 });

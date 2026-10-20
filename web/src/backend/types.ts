@@ -36,7 +36,7 @@ export interface Backend {
   /** Select what the engine plays on /api/listen. null clears the selection. */
   monitor(channelId: string | null): Promise<void>;
   /** Operator: add a true-frequency target inside an advertised receiver slice. */
-  tune?(frequencyHz: number, channelId?: string): Promise<EngineChannel>;
+  tune?(frequencyHz: number, channelId?: string, raw?: boolean): Promise<EngineChannel>;
   listen(handlers: ListenHandlers): Connection;
   /** Operator: stop the receiver (not just the listener). */
   stopReceiver(): Promise<string>;

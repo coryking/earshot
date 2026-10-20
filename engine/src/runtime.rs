@@ -503,7 +503,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                     || frame.rate != rate
                     || frame.flags & (DISCONTINUITY | OVERFLOW | START) != 0
                     || expected_sample.is_some_and(|v| v != first_sample));
-            if gap || decoders.is_empty() {
+            if gap || dsps.is_empty() {
                 decoders = modes
                     .iter()
                     .filter_map(|&p| Decoder::with_options(p, &decoder_options).ok().map(|d| (p, d)))
@@ -518,7 +518,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                 // share the 12.5 kHz filter or its 6.25 kHz neighbors leak in.
                 gate = AnalogGate::default();
                 dsps.clear();
-                for &protocol in &modes {
+                for &protocol in modes.iter().chain(std::iter::once(&"Raw")) {
                     let spec = spec_for(protocol);
                     if !dsps.iter().any(|(s, _)| *s == spec) {
                         dsps.push((
@@ -547,11 +547,15 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
 
             expected_sample = Some(first_sample + payload.len() as u64 / 4);
             let iq = iq_from_payload(payload);
+            let raw_targets: Vec<String> = {
+                let e = app.engine();
+                wanted_ids(&e).into_iter().filter(|id| e.channels.get(id).is_some_and(|c|
+                    c["protocol"] == "Raw" && c["logical_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
+                )).collect()
+            };
             let mut outputs: Vec<(ChannelSpec, Vec<i16>)> = Vec::new();
             for (spec, dsp) in &mut dsps {
-                if decoders.iter().any(|(p, _)| spec_for(p) == *spec) {
-                    outputs.push((*spec, dsp.push(&iq)));
-                }
+                outputs.push((*spec, dsp.push(&iq)));
             }
             let produced = outputs.first().map_or(0, |(_, pcm)| pcm.len());
             if frame.flags & PREROLL != 0 {
@@ -559,6 +563,35 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                 saw_preroll = true;
             } else {
                 live_samples += produced as u64;
+            }
+            // Explicit raw listening bypasses RF, voice and protocol gates. Preserve the
+            // 48 kHz discriminator before de-emphasis, speech filtering or resampling.
+            // Pre-roll remains excluded, just as on the decoded path.
+            if !raw_targets.is_empty() && frame.flags & PREROLL == 0
+                && (!saw_preroll || live_samples >= 17280)
+                && let Some((_, pcm)) = outputs.iter().find(|(s, _)| *s == ChannelSpec::CHANNEL_12_5)
+            {
+                let mut e = app.engine();
+                if e.active && frame.generation == e.generation && e.worker_epochs.get(&logical) == Some(&epoch) {
+                    let bytes: Vec<u8> = pcm.iter().flat_map(|v| v.to_le_bytes()).collect();
+                    for id in raw_targets {
+                        // A selection may have changed while the DSP ran.
+                        if !wanted_ids(&e).contains(&id) { continue; }
+                        e.audio_sequence += 1;
+                        let sequence = e.audio_sequence;
+                        let ingress = work.received.elapsed().as_secs_f64() * 1000.;
+                        if e.selected.as_deref() == Some(&id) {
+                            e.listener = json!({"status":"listening","state":"listening","channel_id":id,
+                                "voice_active":false,"generation":e.decoder_generation,"source_generation":e.generation,
+                                "sequence":sequence,"audio_chunks":sequence,"last_audio_at":now(),"ingress_age_ms":ingress});
+                        }
+                        let _ = app.audio.send(Audio { meta: json!({"type":"audio","encoding":"s16le","channels":1,
+                            "rate_hz":48000,"samples":pcm.len(),"channel_id":id,"generation":e.decoder_generation,
+                            "source_generation":e.generation,"sequence":sequence,"raw":true,
+                            "first_sample":first_sample,"input_rate_hz":frame.rate,"ingress_age_ms":ingress}),
+                            pcm:bytes.clone(), created:Instant::now() });
+                    }
+                }
             }
             let mut protocol_evidence = None;
             // Everything heard in this block: (protocol, slot, 8 kHz audio, confirmed voice).
@@ -1787,6 +1820,9 @@ mod tests {
         fm_session_with_activity(app, voice, pin_unknown, rf_active, false)
     }
     fn fm_session_with_activity(app: App, voice: bool, pin_unknown: bool, rf_active: bool, uncalibrated: bool) -> (Option<Value>, Vec<String>, bool, Vec<Value>) {
+        fm_session_mode(app, voice, pin_unknown, rf_active, uncalibrated, false)
+    }
+    fn fm_session_mode(app: App, voice: bool, pin_unknown: bool, rf_active: bool, uncalibrated: bool, raw: bool) -> (Option<Value>, Vec<String>, bool, Vec<Value>) {
         let config = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,
             "activity_calibrated":!uncalibrated,
             "streams":[{"stream_id":1,"center_hz":454000000u64,"target_hz":454000000u64,"rate_hz":25000,"protocol":"Unknown","iq_forwarded":true}],"psd":{"unit":"dBFS"}});
@@ -1829,7 +1865,14 @@ mod tests {
             loop {
                 let mut e = app.engine();
                 if e.channels.contains_key("454000000-Unknown-1") {
-                    e.selected = Some("454000000-Unknown-1".into());
+                    let id = if raw { "454000000-Raw-1" } else { "454000000-Unknown-1" };
+                    if raw {
+                        let mut c = e.channels["454000000-Unknown-1"].clone();
+                        c["id"] = json!(id);
+                        c["protocol"] = json!("Raw");
+                        e.channels.insert(id.into(), c);
+                    }
+                    e.selected = Some(id.into());
                     e.selected_at = Instant::now() - Duration::from_secs(1);
                     e.decoder_generation += 1;
                     break;
@@ -1843,7 +1886,14 @@ mod tests {
         let mut audio_ids = vec![];
         loop {
             match audio_rx.try_recv() {
-                Ok(a) => audio_ids.push(a.meta["channel_id"].as_str().unwrap_or("").to_string()),
+                Ok(a) => {
+                    if raw {
+                        assert_eq!(a.meta["rate_hz"], 48000);
+                        assert_eq!(a.meta["raw"], true);
+                        assert!(!a.pcm.is_empty());
+                    }
+                    audio_ids.push(a.meta["channel_id"].as_str().unwrap_or("").to_string());
+                },
                 Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
                 Err(_) => break,
             }
@@ -1905,6 +1955,16 @@ mod tests {
         let (fm, _, _, calls) = fm_session(false, false);
         assert!(fm.is_none() && calls.is_empty(), "squelch opened on receiver noise");
     }
+    #[test]
+    fn raw_listening_emits_48k_discriminator_without_voice_or_rf_confirmation() {
+        let (fm, ids, digital, calls) = fm_session_mode(App::new(8), false, true, false, false, true);
+        assert!(!ids.is_empty(), "unsquelched raw audio must reach the listener");
+        assert!(ids.iter().all(|id| id == "454000000-Raw-1"), "{ids:?}");
+        assert!(fm.is_none(), "raw audio is not analog voice");
+        assert!(!digital, "raw audio is not digital voice");
+        assert!(calls.is_empty(), "raw listening must not manufacture voice calls");
+    }
+
     #[test]
     fn pinning_an_unconfirmed_channel_streams_analog_audio_under_the_pinned_id() {
         let (_, audio_ids, _, _) = fm_session(true, true);
