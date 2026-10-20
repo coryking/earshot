@@ -241,13 +241,13 @@ export class Player {
     return run;
   }
 
-  /** Listen live to a source. Tapping the playing source again stops it. */
-  async listen(source: Source) {
+  /** Rows toggle playback; explicit Listen controls can request an idempotent start. */
+  async listen(source: Source, { toggle = true }: { toggle?: boolean } = {}) {
     const current = this.state.get();
     if (current.kind === "live" && current.sourceId === source.id) {
       if (current.phase === "starting" || current.phase === "reconnecting") return;
       if (current.phase === "taken") return this.reclaim();
-      if (current.phase !== "error") return this.stop();
+      if (current.phase !== "error") return toggle ? this.stop() : undefined;
     }
     if (!source.listenable.ok) {
       if (current.kind !== "idle") await this.stop();

@@ -179,7 +179,7 @@ export class HttpBackend implements Backend {
     const response = await request("/api/stop", { method: "POST", body: "{}" });
     const body = stopSchema.safeParse(await response.json().catch(() => ({})));
     const data = body.success ? body.data : { device_control: null, status: null };
-    return data.device_control ?? `Receiver ${data.status ?? "stopped"}.`;
+    return data.device_control ?? `Receive session ${data.status ?? "stopped"}. A supervisor may start receiving again.`;
   }
 
   async configureSource(config: { centerHz: number; rateHz: number; bandwidthHz: number }) {

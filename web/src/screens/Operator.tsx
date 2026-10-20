@@ -83,7 +83,7 @@ export function OperatorScreen() {
       if (!backend.tune || tuneHz === null) throw new Error("Frequency tuning unavailable");
       const channel = await backend.tune(tuneHz);
       const source = toSources([channel], null, { fmAudio: true })[0];
-      await player.listen(source);
+      await player.listen(source, { toggle: false });
     },
     onSuccess: () => { void client.invalidateQueries({ queryKey: keys.status }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : "Tuning failed"),
@@ -97,8 +97,14 @@ export function OperatorScreen() {
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : "Configure failed"),
   });
+  const capabilities = s?.source?.capabilities;
+  const canConfigure = !(capabilities && typeof capabilities === "object"
+    && "configure_supported" in capabilities && capabilities.configure_supported === false);
   const stop = useMutation({
-    mutationFn: () => backend.stopReceiver(),
+    mutationFn: async () => {
+      await player.stop();
+      return backend.stopReceiver();
+    },
     onSuccess: (message) => {
       toast.success(message);
       void client.invalidateQueries({ queryKey: keys.status });
@@ -143,6 +149,7 @@ export function OperatorScreen() {
             </label>
             <Button type="submit" disabled={!backend.tune || tuneHz === null || tune.isPending}>Listen</Button>
           </form>
+          {!canConfigure && <p className="mb-3 text-sm text-muted-foreground">This producer cannot change the receive window from the browser. Change the receiver's startup settings; frequency selection above works inside the current window.</p>}
           <form
             className="grid grid-cols-3 gap-2"
             onSubmit={(e) => {
@@ -152,17 +159,17 @@ export function OperatorScreen() {
           >
             <label className="text-sm text-muted-foreground">
               Center MHz
-              <Input value={center} onChange={(e) => setCenter(e.target.value)} inputMode="decimal" placeholder="454.217" />
+              <Input disabled={!canConfigure} value={center} onChange={(e) => setCenter(e.target.value)} inputMode="decimal" placeholder="454.217" />
             </label>
             <label className="text-sm text-muted-foreground">
               Rate Msps
-              <Input value={rate} onChange={(e) => setRate(e.target.value)} inputMode="decimal" placeholder="6" />
+              <Input disabled={!canConfigure} value={rate} onChange={(e) => setRate(e.target.value)} inputMode="decimal" placeholder="6" />
             </label>
             <label className="text-sm text-muted-foreground">
               Width MHz
-              <Input value={width} onChange={(e) => setWidth(e.target.value)} inputMode="decimal" placeholder="6" />
+              <Input disabled={!canConfigure} value={width} onChange={(e) => setWidth(e.target.value)} inputMode="decimal" placeholder="6" />
             </label>
-            <Button type="submit" variant="secondary" className="col-span-3 h-10" disabled={!valid || configure.isPending}>
+            <Button type="submit" variant="secondary" className="col-span-3 h-10" disabled={!canConfigure || !valid || configure.isPending}>
               Apply (waits for the producer's acknowledgement)
             </Button>
           </form>
@@ -174,10 +181,11 @@ export function OperatorScreen() {
             </DialogTrigger>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>Stop the receiver?</DialogTitle>
+                <DialogTitle>Stop this receive session?</DialogTitle>
                 <DialogDescription>
-                  Stops host audio for everyone and asks the producer to stop RX and restore its settings. Nothing is
-                  heard until it's started again.
+                  Stops your listening and asks the producer to stop RX and restore its settings.
+                  A supervisor may start receiving again automatically. Your player stays stopped;
+                  use the player's Stop button when you only want to stop listening.
                 </DialogDescription>
               </DialogHeader>
               <DialogFooter>

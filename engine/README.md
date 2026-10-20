@@ -346,11 +346,19 @@ back into the producer's reading frame, picks the nearest advertised slice that
 contains the whole channel, and uses the existing fine mixer and listener pins.
 Select the returned id with `/api/monitor` (the browser's **Operator tools → Listen
 at MHz** does both). Stop listening with the player stop button; **Stop receiver**
-also asks the producer to stop RX. Up to 64 operator frequencies are retained for
-the engine session; catalog entries and operator edits retain their existing
-persistence behavior. A source generation change remaps these targets to its new
+also asks the producer to stop RX. Fine targets are retained for active listeners
+and the latest pending tune, then released on stop or replacement. Catalog entries
+and operator edits retain their existing persistence behavior; selecting a prior
+catalog entry restores its fine tuning. A source generation change remaps active targets to its new
 slices. Targets outside the RF filter bandwidth are refused even when the PSD
 covers a wider span.
+
+The Operator Listen form starts or keeps listening at the requested frequency;
+channel rows retain their tap-again-to-stop behavior. A producer that advertises
+`configure_supported: false` disables the browser's receive-window form; change
+its startup settings instead. Operator receiver stop ends the current receive
+session and stops this browser's player. A supervisor may start RX again, so this
+is not a persistent service stop.
 
 Both spectrum endpoints use the producer's `psd.center_hz` and `psd.span_hz`, with
 legacy input-center/bandwidth fallback. Center and span share the channel-marker
