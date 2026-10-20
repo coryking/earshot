@@ -127,3 +127,23 @@ are accumulated across calls (the ARM gate emits at most 256), and the partial w
 dropped on START, discontinuity or overflow. The 8/5 dB thresholds are choices, not
 standard values. Only 12.5 and 6.25 kHz raster channels are specified; an emitter between
 rasters (for example 6.2 kHz off a 12.5 kHz channel center) falls in the transition band.
+
+## Analog FM audio and noise squelch (`src/fm.rs`)
+
+The 12.5 kHz channel filter's discriminator output (48 kHz) feeds a one-pole 300 Hz
+de-emphasis (6 dB/octave, 0 dB at 1 kHz), a 4th-order Butterworth 300 Hz highpass (rejects
+CTCSS/DCS, 67 to 254 Hz, and DC) and a Kaiser decimator to 8 kHz (3.0 kHz pass, 4.0 kHz stop,
+50 dB). The 6 dB/octave convention follows land-mobile NBFM practice (TIA/EIA-603 audio
+response; that document was not available to read, so the shape is verified by tests, not
+by a cited figure): 2 kHz is within -7.5 to -4.5 dB of 1 kHz, 100 Hz is at least 18 dB down,
+5.5 kHz content is at least 40 dB down.
+
+Noise squelch is the standard FM receiver method: the RMS of the discriminator in a band
+above the voice passband (about 5.4 kHz, Q 1.8) is large with no carrier and small once a
+carrier quiets the limiter. Calibrated on `recordings/` (6 Msps at 454.217 MHz, 100 ksps
+slice, 100 ms blocks): empty channels 2.0 to 2.1 kHz of deviation in that band, a strong DMR
+carrier 270 Hz, a narrow carrier 110 Hz. Open below 700 Hz, close above 1100 Hz, with the
+voice band above 120 Hz and a 3-block hang. The channel is only called analog voice after
+three consecutive open blocks, and stays muted for 3 s after any DMR/NXDN sync so data
+bursts never play as buzz. `fm_noise_squelch_on_real_channels` (ignored, needs the
+recording) reproduces the numbers.

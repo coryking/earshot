@@ -1,6 +1,7 @@
 use crate::{
     codec::Decoder,
     dsp::{ChannelDsp, ChannelSpec, SliceMeter, TargetBand},
+    fm::{FmAudio, Squelch},
     wire::{DISCONTINUITY, Frame, OVERFLOW, PREROLL, START},
 };
 use anyhow::{Context, Result};
@@ -207,6 +208,11 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
     thread::spawn(move || {
         let mut decoders = Vec::new();
         let mut dsps: Vec<(ChannelSpec, ChannelDsp)> = Vec::new();
+        let analog_capable = modes.iter().any(|&p| p != "NXDN48");
+        let mut fm = FmAudio::new();
+        let mut squelch = Squelch::default();
+        let mut fm_run = 0u32;
+        let mut digital_hold = 0f32;
         let mut generation = None;
 
         let mut expected_sample = None;
@@ -247,6 +253,10 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                     .unwrap_or(frame.rate as f64);
                 // One channel filter per channel class: NXDN48 (6.25 kHz) must not
                 // share the 12.5 kHz filter or its 6.25 kHz neighbors leak in.
+                fm = FmAudio::new();
+                squelch = Squelch::default();
+                fm_run = 0;
+                digital_hold = 0.;
                 dsps.clear();
                 for &protocol in &modes {
                     let spec = spec_for(protocol);
@@ -291,19 +301,39 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                 live_samples += produced as u64;
             }
             let mut protocol_evidence = None;
+            // Everything heard in this block: (protocol, slot, 8 kHz audio, confirmed voice).
+            let mut heard: Vec<(&'static str, u8, Vec<i16>, bool)> = Vec::new();
+            let mut digital_sync = false;
             for (protocol, decoder) in &mut decoders {
                 let spec = spec_for(protocol);
                 let Some((_, pcm)) = outputs.iter().find(|(s, _)| *s == spec) else {
                     continue;
                 };
                 let decoded = decoder.push(pcm);
+                digital_sync |= decoded.sync;
                 let confirmed = decoded.confirmed;
-                let slots: Vec<(u8, Vec<i16>)> = if *protocol == "DMR" {
-                    vec![(1, decoded.slot1), (2, decoded.slot2)]
+                if *protocol == "DMR" {
+                    heard.push(("DMR", 1, decoded.slot1, confirmed));
+                    heard.push(("DMR", 2, decoded.slot2, confirmed));
                 } else {
-                    vec![(1, decoded.slot1)]
-                };
-                for (slot, audio) in slots {
+                    heard.push((protocol, 1, decoded.slot1, confirmed));
+                }
+            }
+            // Analog FM shares the 12.5 kHz channel filter's discriminator. It is muted while
+            // DMR/NXDN signalling is present (3 s hold) and needs a quieted carrier with voice
+            // energy for three consecutive blocks before the channel is called analog voice.
+            if analog_capable
+                && let Some((_, pcm)) = outputs.iter().find(|(s, _)| *s == ChannelSpec::CHANNEL_12_5)
+            {
+                let seconds = pcm.len() as f32 / 48000.;
+                digital_hold = if digital_sync { 3. } else { (digital_hold - seconds).max(0.) };
+                let block = fm.push(pcm);
+                let open = squelch.update(&block) && digital_hold <= 0.;
+                fm_run = if open { fm_run + 1 } else { 0 };
+                let audio = if open { block.audio } else { Vec::new() };
+                heard.push(("FM", 1, audio, fm_run >= 3));
+            }
+            for (protocol, slot, audio, confirmed) in heard {
                 let speech = confirmed && !audio.is_empty() && frame.flags & PREROLL == 0;
                 let id = channel_id(frequency, protocol, slot);
                 let mut e = app.inner.lock().unwrap();
@@ -329,7 +359,9 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                     .cloned();
                 let speech = speech && physical.is_some();
                 if confirmed && !audio.is_empty() && physical.is_some() {
-                    protocol_evidence = Some(*protocol);
+                    if protocol != "FM" {
+                        protocol_evidence = Some(protocol);
+                    }
                     let entry = e
                         .channels
                         .entry(id.clone())
@@ -367,7 +399,20 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                     entry["speech_active"] = json!(false);
                     entry["available"] = json!(true);
                 }
-                let selected = e.selected.as_deref() == Some(&id);
+                // A pin on an unconfirmed ("Unknown") channel follows whatever is heard at that
+                // frequency; audio is then labeled with the pinned id so the listener matches.
+                let pinned_unknown = e.selected.as_deref().is_some_and(|s| {
+                    e.channels.get(s).is_some_and(|c| {
+                        c["protocol"] == "Unknown"
+                            && c["frequency_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
+                    })
+                });
+                let selected = e.selected.as_deref() == Some(&id) || pinned_unknown;
+                let out_id = if pinned_unknown {
+                    e.selected.clone().unwrap_or_else(|| id.clone())
+                } else {
+                    id.clone()
+                };
                 let source_generation = e.generation;
                 let decoder_generation = e.decoder_generation;
                 if selected {
@@ -381,9 +426,8 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                     let sequence = e.listener["sequence"].as_u64().unwrap_or(0) + 1;
                     let ingress = work.received.elapsed().as_secs_f64() * 1000.;
                     let bytes: Vec<u8> = audio.iter().flat_map(|v| v.to_le_bytes()).collect();
-                    e.listener = json!({"status":"listening","state":"listening","channel_id":id,"voice_active":true,"generation":decoder_generation,"source_generation":source_generation,"sequence":sequence,"audio_chunks":sequence,"last_audio_at":now(),"ingress_age_ms":ingress,"ingress_age_basis":"host ingress receipt; device speech alignment unknown","dropped_blocks":e.drops,"input_dropped":e.drops,"queue_blocks":0,"error":null});
-                    let _=app.audio.send(Audio{meta:json!({"type":"audio","encoding":"s16le","channels":1,"rate_hz":8000,"samples":audio.len(),"channel_id":id,"generation":decoder_generation,"source_generation":source_generation,"sequence":sequence,"ingress_age_ms":ingress,"ingress_age_basis":"host ingress receipt; device speech alignment unknown"}),pcm:bytes,created:Instant::now()});
-                }
+                    e.listener = json!({"status":"listening","state":"listening","channel_id":out_id,"voice_active":true,"generation":decoder_generation,"source_generation":source_generation,"sequence":sequence,"audio_chunks":sequence,"last_audio_at":now(),"ingress_age_ms":ingress,"ingress_age_basis":"host ingress receipt; device speech alignment unknown","dropped_blocks":e.drops,"input_dropped":e.drops,"queue_blocks":0,"error":null});
+                    let _=app.audio.send(Audio{meta:json!({"type":"audio","encoding":"s16le","channels":1,"rate_hz":8000,"samples":audio.len(),"channel_id":out_id,"generation":decoder_generation,"source_generation":source_generation,"sequence":sequence,"ingress_age_ms":ingress,"ingress_age_basis":"host ingress receipt; device speech alignment unknown"}),pcm:bytes,created:Instant::now()});
                 }
             }
             if let Some(protocol) = protocol_evidence {
@@ -1181,6 +1225,115 @@ mod tests {
         runner.join().unwrap().unwrap();
         assert_eq!(admitted, 3);
     }
+    /// 25 ksps IQ of a quiet narrowband-FM carrier (1 kHz tone, 1.5 kHz deviation) or, with
+    /// `voice` false, receiver noise only.
+    fn fm_stream_payload(voice: bool, first: u64) -> Vec<u8> {
+        let mut state = 0xC0FF_EE11u32 ^ first as u32;
+        let mut noise = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state >> 8) as f64 / 16_777_216. - 0.5
+        };
+        let mut out = Vec::new();
+        for i in 0..2500u64 {
+            let t = (first + i) as f64 / 25000.;
+            let (re, im) = if voice {
+                let phase = 2. * std::f64::consts::PI * 1000. * t;
+                let carrier = 1.5 / 1.0 * phase.sin() * 1.0; // modulation index 1.5 (1.5 kHz dev / 1 kHz tone)
+                (3000. * carrier.cos() + 30. * noise(), 3000. * carrier.sin() + 30. * noise())
+            } else {
+                (4000. * noise(), 4000. * noise())
+            };
+            out.extend_from_slice(&(re as i16).to_le_bytes());
+            out.extend_from_slice(&(im as i16).to_le_bytes());
+        }
+        out
+    }
+    fn fm_session(voice: bool, pin_unknown: bool) -> (Option<Value>, Vec<String>, bool) {
+        let config = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,
+            "streams":[{"stream_id":1,"center_hz":454000000u64,"target_hz":454000000u64,"rate_hz":25000,"protocol":"Unknown","iq_forwarded":true}],"psd":{"unit":"dBFS"}});
+        let mut bytes = Vec::new();
+        let mut cfg = frame(4, 1, 0, 0, 0, config.to_string().into_bytes());
+        cfg.center_hz = 454_000_000;
+        cfg.write(&mut bytes).unwrap();
+        let mut frames = vec![(0., bytes)];
+        let (mut sequence, mut sample) = (1u64, 0u64);
+        for _ in 0..30 {
+            let at = sample as f64 / 25000.;
+            let mut bytes = Vec::new();
+            let mut act = frame(3, 1, 1, sequence, sample, br#"{"rf_active":true,"level_db":-20.0}"#.to_vec());
+            act.center_hz = 454_000_000;
+            act.write(&mut bytes).unwrap();
+            let mut iq = frame(1, 1, 1, sequence + 1, sample, fm_stream_payload(voice, sample));
+            iq.center_hz = 454_000_000;
+            iq.write(&mut bytes).unwrap();
+            frames.push((at, bytes));
+            sequence += 2;
+            sample += 2500;
+        }
+        let (release, rx) = mpsc::channel();
+        let app = App::new(8);
+        let mut audio_rx = app.audio.subscribe();
+        let runner = {
+            let app = app.clone();
+            let input = PacedFrames {
+                frames: frames.into_iter(),
+                current: std::io::Cursor::new(vec![]),
+                started: Instant::now(),
+                speed: 5.,
+                hold: Some(rx),
+            };
+            thread::spawn(move || ingest(input, app))
+        };
+        if pin_unknown {
+            // Pin the unconfirmed bin entry (no 422): audio must follow it.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let mut e = app.inner.lock().unwrap();
+                if e.channels.contains_key("454000000-Unknown-1") {
+                    e.selected = Some("454000000-Unknown-1".into());
+                    e.selected_at = Instant::now() - Duration::from_secs(1);
+                    e.decoder_generation += 1;
+                    break;
+                }
+                drop(e);
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+        thread::sleep(Duration::from_millis(1200));
+        let mut audio_ids = vec![];
+        loop {
+            match audio_rx.try_recv() {
+                Ok(a) => audio_ids.push(a.meta["channel_id"].as_str().unwrap_or("").to_string()),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+        let fm = app.inner.lock().unwrap().channels.get("454000000-FM-1").cloned();
+        let digital = app.inner.lock().unwrap().channels.values().any(|c| c["protocol"] != "Unknown" && c["protocol"] != "FM" && c["decoded"] == true);
+        release.send(()).unwrap();
+        runner.join().unwrap().unwrap();
+        (fm, audio_ids, digital)
+    }
+    #[test]
+    fn quiet_narrowband_fm_becomes_an_analog_voice_channel_and_noise_does_not() {
+        let (fm, _, digital) = fm_session(true, false);
+        let fm = fm.expect("analog voice entry");
+        assert_eq!(fm["protocol"], "FM");
+        assert_eq!(fm["kind"], "voice");
+        assert!(fm["audio_seconds"].as_f64().unwrap() > 0.5, "{fm}");
+        assert!(!digital, "analog voice must not be called digital");
+        let (fm, _, _) = fm_session(false, false);
+        assert!(fm.is_none(), "squelch opened on receiver noise");
+    }
+    #[test]
+    fn pinning_an_unconfirmed_channel_streams_analog_audio_under_the_pinned_id() {
+        let (_, audio_ids, _) = fm_session(true, true);
+        assert!(!audio_ids.is_empty(), "no audio reached the listener");
+        assert!(audio_ids.iter().all(|id| id == "454000000-Unknown-1"), "{audio_ids:?}");
+    }
     #[test]
     fn rf_active_metadata_only_streams_do_not_starve_forwarded_stream() {
         let candidates = vec![
@@ -1212,6 +1365,8 @@ mod tests {
         current: std::io::Cursor<Vec<u8>>,
         started: Instant,
         speed: f64,
+        /// When set, hold the stream open after the last frame until released.
+        hold: Option<mpsc::Receiver<()>>,
     }
     impl Read for PacedFrames {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -1221,6 +1376,9 @@ mod tests {
                     return Ok(n);
                 }
                 let Some((at, bytes)) = self.frames.next() else {
+                    if let Some(hold) = &self.hold {
+                        let _ = hold.recv();
+                    }
                     return Ok(0);
                 };
                 let due = Duration::from_secs_f64(at / self.speed);
@@ -1263,22 +1421,27 @@ mod tests {
             current: std::io::Cursor::new(vec![]),
             started: Instant::now(),
             speed: 8.,
+            hold: None,
         };
         // Observe the catalog while the source is still connected.
         let observer = {
             let app = app.clone();
             thread::spawn(move || {
                 let mut best = (0., String::new());
+                let mut analog = 0f64;
                 for _ in 0..400 {
                     thread::sleep(Duration::from_millis(25));
                     let e = app.inner.lock().unwrap();
                     for c in e.channels.values() {
                         let seconds = c["audio_seconds"].as_f64().unwrap_or(0.);
-                        if seconds > best.0 {
+                        if c["protocol"] == "FM" {
+                            analog = analog.max(seconds);
+                        } else if seconds > best.0 {
                             best = (seconds, c["id"].as_str().unwrap_or("").to_string());
                         }
                     }
                 }
+                assert!(analog < 0.5, "digital DMR audio leaked into the analog FM path: {analog} s");
                 best
             })
         };

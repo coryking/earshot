@@ -9,6 +9,7 @@
 //! with the production channel filter and compared with the slice's spectrum.
 use num_complex::Complex32;
 use radio_engine::dsp::{ChannelDsp, ChannelSpec, Resampler, SliceMeter, TargetBand};
+use radio_engine::fm::{FmAudio, Squelch};
 use std::{fs::File, io::{Read, Seek, SeekFrom}};
 
 const LO: f64 = 454_216_998.;
@@ -113,4 +114,60 @@ fn real_adjacent_channels_are_not_polluted_by_strong_neighbors() {
     // In-channel power of the strongest channel must agree with the spectrum.
     let k = fft_db.iter().position(|&v| v == strongest).unwrap();
     assert!((filtered_db[k] - fft_db[k]).abs() < 1.5, "strong channel mismatch");
+}
+
+/// The noise squelch against real channels: empty channels stay shut, strong carriers open
+/// their quieting measurement. Thresholds are calibrated on this recording (see fm.rs).
+#[test]
+#[ignore = "needs RADIO_WIDEBAND_WAV (private recording)"]
+fn fm_noise_squelch_on_real_channels() {
+    let path = std::env::var("RADIO_WIDEBAND_WAV").expect("RADIO_WIDEBAND_WAV");
+    let samples = read_iq(&path, 2., 4.);
+    let pct = |v: &mut Vec<f32>, q: f64| {
+        v.sort_by(f32::total_cmp);
+        v[((v.len() - 1) as f64 * q) as usize]
+    };
+    let mut report = vec![];
+    for (name, f) in [
+        ("empty 454.1795", 454_179_500.),
+        ("empty 454.2295", 454_229_500.),
+        ("DMR control 454.217", 454_217_000.),
+        ("narrow carrier 454.2605", 454_260_500.),
+    ] {
+        // A 100 ksps slice 20 kHz below the channel, as the slicer would deliver it.
+        let center = f - 20_000.;
+        let iq = slice(&samples, center);
+        let mut dsp = ChannelDsp::new(100_000., f - center, ChannelSpec::CHANNEL_12_5);
+        let pcm = dsp.push(&iq[2000..]);
+        let mut fm = FmAudio::new();
+        let mut squelch = Squelch::default();
+        let (mut noise, mut voice, mut open) = (vec![], vec![], 0);
+        let blocks: Vec<_> = pcm.chunks_exact(4800).skip(1).collect();
+        for block in &blocks {
+            let b = fm.push(block);
+            noise.push(b.noise_hz);
+            voice.push(b.voice_hz);
+            if squelch.update(&b) {
+                open += 1;
+            }
+        }
+        let line = format!(
+            "{name}: noise_hz p10/50/90 {:.0}/{:.0}/{:.0}, voice_hz median {:.0}, squelch open {}/{}",
+            pct(&mut noise.clone(), 0.1),
+            pct(&mut noise.clone(), 0.5),
+            pct(&mut noise.clone(), 0.9),
+            pct(&mut voice, 0.5),
+            open,
+            blocks.len()
+        );
+        println!("{line}");
+        report.push((name, pct(&mut noise, 0.5), open, blocks.len()));
+    }
+    for (name, median_noise, open, total) in report {
+        if name.starts_with("empty") {
+            assert!(open * 20 < total, "{name}: squelch open {open}/{total}, noise {median_noise}");
+        } else {
+            assert!(median_noise < 700., "{name}: median noise {median_noise} Hz not quieted");
+        }
+    }
 }

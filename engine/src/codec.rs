@@ -26,6 +26,9 @@ pub struct Decoded {
     pub slot2: Vec<i16>,
     /// The channel carries confirmed voice (rolling gate); both slots share it.
     pub confirmed: bool,
+    /// Any DMR voice/data sync or NXDN frame sync was logged in this block. The analog
+    /// FM path stays muted while digital signalling is present.
+    pub sync: bool,
 }
 pub struct Decoder {
     ptr: *mut c_void,
@@ -78,8 +81,17 @@ impl Decoder {
         self.time += pcm.len() as f64 / 48000.;
         let end = log.iter().position(|&b| b == 0).unwrap_or(log.len());
         self.tail.push_str(&String::from_utf8_lossy(&log[..end]));
+        let mut sync = false;
         for token in ["DMRv", "DMRd", "NXDN48", "MBE:", "parity error"] {
             let count = self.tail.matches(token).count();
+            // DMR voice/data sync, or NXDN decoded voice frames. (The "NXDN48" token also
+            // appears in the start-up log line, so it is not evidence of signalling.)
+            sync |= count > 0
+                && match token {
+                    "DMRv" | "DMRd" => true,
+                    "MBE:" => self.protocol == "NXDN48",
+                    _ => false,
+                };
             for _ in 0..count {
                 self.events.push_back((self.time, token.into()));
             }
@@ -106,6 +118,7 @@ impl Decoder {
             slot1,
             slot2,
             confirmed: active,
+            sync,
         }
     }
 }

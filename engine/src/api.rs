@@ -53,15 +53,6 @@ async fn monitor(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let mut e = app.inner.lock().unwrap();
     if let Some(ref id) = m.channel_id {
-        if e.channels
-            .get(id)
-            .is_some_and(|c| c["protocol"] == "Unknown")
-        {
-            return Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "Channel protocol is not confirmed yet".into(),
-            ));
-        }
         if !e.channels.values().any(|c| c["id"] == *id) {
             return Err((StatusCode::NOT_FOUND, "channel not in catalog".into()));
         }

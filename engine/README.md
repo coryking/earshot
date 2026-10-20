@@ -84,6 +84,11 @@ returns only new producer-measured rows, at most 60 per response. The producer's
 PSD unit is retained; a missing unit is `uncalibrated`. No waterfall is fabricated
 from activity or decoder output.
 
+Analog FM: every stream not known to be NXDN48 also runs an FM audio unit (see DESIGN-DSP.md)
+that produces `FM` slot 1 channels once a quieted voice carrier is heard; it is muted while DMR/NXDN
+sync is present. `POST /api/monitor` also accepts a channel whose protocol is still `Unknown`: the
+pin forwards its IQ and audio follows whatever is heard at that frequency, labeled with the pinned id.
+
 `POST /api/monitor` accepts `{ "channel_id": "frequency-protocol-slot" }` or null.
 It changes only the pinned listener and sends a RIQ1 CONTROL pin request to the
 source. Discovery continues. `/api/status` and `/api/listener` expose state and
