@@ -579,8 +579,16 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                         entry["audio_seconds"].as_f64().unwrap_or(0.) + audio.len() as f64 / 8000.
                     );
                 } else if let Some(entry) = e.channels.get_mut(&id) {
+                    // Announce the end of speech too: browsers follow /api/events, and without
+                    // this a call looked live until the next snapshot or RF change.
+                    let ended = entry["speech_active"] == true;
                     entry["speech_active"] = json!(false);
                     entry["available"] = json!(true);
+                    if ended {
+                        let _ = app.events.send(
+                            json!({"type":"channel","generation":frame.generation,"channel":entry}),
+                        );
+                    }
                 }
                 if speech {
                     // Every speaking channel is recorded as a call, not only the one being heard.
