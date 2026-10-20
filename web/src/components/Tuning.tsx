@@ -85,7 +85,7 @@ export function LiveSelection() {
   const source = sources.find((s) => s.id === state.sourceId);
   const speakerSilent = state.muted || state.volume === 0;
   return (
-    <section aria-label="Live tuning" className="rounded-xl border border-border bg-card p-4">
+    <section aria-label="Live tuning" className="shrink-0 rounded-xl border border-border bg-card p-4">
       {state.kind === "live" ? (
         <>
           <p className="mb-1 text-xs font-medium uppercase tracking-wide text-primary">{state.phase === "taken" ? "Channel changed elsewhere" : state.phase === "error" ? "Listening error" : "Held channel"}</p>

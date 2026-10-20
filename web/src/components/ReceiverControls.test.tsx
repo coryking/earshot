@@ -51,3 +51,20 @@ it("does not offer operative controls for an old or stale supervisor", async () 
   await waitFor(() => expect(screen.getByRole("button", { name: "Stop receiving" })).toBeDisabled());
   expect(screen.getByText(/require a connected supervisor/)).toBeVisible();
 });
+
+it("confirms fresh engine samples even when the browser clock is ahead", async () => {
+  let engineTime = 10_000;
+  const backend = new MockBackend({ manual: true, now: () => engineTime });
+  await backend.stopReceiver();
+  const start = backend.startReceiver.bind(backend);
+  vi.spyOn(backend, "startReceiver").mockImplementation(async () => {
+    engineTime += 1_000;
+    return start();
+  });
+  render(<Providers backend={backend}><ReceiverControls /></Providers>);
+  const user = userEvent.setup();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Start receiving" })).toBeEnabled(), { timeout: 5000 });
+  await user.click(screen.getByRole("button", { name: "Start receiving" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Stop receiving" })).toBeEnabled());
+  expect(engineTime / 1000).toBeLessThan(Date.now() / 1000 - 120);
+});

@@ -99,10 +99,10 @@ test("speaker mute and zero volume retain the held frequency until Stop listenin
   const volume = player.getByRole("slider", { name: "Speaker volume" });
   await volume.focus();
   await volume.press("Home");
-  await expect(volume).toHaveAttribute("aria-valuenow", "0");
+  await expect(volume).toHaveValue("0");
   await expect(player).toContainText("Speaker muted");
   await player.getByRole("button", { name: "Unmute speaker", exact: true }).click();
-  await expect(volume).not.toHaveAttribute("aria-valuenow", "0");
+  await expect(volume).not.toHaveValue("0");
   await expect(frequency).toHaveValue(held);
   await player.getByRole("button", { name: "Stop listening", exact: true }).click();
   await expect(player).toHaveCount(0);

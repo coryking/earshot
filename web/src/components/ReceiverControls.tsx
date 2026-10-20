@@ -25,7 +25,8 @@ export function ReceiverControls({ details = false }: { details?: boolean }) {
     mutationKey,
     mutationFn: async (start: boolean) => {
       setError(null);
-      const since = Date.now() / 1000;
+      // Both samples come from the engine's clock; the browser may disagree.
+      const previousSamples = start ? (await backend.status()).last_samples_at : null;
       if (start) await backend.startReceiver!();
       else {
         await player.stop();
@@ -39,7 +40,7 @@ export function ReceiverControls({ details = false }: { details?: boolean }) {
         const actual = snapshot.receiver;
         if (actual?.fresh && actual.receiving_requested === start) {
           if (start && actual.state === "running" && snapshot.state === "receiving"
-            && (snapshot.last_samples_at ?? 0) >= since) return;
+            && (snapshot.last_samples_at ?? 0) > (previousSamples ?? 0)) return;
           if (!start && actual.state === "stopped" && actual.reason === "operator") {
             if (!actual.last_restore || actual.last_restore.startsWith("UNVERIFIED")) {
               throw new Error("Receiving stopped; receiver restoration could not be verified. Check Operator tools.");

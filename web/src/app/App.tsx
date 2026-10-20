@@ -32,9 +32,9 @@ function WideNow() {
       </ResizablePanel>
       <ResizableHandle withHandle />
       <ResizablePanel defaultSize="62%" minSize="30%" className="min-h-0">
-        <div className="flex h-full min-h-0 flex-col gap-3 p-3">
+        <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3">
           <LiveSelection />
-          <div className="space-y-1 text-xs text-muted-foreground">
+          <div className="shrink-0 space-y-1 text-xs text-muted-foreground">
             <p>Click or drag to hold a frequency. UHF tuning snaps to 6.25 kHz steps; hold Shift for an exact frequency.</p>
             <p><span className="text-lamp">Amber: recent activity</span> · <span className="text-signal">Blue: held channel</span>. Only the held channel feeds the speaker.</p>
           </div>
