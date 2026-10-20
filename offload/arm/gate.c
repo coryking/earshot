@@ -27,7 +27,8 @@ int gate_push(activity_gate *g,const iqf *frame){
       while(first<g->frame){unsigned count=(unsigned)(g->frame-first);if(count>256)count=256;
         iqs16 old[256];for(unsigned j=0;j<count;++j)old[j]=g->history[((first+j)%g->capacity)*g->n+k];
         unsigned flags=4|c->pending_flags|(c->pinned?32:0);
-        if(g->emit(g->opaque,k,first,count,flags,old))return -1;c->last_sent=first+count;c->pending_flags=0;first+=count;
+        if(g->emit(g->opaque,k,first,count,flags,old))return -1;
+        c->last_sent=first+count;c->pending_flags=0;first+=count;
       }
    }
    if(c->active){

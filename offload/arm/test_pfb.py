@@ -80,7 +80,10 @@ def test_refuses_output_overwrite(binary, tmp_path):
     target = tmp_path / "existing"
     target.write_bytes(b"preserved")
     result = subprocess.run(
-        [str(binary), "--benchmark", "--output", str(target)], check=False, capture_output=True, text=True
+        [str(binary), "--benchmark", "--output", str(target)],
+        check=False,
+        capture_output=True,
+        text=True,
     )
     assert result.returncode == 1
     assert target.read_bytes() == b"preserved"

@@ -1,0 +1,114 @@
+diff --git a/dsd_decoder.h b/dsd_decoder.h
+index f5c1ab0..c312d65 100644
+--- a/dsd_decoder.h
++++ b/dsd_decoder.h
+@@ -266,6 +266,13 @@ public:
+     DSDMBERate getMbeRate() const { return m_mbeRate; }
+     void setMbeRate(DSDMBERate mbeRate) { m_mbeRate = mbeRate; }
+ 
++    /** See DSDMBEDecoder::setAmbe2450Vocoder; installed on both TDMA slots (streams 1 and 2). */
++    void setAmbe2450Vocoder(DSDMBEDecoder::Ambe2450Vocoder fn, void *context)
++    {
++        m_mbeDecoder1.setAmbe2450Vocoder(fn, context, 1);
++        m_mbeDecoder2.setAmbe2450Vocoder(fn, context, 2);
++    }
++
+     void useHPMbelib(bool useHP) {
+         m_mbeDecoder1.useHP(useHP);
+         m_mbeDecoder2.useHP(useHP);
+diff --git a/dsd_mbe.cpp b/dsd_mbe.cpp
+index 84b58f3..58146c3 100644
+--- a/dsd_mbe.cpp
++++ b/dsd_mbe.cpp
+@@ -29,7 +29,10 @@ namespace DSDcc
+ DSDMBEDecoder::DSDMBEDecoder(DSDDecoder *dsdDecoder) :
+         m_dsdDecoder(dsdDecoder),
+         m_upsamplerLastValue(0.0f),
+-        m_mbelibParms(0)
++        m_mbelibParms(0),
++        m_ambeVocoder(0),
++        m_ambeContext(0),
++        m_ambeStream(0)
+ {
+ #ifdef DSD_USE_MBELIB
+     m_mbelibParms = new DSDmbelibParms();
+@@ -77,6 +80,11 @@ void DSDMBEDecoder::initMbeParms()
+ 	m_errs2 = 0;
+ 	m_err_str[0] = 0;
+ 
++	if (m_ambeVocoder)
++	{
++	    m_ambeVocoder(m_ambeContext, m_ambeStream, 0, 0, 0, 0);
++	}
++
+     if (m_auto_gain)
+     {
+         m_aout_gain = 25;
+@@ -110,6 +118,22 @@ void DSDMBEDecoder::processFrame(char imbe_fr[8][23], char ambe_fr[4][24], char
+                 &m_errs2, m_err_str, ambe_fr, ambe_d,m_mbelibParms-> m_cur_mp,
+                 m_mbelibParms->m_prev_mp, m_mbelibParms->m_prev_mp_enhanced, m_dsdDecoder->m_opts.uvquality);
+     }
++    else if (m_ambeVocoder)
++    {
++        // Same FEC front end as mbe_processAmbe3600x2450Framef, then hand the data bits over.
++        m_errs = mbe_eccAmbe3600x2450C0(ambe_fr);
++        mbe_demodulateAmbe3600x2450Data(ambe_fr);
++        m_errs2 = m_errs;
++        m_errs2 += mbe_eccAmbe3600x2450Data(ambe_fr, ambe_d);
++        m_ambeVocoder(m_ambeContext, m_ambeStream, ambe_d, m_errs, m_errs2, m_audio_out_temp_buf);
++
++        int e = m_errs2 > 60 ? 60 : m_errs2;
++        for (int i = 0; i < e; i++)
++        {
++            m_err_str[i] = '=';
++        }
++        m_err_str[e] = 0;
++    }
+     else
+     {
+         mbe_processAmbe3600x2450Framef(m_audio_out_temp_buf, &m_errs,
+@@ -488,3 +512,8 @@ void DSDMBEDecoder::upsample(int upsampling, float invalue)
+ 
+ 
+ }
++
++// Link-time marker for the AMBE+2 vocoder hook (engine/patches/dsdcc-ambe-vocoder-hook.patch):
++// the engine references it, so building against an unpatched libdsdcc fails to link instead of
++// running with a mismatched DSDMBEDecoder layout.
++extern "C" int dsdcc_ambe2450_vocoder_hook_v1(void) { return 1; }
+diff --git a/dsd_mbe.h b/dsd_mbe.h
+index 4144464..da81c45 100644
+--- a/dsd_mbe.h
++++ b/dsd_mbe.h
+@@ -33,6 +33,21 @@ public:
+     ~DSDMBEDecoder();
+ 
+     void initMbeParms();
++
++    /**
++     * Optional replacement for mbelib's AMBE+2 3600x2450 parameter decoder and synthesizer.
++     * DSDcc still deinterleaves and error-corrects the frame; the callback receives the 49
++     * data bits (one per byte, mbelib ambe_d order) plus the corrected error counts and
++     * must write 160 floats of 8 kHz audio in mbelib's float scale. A null `ambe_d` means
++     * "new call, drop vocoder state". Without a callback behaviour is unchanged.
++     */
++    typedef void (*Ambe2450Vocoder)(void *context, int stream, const char *ambe_d, int errs, int errs2, float *pcm160);
++    void setAmbe2450Vocoder(Ambe2450Vocoder fn, void *context, int stream)
++    {
++        m_ambeVocoder = fn;
++        m_ambeContext = context;
++        m_ambeStream = stream;
++    }
+     void processFrame(char imbe_fr[8][23], char ambe_fr[4][24], char imbe7100_fr[7][24]);
+     void processData(char imbe_data[88], char ambe_data[49]);
+ 
+@@ -67,6 +82,9 @@ private:
+     float m_upsamplerLastValue;
+ 
+     DSDmbelibParms *m_mbelibParms;
++    Ambe2450Vocoder m_ambeVocoder;
++    void *m_ambeContext;
++    int m_ambeStream;
+     int m_errs;
+     int m_errs2;
+     char m_err_str[64];

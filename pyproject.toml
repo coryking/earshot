@@ -12,6 +12,7 @@ dependencies = [
     "fastapi>=0.149.0",
     "uvicorn[standard]>=0.54.0",
     "httpx>=0.28.1",
+    "websockets>=17.3",
 ]
 
 [project.scripts]

@@ -1,5 +1,11 @@
+pub mod ambe;
 pub mod api;
 pub mod codec;
 pub mod dsp;
+pub mod fm;
+pub mod freq;
+pub mod link;
 pub mod runtime;
+pub mod store;
+pub mod voice;
 pub mod wire;
