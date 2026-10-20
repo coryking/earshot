@@ -73,7 +73,15 @@ export interface Block {
 export type Health =
   | { state: "listening"; detail: string }
   | { state: "paused"; detail: string }
-  | { state: "offline"; detail: string; raw: string | null };
+  | {
+      state: "offline";
+      detail: string;
+      raw: string | null;
+      /** The headline when offline; the engine is retrying by itself. */
+      lead?: string;
+      /** The receiver is expected back without anyone doing anything. */
+      reconnecting?: boolean;
+    };
 
 export interface SpectrumRow {
   sequence: number;

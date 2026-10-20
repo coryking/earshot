@@ -41,6 +41,32 @@ export type EngineChannel = z.infer<typeof engineChannelSchema>;
 
 const channelList = lenientArray(engineChannelSchema);
 
+/** How the engine stands with its source (engine/src/link.rs). */
+export const engineLinkSchema = z.looseObject({
+  /** "tcp" (a receiver is configured) | "fixture" (nothing to reconnect to) */
+  mode: z.string().catch("fixture"),
+  /** "connected" | "connecting" | "reconnecting" | "waiting" | "fixture" */
+  state: z.string().catch("fixture"),
+  offline_s: num,
+  failures: num,
+  last_error: str,
+  next_retry_s: num,
+});
+export type EngineLink = z.infer<typeof engineLinkSchema>;
+
+/** What the receiver supervisor says (radio-supervisor status file); null when there is none. */
+export const engineReceiverSchema = z.looseObject({
+  /** "starting" | "running" | "waiting" | "borrowed" | "stopped" */
+  state: z.string().catch("stopped"),
+  /** "lock-held" | "unreachable" | "wrong-image" | "producer-failed" | "radio-state" | "shutdown" | null */
+  reason: str,
+  detail: str,
+  /** False when the status file is old, meaning the supervisor is not running. */
+  fresh: bool,
+  last_restore: str,
+});
+export type EngineReceiver = z.infer<typeof engineReceiverSchema>;
+
 export const engineStatusSchema = z.looseObject({
   /** "live" | "disconnected" */
   mode: z.string().catch("disconnected"),
@@ -64,6 +90,9 @@ export const engineStatusSchema = z.looseObject({
   last_samples_at: num,
   continuity: str,
   decoder_capacity: num,
+  /** Absent on engines from before the reconnecting link. */
+  link: engineLinkSchema.nullish().catch(null),
+  receiver: engineReceiverSchema.nullish().catch(null),
   /** Producer CONFIG JSON as read back; `{}` before the first CONFIG. */
   source: z.record(z.string(), z.unknown()).nullish().catch(null),
 });

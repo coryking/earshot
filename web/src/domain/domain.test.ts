@@ -211,6 +211,37 @@ describe("health and preferences", () => {
     });
   });
 
+  it("says plainly that the receiver is offline and retrying, and for how long", () => {
+    const down = (link: object, receiver: object | null = null) =>
+      ({ ...base, state: "error", mode: "disconnected", error: "RIQ source disconnected", link: { mode: "tcp", state: "reconnecting", ...link }, receiver }) as unknown as Parameters<typeof healthOf>[0];
+    const short = healthOf(down({ offline_s: 20 }), true);
+    expect(short).toMatchObject({ state: "offline", reconnecting: true, lead: "Receiver offline, reconnecting." });
+    expect(short.detail).toMatch(/usually comes back by itself/);
+    expect(headline([], null, short, Date.now()).lead).toBe("Receiver offline, reconnecting.");
+
+    // The supervisor's reason is passed on in plain words.
+    const busy = healthOf(down({ offline_s: 30 }, { state: "waiting", reason: "lock-held", fresh: true }), true);
+    expect(busy.detail).toBe("The receiver is being used for a test and comes back when that's done.");
+    const lost = healthOf(down({ offline_s: 30 }, { state: "waiting", reason: "unreachable", fresh: true }), true);
+    expect(lost.detail).toMatch(/isn't answering/);
+    const dead = healthOf(down({ offline_s: 30 }, { state: "running", fresh: false }), true);
+    expect(dead.detail).toMatch(/isn't running, so nothing will restart it/);
+
+    // After ten minutes it is no longer a blip: say how long, and that old activity is on screen.
+    const long = healthOf(down({ offline_s: 1500 }, { state: "waiting", reason: "wrong-image", fresh: true }), true);
+    expect(long.detail).toContain("offline for 25 min");
+    expect(long.detail).toContain("what it heard earlier");
+    expect(long.detail).toMatch(/different software/);
+    expect(healthOf(down({ offline_s: 7200 }), true).detail).toContain("offline for 2 h");
+
+    // Back: connected link plus a receiving state is the normal listening state again.
+    const back = { ...base, link: { mode: "tcp", state: "connected" } } as unknown as Parameters<typeof healthOf>[0];
+    expect(healthOf(back, true).state).toBe("listening");
+    // No receiver configured (fixture mode) keeps the old wording.
+    const fixture = { ...base, state: "stopped", mode: "disconnected", link: { mode: "fixture", state: "fixture" } } as unknown as Parameters<typeof healthOf>[0];
+    expect(healthOf(fixture, true).state).toBe("paused");
+  });
+
   it("keeps follow and mute exclusive, and carries them over when a source is renamed", () => {
     prefs.toggleFollow("a");
     prefs.toggleMute("a");

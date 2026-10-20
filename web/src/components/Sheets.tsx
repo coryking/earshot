@@ -416,7 +416,10 @@ function StatusSheet({ open }: { open: boolean }) {
   const status = useStatus();
   const now = useNow(1000);
   const last = status.data?.last_samples_at ? status.data.last_samples_at * 1000 : null;
-  const title = { listening: "It's working", paused: "The radio is paused", offline: "The radio isn't connected" }[health.state];
+  const title =
+    health.state === "offline" && health.reconnecting
+      ? "Receiver offline, reconnecting"
+      : { listening: "It's working", paused: "The radio is paused", offline: "The radio isn't connected" }[health.state];
   return (
     <Sheet open={open} title={title} description={health.detail}>
       <dl className="divide-y divide-border/60">

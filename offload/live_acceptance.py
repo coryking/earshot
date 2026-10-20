@@ -36,7 +36,7 @@ import websockets
 
 sys.path.insert(0, str(Path(__file__).parent))
 from pluto_readback import mismatches, restore_receiver, snapshot
-from radio_lock import radio_lock, raise_on_termination
+from radio_lock import ensure_borrowed, radio_lock, raise_on_termination
 
 SSH = [
     "sshpass",
@@ -682,6 +682,7 @@ def cleanup(
 
 def main() -> int:
     args = parse_args()
+    ensure_borrowed()  # the always-on receiver steps aside, and resumes afterwards
     raise_on_termination()
     stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
     out = args.out / stamp
