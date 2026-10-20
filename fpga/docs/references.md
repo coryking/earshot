@@ -136,6 +136,12 @@ confirmed. The design note (`design.md`) cites these by key.
   AREG/BREG/MREG/PREG.
 - **[ug473]** 7 Series Memory Resources (v1.14): RAMB36 512×72 and RAMB18 512×36 in
   simple dual-port mode; READ_FIRST.
+- **[ug472]** 7 Series Clocking Resources: MMCME2 (VCO 600–1200 MHz for -1 parts per
+  DS187), output dividers, feedback through a BUFG for deskew.
+- **[ug585]** Zynq-7000 Technical Reference Manual: AXI_HP ports (64-bit, write and
+  read paths to the DDR controller), DDR controller.
+- **[ds187]** Zynq-7000 (Z-7010/7015/7020) DC and AC switching characteristics:
+  MMCM VCO range and DSP48E1/BRAM maximum frequencies by speed grade.
 - **[pg101]** AXI Protocol Checker (AXI4/AXI3/AXI4-Lite). **[pg145]** AXI4-Stream
   Protocol Checker. **[pg267]** AXI Verification IP.
 - **[ds190]** Zynq-7000 Overview: Z-7010 has 17,600 LUT, 35,200 FF, 60 RAMB36 and

@@ -71,7 +71,7 @@ def stimulus(name: str, rng: np.random.Generator) -> tuple[np.ndarray, dict]:
             "mask_bins": [0, 1, 7, 40, 41, 255, 256, 300, 511], "auto_forward": 0,
             "expect_drops": 0, "expect_overflow": 0, "reset_at_frame": -1,
             "snapshot_at_frame": -1, "det_reset_at_frame": -1, "adc_losses": 0,
-            "hist_first": 0, "hist_pairs": 256}
+            "hist_first": 0, "hist_pairs": 256, "evt_poll": 1}
     if name == "mixed":
         x = (tone(0, 300) + tone(40 * cfg.bin_hz, 600) + tone(41 * cfg.bin_hz + 25e3, 400)
              + tone(-212 * cfg.bin_hz + 12.5e3, 200) + tone(7 * cfg.bin_hz + 31.25e3, 100)
@@ -79,6 +79,8 @@ def stimulus(name: str, rng: np.random.Generator) -> tuple[np.ndarray, dict]:
         # a carrier that keys up, then down: exercises open, hang and close
         x[n // 4: 5 * n // 8] += tone(300 * cfg.bin_hz, 900)[n // 4: 5 * n // 8]
         opts["adc_gap_pct"] = 20
+        # nobody drains events here: more than 512 occur, so the FIFO overflows
+        opts["evt_poll"] = 0
     elif name == "fullscale":
         # beyond the 12-bit range (clipped), with DC; small out_shift forces 16-bit
         # output saturation
@@ -186,7 +188,8 @@ def vectors(scenario: str, outdir: Path, seed: int = 1) -> None:
             f"+BIAS_Q8={SIM_DET.bias_q8}", f"+SNAPSHOT_AT_FRAME={opts['snapshot_at_frame']}",
             f"+AUTO_FWD={opts['auto_forward']}", f"+DET_RESET_AT_FRAME={opts['det_reset_at_frame']}",
             f"+ADC_LOSSES={opts['adc_losses']}", f"+HIST_FIRST={opts['hist_first']}",
-            f"+HIST_PAIRS={opts['hist_pairs']}", f"+EVENTS={len(events)}"]
+            f"+HIST_PAIRS={opts['hist_pairs']}", f"+EVENTS={len(events)}",
+            f"+EVT_POLL={opts['evt_poll']}"]
     (outdir / "plusargs.txt").write_text(" ".join(plus) + "\n")
     print(json.dumps({k: v for k, v in params.items() if k != "det"}))
 

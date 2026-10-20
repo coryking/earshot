@@ -10,7 +10,9 @@
 
 `timescale 1ns/1ps
 
-module tb_chan;
+module tb_chan #(
+  parameter int FIR2X = 1          // xelab -generic_top FIR2X=0 for the 16-DSP FIR
+);
 
   // --------------------------------------------------------------------------
   // scenario
@@ -19,7 +21,7 @@ module tb_chan;
   int expect_drops, expect_overflow, sat_samples, clipped, reset_at_frame;
   int on_q8, off_q8, hang, bias_q8, snapshot_at, auto_fwd, det_reset_at, adc_losses;
   int hist_first, hist_pairs, n_events;
-  localparam int EVT_DEPTH = 16;   // small, so scenarios with many events overflow it
+  localparam int EVT_DEPTH = 512;  // as built; the unpolled scenario overflows it
   bit h_lost = 0, s_lost = 0;    // a loss flag was seen: later records are not model-exact
   int errors = 0;
 
@@ -67,7 +69,7 @@ module tb_chan;
   chan_top #(
     .ID(7), .COEF_FILE_PREFIX("pfb_coef_p"), .LOG_TABLE("chan_log2_table.mem"),
     .BLOCK_LOG2(2), .SUB_BLOCKS(2), .PSD_LOG2(3),  // = golden.SIM_DET
-    .FIR2X(1), .EVT_DEPTH(EVT_DEPTH)
+    .FIR2X(FIR2X), .EVT_DEPTH(EVT_DEPTH)
   ) dut (
     .s_axi_aclk (clk), .s_axi_aresetn (aresetn),
     .s_axi_awvalid (awvalid), .s_axi_awaddr (awaddr), .s_axi_awprot (3'd0),
@@ -148,7 +150,10 @@ module tb_chan;
 
   // --------------------------------------------------------------------------
   // AXI4-Lite master
+  semaphore bus = new(1);     // the event poller and the main thread share the master
+
   task automatic axi_write(input [15:0] addr, input [31:0] data);
+    bus.get(1);
     @(posedge clk);
     awaddr <= addr; wdata <= data; awvalid <= 1; wvalid <= 1;
     fork
@@ -159,9 +164,11 @@ module tb_chan;
     do @(posedge clk); while (!bvalid);
     if (bresp != 2'b00) begin $error("BRESP %0d at %h", bresp, addr); errors++; end
     bready <= 0;
+    bus.put(1);
   endtask
 
   task automatic axi_read(input [15:0] addr, output [31:0] data);
+    bus.get(1);
     @(posedge clk);
     araddr <= addr; arvalid <= 1;
     do @(posedge clk); while (!arready);
@@ -171,6 +178,7 @@ module tb_chan;
     data = rdata;
     if (rresp != 2'b00) begin $error("RRESP %0d at %h", rresp, addr); errors++; end
     rready <= 0;
+    bus.put(1);
   endtask
 
   function automatic [15:0] reg_addr(input int dword);
@@ -305,39 +313,51 @@ module tb_chan;
   endtask
 
   // Activity events. Exact against the model where the detector saw an unbroken
-  // run (no resets, no lost samples); otherwise only well-formedness. The FIFO keeps
-  // the oldest EVT_DEPTH events and counts the rest as lost.
-  task automatic check_events();
-    logic [31:0] st, head, fr;
-    int kept, exact, bad = 0;
-    longint last_fr = -1;
-    exact = (reset_at_frame < 0 && det_reset_at < 0 && !expect_overflow && snapshot_at < 0);
-    axi_read(reg_addr('h24), st);
-    kept = st[15:0];
-    $display("  events: %0d queued, %0d lost, %0d expected", kept, st[31:16], n_events);
-    if (exact) begin
-      if (kept != (n_events < EVT_DEPTH ? n_events : EVT_DEPTH) ||
-          st[31:16] != (n_events > EVT_DEPTH ? n_events - EVT_DEPTH : 0)) begin
-        $error("event count/lost mismatch"); errors++;
-      end
-    end
-    for (int i = 0; i < kept; i++) begin
+  // run (no resets, no lost samples); otherwise only well-formedness. With EVT_POLL
+  // a poller drains the FIFO while frames run (as the ARM would), so nothing may be
+  // lost; without it the FIFO overflows and keeps the oldest events (EVT_DEPTH plus
+  // the first-word-fall-through stages), so kept + lost must equal the model total.
+  int     evt_kept = 0, evt_poll = 0;
+  longint evt_last_fr = -1;
+  bit     evt_exact;
+
+  task automatic drain_events();
+    logic [31:0] head, fr;
+    forever begin
       axi_read(reg_addr('h25), head);
+      if (!head[31]) break;
       axi_read(reg_addr('h26), fr);
-      if (!head[31]) begin $error("event %0d: head not valid", i); bad++; end
-      if (exact && {head[30], head[8:0], fr} !== exp_events[i]) begin
-        if (bad < 5) $error("event %0d: got open=%0d bin=%0d frame=%0d, expected %h", i,
-                            head[30], head[8:0], fr, exp_events[i]);
-        bad++;
+      if (evt_exact && (evt_kept >= n_events || {head[30], head[8:0], fr} !== exp_events[evt_kept])) begin
+        if (errors < 20) $error("event %0d: got open=%0d bin=%0d frame=%0d, expected %h", evt_kept,
+                                head[30], head[8:0], fr, exp_events[evt_kept]);
+        errors++;
       end
-      if (fr < last_fr) begin $error("event %0d: frame %0d before %0d", i, fr, last_fr); bad++; end
-      last_fr = fr;
+      if (longint'(fr) < evt_last_fr) begin
+        $error("event %0d: frame %0d before %0d", evt_kept, fr, evt_last_fr); errors++;
+      end
+      evt_last_fr = fr;
       axi_write(reg_addr('h27), 1);
+      evt_kept++;
     end
+  endtask
+
+  task automatic check_events();
+    logic [31:0] st;
+    drain_events();
+    axi_read(reg_addr('h24), st);
+    $display("  events: %0d drained, %0d lost, %0d expected (poll %0d)", evt_kept, st[31:16],
+             n_events, evt_poll);
+    if (evt_exact && evt_kept + st[31:16] != n_events) begin
+      $error("events: %0d kept + %0d lost, expected %0d", evt_kept, st[31:16], n_events); errors++;
+    end
+    if (evt_exact && evt_poll && st[31:16] != 0) begin $error("events lost while polled"); errors++; end
+    if (evt_exact && !evt_poll && n_events >= EVT_DEPTH && evt_kept < EVT_DEPTH) begin
+      $error("FIFO kept %0d events, fewer than its depth", evt_kept); errors++;
+    end
+    if (!evt_exact && evt_kept == 0 && n_events > 0) begin $error("no events"); errors++; end
     check_reg('h25, "evt_head@drained", 0);
     axi_read(reg_addr('h24), st);
-    if (st[15:0] != 0) begin $error("events left after draining: %0d", st[15:0]); bad++; end
-    errors += bad;
+    if (st[15:0] != 0) begin $error("events left after draining: %0d", st[15:0]); errors++; end
   endtask
 
   task automatic wait_frames(input int target);
@@ -439,6 +459,8 @@ module tb_chan;
     void'($value$plusargs("HIST_FIRST=%d", hist_first));
     void'($value$plusargs("HIST_PAIRS=%d", hist_pairs));
     void'($value$plusargs("EVENTS=%d", n_events));
+    void'($value$plusargs("EVT_POLL=%d", evt_poll));
+    evt_exact = (reset_at_frame < 0 && det_reset_at < 0 && !expect_overflow && snapshot_at < 0);
     exp_events = new[n_events > 0 ? n_events : 1];
     $readmemh({vec, "/events.hex"}, exp_events);
     stim = new[samples];
@@ -454,8 +476,8 @@ module tb_chan;
       mask_bit[k] = mask_words[k / 32][k % 32];
       mask_count += mask_bit[k];
     end
-    $display("tb_chan: %s frames=%0d samples=%0d ready=%0d%% adc=%0dps", vec, frames,
-             samples, ready_pct, adc_period_ps);
+    $display("tb_chan: %s frames=%0d samples=%0d ready=%0d%% adc=%0dps fir2x=%0d", vec, frames,
+             samples, ready_pct, adc_period_ps, FIR2X);
 
     repeat (20) @(posedge clk);
     aresetn <= 1;
@@ -493,6 +515,9 @@ module tb_chan;
     axi_write(reg_addr(4), auto_fwd ? 32'hF : 32'h7);  // run, hist_en, sel_en[, auto]
     repeat (100) @(posedge clk);
     feed_go = 1;
+    if (evt_poll) fork
+      forever begin repeat (3000) @(posedge clk); drain_events(); end
+    join_none
 
     if (det_reset_at > 0) begin
       wait_frames(det_reset_at);

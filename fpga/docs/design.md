@@ -242,24 +242,66 @@ Flags:
 - Any loss shows up in the counters and flags. This is the hardware sample counter
   that PROTOCOL.md's `hardware_counter` was waiting for.
 
-**History ring.**
-- chan_hist_dma runs in axi_dmac cyclic mode over a reserved DDR region of N
-  records × 2056 bytes. Records are 257 words; the header carries the frame number.
-- After enabling the DMA, the ARM sets HIST_EN. HIST_FIRST_FRAME (0x01E) is the
-  frame number that lands at the region base.
-- Frame f is at ((f − first) mod N) × 2056, provided HIST_DROPS has not moved. The
-  record header confirms the frame, and that check catches overwrite races.
-- At 205.6 MB/s, 64 MiB holds 326 ms of pre-roll for every bin.
+**History ring.** Every frame of a window of bins goes to a cyclic ring in DDR, so
+the ARM can fetch any bin's last ~0.8–1 s when the detector opens it and forward
+the start of the transmission (PROTOCOL.md, "FPGA channelizer source").
+
+- *Window.* HIST_WINDOW (0x028) sets the first bin and the number of bin pairs P
+  (1–256). A record is a header plus P words: bins (first + i) mod 512 for
+  i = 0..2P−1, two per word, wrapping past 511, so a span centred on DC is one
+  window. The selected stream walks the bins in the same order. The window is
+  latched when the stream is armed (HIST_EN 0→1, or RUN 0→1 with HIST_EN set);
+  HIST_WINDOW_ACTIVE (0x02C) reads back the window in force. Default: all bins.
+- *Why every bin, not only active ones.* The DDR budget (below) carries every bin
+  with room to spare, and a full window keeps the ring addressable by arithmetic:
+  record r sits at slot (r − 1) mod N. An active-only ring would need a per-bin
+  index and could not supply history for a bin from before it opened, which is
+  the point of the ring.
+- *Ring position.* chan_hist_dma runs in axi_dmac cyclic mode over N whole
+  records (N = ring bytes / record bytes, so no record straddles the wrap).
+  HIST_RECORDS (0x029) counts records admitted since arming (reading it latches
+  HIST_LAST_FRAME, 0x02A, the newest admitted frame); HIST_DONE (0x02B) counts
+  records whose last word has left the FIFO for the DMA. axi_dmac buffers less
+  than one burst group (8 × 128 bytes) beyond that, so record HIST_DONE − 1 is in
+  DDR within microseconds. Readers check each record's header frame number, which
+  catches drops and overwrite races; records older than HIST_DONE − N + 16 may be
+  mid-overwrite.
+- *Finding a frame.* Without drops, frame F is record HIST_DONE − (F_newest − F).
+  After drops the reader steps back by header; frames in the ring are monotonic.
+- *Events.* The detector pushes {open/close, bin, frame} into a FIFO (EVT_*,
+  0x024–0x027) when a bin's state changes at a block end. The frame is the last
+  frame of the deciding block. Bins of one block come in FFT output order. The
+  FIFO holds 512 events and counts any it has to drop (EVT_STATUS[31:16]). A
+  detector reset clears ACTIVE without close events. `chanctl events` drains it
+  and `chanctl preroll` waits for an opening and extracts that bin's history.
+- *Sizing: bandwidth.* DDR3 is MT41K256M16 on a 16-bit bus at 533 MHz
+  (hdl projects/pluto, PS7 PCW_UIPARAM_DDR_*): 2,133 MB/s peak. The ring writes
+  (1 + P) × 8 bytes per frame at 100,000 frames/s: 205.6 MB/s for all bins, on HP0,
+  whose 64-bit port at 100 MHz moves up to 800 MB/s [ug585 ch. 5]. Alongside it:
+  the selected stream on HP3 (0.8 MB/s per selected bin, 51 MB/s for 64 bins), the
+  stock IIO capture if used at the same time (102 MB/s at 25.6 Msps), and Linux.
+  That is about 360 MB/s, 17% of peak. HIST_DROPS counts any shortfall, and the
+  on-device check is that it stays 0 at full rate with both streams running.
+- *Sizing: memory.* The firmware image (`sw/make_frm.py`) reserves 160 MiB at
+  0x04000000 (no-map). That ends below the kernel's 256 MiB CMA pool
+  (0x0E400000–0x1E400000 on this unit), so CMA keeps its place, and Linux keeps
+  352 MiB (CMA included; the Pluto's rootfs and services use a few tens of MiB).
+  The first 8 MiB hold selected-stream buffers; the ring gets 152 MiB:
+
+  | Window | Record | Records in 152 MiB | Depth |
+  | --- | ---: | ---: | ---: |
+  | all 512 bins (±12.8 MHz) | 2,056 B | 77,520 | 0.78 s |
+  | 400 bins (±10 MHz, the usable RF span) | 1,608 B | 99,120 | 0.99 s |
+  | 200 bins (±5 MHz) | 808 B | 197,253 | 1.97 s |
+
+  Pre-roll needs far less: the detector decides within one to two 2.56 ms blocks
+  of key-up, so 100–300 ms covers the ramp and a DMR voice header.
 - DMA targets must be memory Linux never maps cacheable. HP-port writes bypass
-  the caches, and user space cannot invalidate L1 or the PL310 L2.
-- The firmware image built by `sw/make_frm.py` reserves 0x04000000–0x07FFFFFF
-  (no-map). User space maps it uncached through /dev/mem (O_SYNC).
-- The placement avoids the FIT staging area (0x02080000), the initrd/FDT that
-  U-Boot puts just below 512 MiB, and the 256 MiB CMA pool, which needs a
-  contiguous span.
-- `chanctl dma` refuses to run when that range is still System RAM, as it is on
-  stock firmware. So the DMA streams are exercised only after the firmware stage;
-  runtime load covers registers, PSD/activity and the snapshot.
+  the caches, and user space cannot invalidate L1 or the PL310 L2. User space maps
+  the carve-out uncached through /dev/mem (O_SYNC); `chanctl` reads its address and
+  size from the device tree, and refuses to run when the range is System RAM, as
+  on stock firmware. So the DMA streams are exercised only after the firmware
+  stage; runtime load covers registers, PSD/activity, events and the snapshot.
 
 **Selected stream.**
 - A non-cyclic transfer queue on chan_sel_dma. Records are self-describing, so the
@@ -279,21 +321,23 @@ Flags:
 **Stopping and re-arming.**
 - RUN = 0 lets the packetizer finish the record it is writing, so records are never
   truncated. Records already queued keep draining to the DMA.
-- To re-arm the history ring, leave the DMA running until STATUS shows both FIFOs
-  empty. Then restart the cyclic transfer and set HIST_EN. HIST_FIRST_FRAME then
-  names the record at the ring base.
+- To re-arm the history ring (for instance with a new window), clear HIST_EN and
+  leave the DMA running until STATUS shows the history FIFO empty. Then restart
+  the cyclic transfer and set HIST_EN. HIST_FIRST_FRAME then names the record at
+  the ring base, and HIST_RECORDS/HIST_DONE count from it. `chanctl ring start`
+  does exactly this.
 - Frame numbers restart at 0 on every RUN 0→1.
 
 ## 8. Register map (`chan_top`, DWORD addresses; byte address = 4 × DWORD)
 
 | DWORD | Name | Access | Notes |
 | --- | --- | --- | --- |
-| 0x000 | VERSION | RO | 0x0001_0000 |
+| 0x000 | VERSION | RO | 0x0001_0100 (1.1.0: history window, ring position, events) |
 | 0x001 | ID | RO | instance ID |
 | 0x002 | SCRATCH | RW | |
 | 0x003 | MAGIC | RO | 0x4348_414E "CHAN" |
 | 0x004 | CONTROL | RW | [0] RUN (0 = soft reset of the datapath) [1] HIST_EN [2] SEL_EN [3] AUTO_FORWARD [4] DET_RESET (self-clearing) |
-| 0x005 | STATUS | RO | [0] running [1] history FIFO empty [2] selected FIFO empty [3] packetizer busy |
+| 0x005 | STATUS | RO | [0] running [1] history FIFO empty [2] selected FIFO empty [3] packetizer busy [4] FIR clock locked (the datapath stays in reset until it is) |
 | 0x006 | OUT_SHIFT | RW | slice gain, default 7 (×16 ADC units) |
 | 0x007 | CONFIG | RO | [15:0] bins, [23:16] taps/branch, [31:24] block log2 |
 | 0x008–0x00B | DET_ON / DET_OFF / DET_BIAS (Q8 log2) / DET_HANG (blocks) | RW | reset defaults 221 / 133 / 0 / 39 |
@@ -314,6 +358,15 @@ Flags:
 | 0x050–0x05F | ACTIVE | RO | activity bitmap |
 | 0x022 | SNAP_CTRL | RW/RO | [0] FREEZE request (RW; cleared while RUN = 0) [1] frozen [2] output ready |
 | 0x023 | SNAP_FRAME | RO | frame number of the frozen window |
+| 0x024 | EVT_STATUS | RO | [15:0] events queued, [31:16] events lost to a full FIFO (saturating; system reset clears) |
+| 0x025 | EVT_HEAD | RO | oldest event: [31] valid, [30] 1 open / 0 close, [8:0] bin |
+| 0x026 | EVT_FRAME | RO | oldest event's frame number [31:0] |
+| 0x027 | EVT_POP | WO | any write removes the oldest event |
+| 0x028 | HIST_WINDOW | RW | [8:0] first bin, [24:16] bin pairs per record (1–256; 0 or more reads as 256); reset 0 / 256 |
+| 0x029 | HIST_RECORDS | RO | records admitted since arming; reading latches HIST_LAST_FRAME |
+| 0x02A | HIST_LAST_FRAME | RO | frame [31:0] of the newest admitted record, as latched |
+| 0x02B | HIST_DONE | RO | records handed to the DMA since arming |
+| 0x02C | HIST_WINDOW_ACTIVE | RO | the window in force, same layout as HIST_WINDOW |
 | 0x600–0x7FF | SNAP_OUT[k] | RO | frozen frame's slice samples {Q,I} |
 | 0x1000–0x1FFF | SNAP_IN[n] | RO | frozen frame's 4096 input samples {Q,I} (12-bit, sign-extended), n = 0 oldest |
 | 0x200–0x3FF | LEVEL[k] | RO | [15:0] block level L, [31:16] floor N (Q8 log2) |
@@ -331,12 +384,20 @@ is 1.865 bins [harris78], and the label is then `dBFS/Hz` per PROTOCOL.md.
 
 ## 9. Clocks, CDC, resets (UG949)
 
-- **Clocks.** One crossing: axi_ad9361 l_clk → FCLK0 (100 MHz), through
-  xpm_fifo_async for the data and xpm_cdc_single for RUN. The overflow counter
-  returns through xpm_cdc_gray [ug953; ug949 "Multi-Bit CDC"]. The xfft, both
-  axi_dmac stream sides, the HP ports and the AXI-Lite slave all run on FCLK0, so
-  nothing else crosses. The XPM macros carry their own scoped constraints. No
-  clock groups or false paths were added.
+- **Clocks.** One asynchronous crossing: axi_ad9361 l_clk → FCLK0 (100 MHz),
+  through xpm_fifo_async for the data and xpm_cdc_single for RUN. The overflow
+  counter returns through xpm_cdc_gray [ug953; ug949 "Multi-Bit CDC"]. The xfft,
+  both axi_dmac stream sides, the HP ports and the AXI-Lite slave all run on
+  FCLK0. The XPM macros carry their own scoped constraints. No clock groups or
+  false paths were added.
+- **FIR clock (FIR2X).** An MMCME2 in chan_top multiplies FCLK0 to 200 MHz (VCO
+  1,000 MHz, feedback through a BUFG so the output is deskewed against the FCLK0
+  tree) [ug472]. Vivado auto-derives the generated clock from FCLK0 [ug903], so
+  every FCLK0 ↔ clk2x path is timed as synchronous with a 5 ns requirement: no
+  CDC logic and no exceptions are needed.
+  Only the eight DSP48E1 and their operand multiplexers run on clk2x. LOCKED
+  returns through xpm_cdc_single, and the datapath stays in soft reset until it is
+  set (STATUS bit 4).
 - **Resets.** Synchronous, active-high, and on control state only: counters,
   FSMs, valid bits. The datapath registers, DSP and BRAM contents have no reset
   [ug949 "When and Where to Use a Reset"].

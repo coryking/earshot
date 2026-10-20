@@ -232,23 +232,72 @@ The xfft bit-accurate C model ships with Vivado. The Python CLIs set its
 6. **Host channel filter.** It limits 12.5 kHz adjacent-channel rejection
    (−8.8 dB SNR with a 40 dB-stronger neighbour), whatever the channelizer does.
 
-## Next phase: freeing DSPs (planned, not started; waits for on-device validation)
+## Optimization phase (branch `fpga-optimize`): status and resume plan
 
-The DDR history ring already exists and uses **no** DSPs: `chan_hist_dma`, in
-cyclic mode, writes every bin of every frame. What gates it is the carve-out in
-the flashed image, not fabric. DSPs matter for 1024 bins. Where the 74 used DSPs
-are: axi_ad9361 RX 12 (4 channels × DC filter + IQ correction), rx_fir_decimator
-22, PFB FIR 16, power 2, xfft 22.
+**Paused 2026-10-19 ~21:50** by the orchestrator to give Vivado to the
+channelizer's critical-path rebuild. Resume only after the channelizer is live on
+the Pluto, one Vivado job at a time, under
+`systemd-run --user --scope --slice=radio-heavy.slice -p MemoryMax=12G`. Scope is
+hobby scale: the DDR history ring work (item 6) is **optional**, and 1024 bins
+(item 7) is **dropped** unless Cory asks for it. Stay off the Pluto, ESXi and
+vSwitchPluto until told otherwise (home-it-services#258).
 
-| Candidate | Expected saving | Notes |
+Where the 74 DSP48E1 of the baseline go: axi_ad9361 RX 12 (4 channels × DC filter
++ IQ correction), rx_fir_decimator 22, PFB FIR 16, power 2, xfft 22.
+
+### Measured so far
+
+| Item | Result | Evidence |
 | --- | --- | --- |
-| (1) remove rx_fir_decimator | 22 DSP, ~620 LUT, ~800 SRL | Breaks stock RX below 2.08 Msps |
-| (2) ADC_DCFILTER_DISABLE + ADC_IQCORRECTION_DISABLE | 12 DSP, ~600 LUT | Relies on AD9363 tracking. Re-run `real*`/straddle on captures taken with the cores off |
-| (3) symmetric FIR via DSP pre-adder | none for this structure | Symmetry pairs h[512t+j] with h[512(7−t)+511−j], i.e. different branches (u_j vs u_511−j). A branch has no equal coefficients to pre-add. Computing u_j and u_511−j together is possible but needs both data sets at once (twice the bank reads) |
-| (4) FIR at 200 MHz (FCLK1), 2 cycles/branch | 8 DSP | Adds a clock domain, tight on a 99.8%-packed −1 part |
-| (5) 3-mult twiddles | xfft already uses `use_mults_resources` (22 DSP) | A custom R2²SDF with 3-DSP multipliers needs 13 DSP and about 1k fewer LUT |
+| (1) remove rx_fir_decimator (`CHAN_OPTS=nodecim`) | NODECIM_RESULT | `~/.cache/amateur-radio-fpga/optimize/b_nodecim/pluto_chan/reports/` (baseline RTL from `src-base/`, only this bd change) |
+| (1) quality | None on the channelizer by construction: it taps axi_ad9361 directly, never through the decimator. Stock IIO RX: the decimator only acts when the driver sets its GPIO for rates below the AD9363 minimum (x8 FPGA decimation); libad9361 rates down to 520.8 ksps use the AD9363's own FIR and are unaffected. With it removed, an IIO request for the FPGA /8 rate would deliver undecimated data. | `projects/pluto_chan/system_bd.tcl` |
+| (2) symmetric FIR via the DSP48E1 pre-adder | **Not applicable, 0 DSP saved, no model change.** A pre-adder saves a multiply only when two samples meet the same coefficient in the same sum. In branch j the 8 taps h[512t+j] are distinct; the symmetric partner of h[n] is h[4095−n] = h[512(7−t)+(511−j)], in branch 511−j. Across frames a sample at window offset n meets h[n−256Δ]; meeting its partner would need n−256Δ = 4095−n, i.e. 2n = 4095+256Δ, even = odd. So no product pair exists to fold. | this table |
+| (3) FIR double-pumped at 200 MHz (`FIR2X=1`, 8 DSP instead of 16) | RTL done (`chan_pfb_fir.v` g_mul2x, MMCME2 in `chan_top.v`). Bit-exact by construction (exact integer sums, same p6 cycle as the 1x path). xsim `mixed` with FIR2X=1: all 48 history and 48 selected records matched the model word for word. Not yet built or timed. | sim log was in `optimize/sim/` (overwritten); rerun |
+| (5) ADC_DCFILTER/IQCORRECTION off (`CHAN_OPTS=nocorr`) | At driver defaults both cores are identity: ADI's `ad9361_conv.c` writes IQ coefficients 1.0/0.0 with IQCOR_ENB and leaves the DC filter off with offset 0; `ad_iqcor` at 0x4000 gives p[29:14] = input exactly, `ad_dcfilter` disabled gives input + 0. So removal changes no bits unless someone sets calibscale/calibphase/calibbias/HPF. Real-IQ DC spur and image numbers: CORR_RESULT. Build not run. | `/tmp/claude-1000/adisrc/` driver copies; `fpga/model/corrections.py` if present |
+| (4) xfft 3-mult twiddles | Already selected (`use_mults_resources`). A phase-factor-width / complex-mult sweep was started and stopped: XFFT_RESULT | `optimize/xfft_sweep/summary.csv` |
 
-1024 bins (25 kHz spacing, 50 ksps output at 2x oversampling) doubles the FIR
-banks and coefficient memory (+12 RAMB18), the FFT size and the activity RAMs. The
-MAC rate per input sample is unchanged: 1024 branch sums per 512-sample hop, still
-one per clock at 100 MHz.
+### Half-built (on this branch, simulated only partly)
+
+- **History ring additions** (all on top of the existing `chan_hist_dma` cyclic
+  ring): HIST_WINDOW (first bin + bin pairs, wraps past 511), HIST_RECORDS /
+  HIST_LAST_FRAME / HIST_DONE ring-position registers, an activity event FIFO
+  (EVT_STATUS/HEAD/FRAME/POP, 0x024–0x027) stamped with the deciding frame,
+  VERSION 1.1.0, STATUS bit 4 = FIR clock locked. Register map and sizing are in
+  `docs/design.md` sections 7–9. The ring-position registers checked out in the
+  `mixed` sim; the event check failed only on testbench bugs, since fixed
+  (`tb_chan.sv` now drains events concurrently through a semaphore-shared AXI
+  master and runs `mixed` unpolled to overflow the 512-entry FIFO), not yet rerun.
+- **Carve-out** grown from 64 to 160 MiB (`sw/make_frm.py`, 0x04000000–0x0DFFFFFF,
+  below the CMA pool at 0x0E400000). Not built into an image; CMA placement with
+  the bigger carve-out is unverified on hardware.
+- **chanctl**: reads the carve-out from the device tree; new `ring start|status|
+  read`, `events`, `preroll` commands. Cross-compiles; never run on hardware.
+- **PROTOCOL.md**: "FPGA channelizer source" section (frame number = sample
+  position, `hardware_counter: true`, GAP/overflow mapping, pre-roll from the
+  ring on open events). `sw/pluto_fpga_source.c` does not use the ring yet.
+- Testbench/model: `golden.py` emits events.hex and window/poll plusargs;
+  `sim_run.tcl` takes `TB_FIR2X=0|1`; `sim_setup.tcl` adds only tb_chan.sv.
+
+### Next steps, in order
+
+1. Rerun the regression (`FPGA_SIM=<own dir> fpga/scripts/run_sim.sh`), one chain
+   at a time: all 8 scenarios with FIR2X=1, then `mixed` and `random` with
+   `TB_FIR2X=0`. Fix anything the event/window checks find.
+2. Build `CHAN_OPTS=nocorr` from `optimize/src-base` (baseline RTL) to measure (5)
+   alone; then the final set from this branch (default `CHAN_OPTS="nodecim fir2x"`,
+   add `nocorr` only if the corrections analysis shows nothing lost). Sign-off
+   reports via `scripts/reports.tcl`; check that the clk2x paths meet 5 ns and that
+   report_methodology has nothing new beyond MMCM advisories.
+3. If staying hobby-scale, stop there for fabric: (1) + (3) take DSP from 74 to
+   44 without touching quality. Leave the ring additions in only if they built
+   clean; otherwise revert chan_pack/chan_activity/chan_top ring changes.
+4. On-device (after the channelizer agent is done and the Pluto is free): runtime
+   load, `chanctl info` (VERSION 0x00010100, STATUS bit 4), `snap` + `live_check.py
+   snap` bit-exact, read axi_ad9361 CHAN_CNTRL 0x79020400/0x79020404/0x79020414 to
+   confirm identity corrections; with a carve-out image, `chanctl ring start`,
+   `events`, `preroll`, and HIST_DROPS = 0 for minutes with the selected stream on.
+5. el-review on the diff (project FPGA personas in `.claude/agents/` plus
+   built-ins), then push and report on issue #1.
+
+Dropped: 1024 bins. Optional: the ring additions above and wiring pre-roll into
+`pluto_fpga_source.c`.

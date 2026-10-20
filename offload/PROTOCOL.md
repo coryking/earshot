@@ -132,3 +132,53 @@ controls, verifies readbacks, and only then acknowledges `receiver_state:
 "stopped"` with `streams: []`. A failed restoration must be reported as failure.
 The host must not label the hardware stopped until that acknowledgment arrives.
 No control command ever opens a transmit streaming device.
+
+## FPGA channelizer source: hardware counter and history pre-roll
+
+This section applies to a producer backed by the FPGA channelizer
+(`fpga/docs/design.md` sections 7 and 8, register map there). It adds no new
+message types or header fields; it pins down how existing ones are filled.
+
+**Sample positions.** Each coarse bin is one physical stream at `rate_hz` =
+input rate / 256 (100 ksps at 25.6 Msps). The channelizer numbers frames from 0
+at every RUN 0→1, and frame f is output sample f of every bin, so `first sample`
+is the frame number. A RUN restart, a retune or a rate change starts a new
+generation. CONFIG declares `hardware_counter: true`, because frame numbers come
+from the FPGA's own counters (SAMPLES counts every accepted ADC sample) and every
+loss is counted and flagged in hardware.
+
+**Losses.** A record whose header has flag bit 0 (frames of that stream were
+dropped before it) becomes a GAP for the missing frame interval, with the
+discontinuity flag on the next IQ message. Flag bit 1 (the frame's input window
+spans lost ADC samples) sets the overflow flag on the IQ message that carries
+those samples. Both are hardware facts, not transport events.
+
+**Pre-roll from the history ring.** The history stream writes every frame of a
+window of bins (HIST_WINDOW: first bin and bin pairs, default all 512) into a
+cyclic DDR ring, so the last ~0.78 s of every bin (~1 s of the 400 bins inside
+±10 MHz) is always available (sizing: design.md section 7). The activity
+detector reports each bin opening and closing as an event stamped with the frame
+that decided it (EVT_* registers). When a forwarded bin opens:
+
+1. The producer reads the open event (bin, frame F).
+2. It sends that bin's frames [F − P, F) from the ring as IQ messages flagged
+   pre-roll (`4`), oldest first, in the usual 10 ms chunks. P is the configured
+   pre-roll, capped at what the ring still holds.
+3. It continues with frames from F as ordinary live IQ, from the ring or from the
+   selected stream. Sample positions are frame numbers in both, so the host's
+   overlap and duplicate handling by sample position applies unchanged, and the
+   first live message clears the pre-roll flag.
+
+The detector decides per 2.56 ms block, so F trails the RF key-up by one to two
+blocks; P = 100–300 ms covers that, the transmitter's ramp and a DMR voice
+header. Pre-roll is history of the opening transmission, never an older one: P
+must stay below the time since the bin last closed (its previous close event).
+
+CONFIG additions for such a source:
+
+- `history: {first_bin, bins, ring_frames, pre_roll_ms}`: the ring's window, its
+  depth in frames, and the pre-roll the producer applies.
+- `profile.pre_roll_ms`: the same pre-roll, as for other sources.
+
+A source without the history ring keeps `pre_roll_ms: 0` and forwards from the
+live edge only.
