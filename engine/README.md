@@ -24,6 +24,15 @@ writable at startup), `--call-memory-mb 64`, `--max-decoders 8`. Channel ids are
 the calibrated nominal frequency, so changing the ppm re-keys channels and orphans saved
 catalog edits.
 
+With `--source` the engine keeps the link up for as long as it runs: it reconnects with backoff
+(1 s doubling to 15 s), treats a connection that sends nothing for 20 s as lost, and reports the
+link in `/api/status` under `link` (`state` connected, connecting, reconnecting or waiting;
+`offline_s`, `failures`, `last_error`, `next_retry_s`). `--receiver-status FILE` names the status
+file that `radio-supervisor` (`../supervisor/`) writes; when set, the engine dials the producer
+only while the file is fresh (under 45 s old) and says a producer is running, and `/api/status`
+carries the file under `receiver` (`null` without the flag; state `unknown` when the file is
+missing or unreadable).
+
 The HTTP/WebSocket server binds only `127.0.0.1:8810`. Without `--source`, a
 fixture TCP listener binds only `127.0.0.1:8811`. Startup does not connect to
 libiio or change receiver settings. The on-device producer owns acquisition,

@@ -31,14 +31,12 @@ fn with_user(c: &Value, user: &std::collections::BTreeMap<String, Value>) -> Val
     out
 }
 fn now_s() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64()
+    crate::link::now()
 }
-/// The browser validates this payload strictly (web/src/lib/radio.ts), so every numeric
+/// The browser validates this payload (web/src/api/engine.ts), so every numeric
 /// field must be a number even before the first CONFIG or sample arrives.
-fn status_json(app: &App) -> Value {
+pub(crate) fn status_json(app: &App) -> Value {
+    let receiver = app.receiver_status();
     let e = app.engine();
     let number = |v: &Value| json!(v.as_f64().unwrap_or(0.));
     let position = number(&e.source["source_position_s"]);
@@ -61,7 +59,7 @@ fn status_json(app: &App) -> Value {
         source["capabilities"]["fm_audio"] = json!(true);
         source["capabilities"]["per_client_listening"] = json!(true);
     }
-    json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":json!(app.calibration.true_hz(e.source["input_center_hz"].as_f64().unwrap_or(0.))),"center_reading_hz":number(&e.source["input_center_hz"]),"rate_hz":number(&e.source["input_rate_hz"]),"bandwidth_hz":number(&e.source["input_bandwidth_hz"]),"generation":e.generation,"channels":e.channels.values().map(|c| with_user(c, &e.store.user)).collect::<Vec<_>>(),"received_seconds":position,"source_position_s":position,"decode_latency_s":latency,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":number(&e.source["queue_depth"]),"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"calibration_ppm":app.calibration.ppm,"labels_loaded":app.labels.len(),"listeners":e.listeners.len(),"persistence":{"enabled":e.store.persistent(),"write_errors":e.store.io_errors()},"source":source})
+    json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":json!(app.calibration.true_hz(e.source["input_center_hz"].as_f64().unwrap_or(0.))),"center_reading_hz":number(&e.source["input_center_hz"]),"rate_hz":number(&e.source["input_rate_hz"]),"bandwidth_hz":number(&e.source["input_bandwidth_hz"]),"generation":e.generation,"channels":e.channels.values().map(|c| with_user(c, &e.store.user)).collect::<Vec<_>>(),"received_seconds":position,"source_position_s":position,"decode_latency_s":latency,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":number(&e.source["queue_depth"]),"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"calibration_ppm":app.calibration.ppm,"labels_loaded":app.labels.len(),"listeners":e.listeners.len(),"persistence":{"enabled":e.store.persistent(),"write_errors":e.store.io_errors()},"link":e.link.to_json(now_s()),"receiver":receiver,"source":source})
 }
 async fn status(State(app): State<App>) -> Json<Value> {
     Json(status_json(&app))
@@ -456,7 +454,9 @@ fn catalog_entry(id: &str, group: &[&Value], user: Option<&Value>) -> Value {
         .map(|l| l.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
     let description = text("description").unwrap_or_else(|| match (label_name.as_deref(), licensees.len()) {
-        (Some(_), 0) => detail.and_then(|d| d["kind"].as_str()).map(|k| format!("{k} channel (RadioReference)")).unwrap_or_default(),
+        // A label with no licensee says only what kind of channel it is; traffic_kind carries
+        // that, so the description stays empty rather than repeating it with source attribution.
+        (Some(_), 0) => String::new(),
         (Some(_), n) => format!("Licensed to {}{}", licensees.iter().take(2).copied().collect::<Vec<_>>().join(", "), if n > 2 { " and others" } else { "" }),
         _ => String::new(),
     });
@@ -642,6 +642,20 @@ async fn spectrum_bin(State(app): State<App>, Query(q): Query<SpectrumBin>) -> i
 }
 /// Listening areas. The parked block is the only one this producer can offer; choosing a
 /// different one needs a producer that retunes live (the ARM prototype cannot).
+/// A plain name for the parked block: what it is and where it sits, e.g. "Business radio,
+/// 453.8–454.6 MHz". Narrow blocks get one decimal so the two ends differ.
+pub(crate) fn block_name(center_hz: f64, span_hz: f64) -> String {
+    if center_hz <= 0. || span_hz <= 0. {
+        return "Business radio".into();
+    }
+    let (low, high) = ((center_hz - span_hz / 2.) / 1e6, (center_hz + span_hz / 2.) / 1e6);
+    let what = if (450. ..=470.).contains(&low) && (450. ..=470.).contains(&high) { "Business radio" } else { "Radio" };
+    if span_hz < 2e6 {
+        format!("{what}, {:.1}–{:.1} MHz", low, high)
+    } else {
+        format!("{what}, {:.0}–{:.0} MHz", low, high)
+    }
+}
 async fn blocks(State(app): State<App>) -> Json<Value> {
     let e = app.engine();
     let center = app.calibration.true_hz(e.source["input_center_hz"].as_f64().unwrap_or(0.));
@@ -650,7 +664,7 @@ async fn blocks(State(app): State<App>) -> Json<Value> {
         "current_id": "current",
         "blocks": [{
             "id": "current",
-            "name": "Current listening area",
+            "name": block_name(center, span),
             "description": "The block of spectrum the radio is parked on now.",
             "center_hz": center,
             "span_hz": span,
@@ -915,6 +929,10 @@ mod tests {
         let Json(b) = blocks(State(app.clone())).await;
         assert_eq!(b["current_id"], "current");
         assert_eq!(b["blocks"][0]["center_hz"], 454216998.0);
+        assert_eq!(b["blocks"][0]["name"], "Business radio, 453.8–454.6 MHz");
+        assert_eq!(block_name(454_206_415., 800_000.), "Business radio, 453.8–454.6 MHz");
+        assert_eq!(block_name(453_000_000., 6_000_000.), "Business radio, 450–456 MHz");
+        assert_eq!(block_name(0., 0.), "Business radio");
         assert_eq!(b["can_change"], false);
         assert!(set_block(State(app.clone()), Json(json!({"id":"current"}))).await.is_ok());
         assert_eq!(set_block(State(app), Json(json!({"id":"elsewhere"}))).await.unwrap_err().0, StatusCode::UNPROCESSABLE_ENTITY);

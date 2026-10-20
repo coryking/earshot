@@ -3,9 +3,9 @@ import type { ReactNode } from "react";
 import { navigate, openSheet, sheetStore } from "@/app/ui";
 import { cn } from "@/lib/utils";
 import { prefs, usePrefs, type ThemeChoice } from "@/state/prefs";
-import { useBackend, useBlocks, useHealth } from "@/state/radio";
+import { useBlocks, useHealth } from "@/state/radio";
 
-function Row({ icon, title, detail, onClick }: { icon: ReactNode; title: string; detail: string; onClick(): void }) {
+function Row({ icon, title, detail, onClick }: { icon: ReactNode; title: string; detail?: string; onClick(): void }) {
   return (
     <li>
       <button type="button" onClick={onClick} className="flex min-h-16 w-full items-center gap-3 px-4 py-2 text-left">
@@ -14,7 +14,7 @@ function Row({ icon, title, detail, onClick }: { icon: ReactNode; title: string;
         </span>
         <span className="min-w-0 flex-1">
           <span className="block text-heading">{title}</span>
-          <span className="block truncate text-sm text-muted-foreground">{detail}</span>
+          {detail && <span className="block truncate text-sm text-muted-foreground">{detail}</span>}
         </span>
         <ChevronRight className="size-4 text-muted-foreground" aria-hidden />
       </button>
@@ -26,12 +26,11 @@ export function RadioTab() {
   const health = useHealth();
   const { current } = useBlocks();
   const { theme, alertBusy, alertFollowed } = usePrefs();
-  const backend = useBackend();
   return (
     <div className="pb-6">
       <h1 className="px-4 pt-3 pb-2 text-[1.75rem] font-semibold text-heading">Radio</h1>
       <ul className="divide-y divide-border/60">
-        <Row icon={<Activity className="size-5" />} title="Is it working?" detail={health.detail} onClick={() => openSheet({ type: "status" })} />
+        <Row icon={<Activity className="size-5" />} title="Status" detail={health.detail} onClick={() => openSheet({ type: "status" })} />
         <Row
           icon={<MapPin className="size-5" />}
           title="Listening area"
@@ -47,7 +46,7 @@ export function RadioTab() {
         <Row
           icon={<Keyboard className="size-5" />}
           title="Keyboard shortcuts"
-          detail="For computers: press ? anywhere"
+          detail="?"
           onClick={() => sheetStore.set({ type: "shortcuts" })}
         />
       </ul>
@@ -58,7 +57,7 @@ export function RadioTab() {
             [
               ["dark", "Dark"],
               ["light", "Light"],
-              ["system", "Match device"],
+              ["system", "Auto"],
             ] as [ThemeChoice, string][]
           ).map(([value, label]) => (
             <label
@@ -85,16 +84,9 @@ export function RadioTab() {
         <Row
           icon={<Wrench className="size-5" />}
           title="Operator tools"
-          detail="Receiver settings and diagnostics, for Cory"
           onClick={() => navigate("operator")}
         />
       </ul>
-      {backend.mode === "demo" && (
-        <p className="mx-4 mt-4 text-sm text-muted-foreground">
-          You're looking at demo data. Names and calls are samples; open the page without <code>?demo</code> for the real
-          radio.
-        </p>
-      )}
     </div>
   );
 }

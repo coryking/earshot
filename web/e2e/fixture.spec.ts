@@ -7,26 +7,22 @@ test.skip(!process.env.FIXTURE_ENGINE, "needs the engine binary and the private 
 
 test("real engine: the fixture's DMR call shows up and plays", async ({ page }, info) => {
   await page.goto("/");
-  const row = page.getByRole("button", { name: /^Listen to Columbia Tower shared radio Talking/ });
+  const row = page
+    .getByRole("list", { name: "Talking now" })
+    .getByRole("button", { name: /^Listen to Columbia Tower shared radio/ });
   await expect(row).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Columbia Tower shared radio is talking.");
   await row.click();
   const player = page.getByRole("region", { name: "Player" });
-  await expect(player).toContainText("Live. Talking now.", { timeout: 15_000 });
+  await expect(player).toContainText("Live · talking", { timeout: 15_000 });
   await page.screenshot({ path: info.outputPath(`fixture-${info.project.name}.png`) });
   await expectAccessible(page, "live fixture");
 });
 
-test("real engine: calls heard this session appear in catch up without audio", async ({ page }) => {
+test("real engine: the call shows up in catch up", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("button", { name: /^Listen to Columbia Tower shared radio Talking/ })).toBeVisible({
-    timeout: 30_000,
-  });
-  // Wait for that call to end so the session log has a finished call.
-  await expect(page.getByRole("button", { name: /^Listen to Columbia Tower shared radio (just now|\d+ sec ago|Signal, no voice)/ })).toBeVisible({
-    timeout: 30_000,
-  });
+  await expect(
+    page.getByRole("list", { name: "Talking now" }).getByRole("button", { name: /^Listen to Columbia Tower shared radio/ }),
+  ).toBeVisible({ timeout: 30_000 });
   await page.goto("/#/catch-up");
-  await expect(page.getByText("doesn't record calls yet")).toBeVisible();
-  await expect(page.getByText(/no recording/).first()).toBeVisible();
+  await expect(page.getByText("Columbia Tower shared radio").first()).toBeVisible({ timeout: 30_000 });
 });

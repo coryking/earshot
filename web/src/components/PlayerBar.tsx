@@ -14,20 +14,20 @@ function clock(seconds: number) {
 
 export function playerLine(state: PlayerState, takenName: string | null): string {
   if (state.kind === "call")
-    return state.phase === "error" ? (state.error ?? "") : `Recorded call, ${clock(state.position)} of ${clock(state.duration)}`;
+    return state.phase === "error" ? (state.error ?? "") : `Recorded · ${clock(state.position)} / ${clock(state.duration)}`;
   switch (state.phase) {
     case "starting":
-      return "Connecting to the radio…";
+      return "Connecting…";
     case "waiting":
-      return "Live. Waiting for someone to talk.";
+      return "Live · quiet";
     case "playing":
-      return "Live. Talking now.";
+      return "Live · talking";
     case "reconnecting":
-      return "Reconnecting to the radio…";
+      return "Reconnecting…";
     case "taken":
-      return `Someone on another device switched the radio to ${takenName ?? "another channel"}.`;
+      return `Switched to ${takenName ?? "another channel"} elsewhere`;
     case "error":
-      return state.error ?? "Something went wrong.";
+      return state.error ?? "Something went wrong";
     default:
       return "";
   }

@@ -93,9 +93,9 @@ export function useSaveLabel() {
         if (sheet?.type === "source" && sheet.id === previousId) sheetStore.set({ type: "source", id: entry.id });
       }
       void client.invalidateQueries({ queryKey: keys.catalog });
-      toast.success(saved ? `Named it "${entry.name}"` : `Named it "${entry.name}" on this device`);
+      toast.success(saved ? "Saved" : "Saved on this device");
     },
-    onError: () => toast.error("Couldn't save the name. Try again."),
+    onError: () => toast.error("Couldn't save"),
   });
 }
 
@@ -136,26 +136,26 @@ function NameIt({ source }: { source: Source }) {
         id="name-it"
         value={name}
         onChange={(e) => setName(e.target.value)}
-        placeholder="Give it a name, like “Hotel security”"
+        placeholder="Name"
         className="h-11"
       />
       <Button type="submit" className="h-11" disabled={!name.trim() || save.isPending}>
-        Save name
+        Save
       </Button>
     </form>
   );
 }
 
-function encryptionText(source: Source) {
+function encryptionText(source: Source): string | null {
   switch (source.encryption) {
     case "encrypted":
-      return "Its calls are encrypted: scrambled so only their own radios can understand them. The radio can see when they talk, but nobody else can hear what's said, and that's by design.";
+      return "Encrypted: only their own radios can hear it";
     case "mixed":
-      return "Some calls are encrypted and can't be heard; the rest play normally.";
+      return "Some calls encrypted";
     case "clear":
-      return "Not encrypted, so calls play normally.";
+      return "No";
     default:
-      return "Not known yet whether its calls are encrypted.";
+      return null;
   }
 }
 
@@ -165,7 +165,6 @@ function SourceSheet({ id }: { id: string | null }) {
   const [player, state] = usePlayer();
   const { followed, muted } = usePrefs();
   const { calls } = useCalls();
-  const now = useNow();
   if (!source) return <Sheet open={false} title="">{null}</Sheet>;
   const playing = state.kind === "live" && state.sourceId === source.id;
   const mine = calls.filter((c) => c.sourceId === source.id).slice(0, 5);
@@ -207,11 +206,11 @@ function SourceSheet({ id }: { id: string | null }) {
         </Button>
       </div>
 
-      <h3 className="mt-6 text-base font-semibold text-heading">What is this?</h3>
-      <dl className="divide-y divide-border/60">
-        <Fact label="Probably used by">{source.probableUser ?? "Nobody knows yet. If you recognise it, give it a name."}</Fact>
-        <Fact label="What you'll hear">{source.trafficKind ?? "Not described yet."}</Fact>
-        <Fact label="Can you hear it?">{encryptionText(source)}</Fact>
+      <dl className="mt-4 divide-y divide-border/60">
+        {source.description && source.description !== source.summary && <Fact label="About">{source.description}</Fact>}
+        {source.probableUser && source.probableUser !== source.name && <Fact label="Used by">{source.probableUser}</Fact>}
+        {source.trafficKind && <Fact label="Traffic">{source.trafficKind}</Fact>}
+        {encryptionText(source) && <Fact label="Encrypted">{encryptionText(source)}</Fact>}
       </dl>
       {!source.named && <NameIt source={source} />}
 
@@ -220,7 +219,7 @@ function SourceSheet({ id }: { id: string | null }) {
           <h3 className="mt-6 text-base font-semibold text-heading">Recent calls</h3>
           <ul className="mt-1">
             {mine.map((c) => (
-              <CallItem key={c.id} call={c} name={source.name} now={now} compact />
+              <CallItem key={c.id} call={c} name={source.name} compact />
             ))}
           </ul>
         </>
@@ -228,7 +227,7 @@ function SourceSheet({ id }: { id: string | null }) {
 
       <Collapsible className="mt-6 mb-2">
         <CollapsibleTrigger className="flex min-h-11 items-center gap-1 text-sm text-muted-foreground">
-          <ChevronRight className="size-4" aria-hidden /> Technical details
+          <ChevronRight className="size-4" aria-hidden /> Details
         </CollapsibleTrigger>
         <CollapsibleContent>
           <dl className="tabular grid grid-cols-2 gap-x-4 text-sm">
@@ -251,14 +250,12 @@ function SourceSheet({ id }: { id: string | null }) {
 export function CallItem({
   call,
   name,
-  now,
   queueAfter,
   nameFor,
   compact,
 }: {
   call: Call;
   name: string;
-  now: number;
   /** Calls to play after this one, worked out when tapped. */
   queueAfter?: () => Call[];
   nameFor?: (sourceId: string) => string;
@@ -292,11 +289,9 @@ export function CallItem({
       <span className="min-w-0 flex-1">
         {!compact && <span className="block truncate font-medium text-heading">{name}</span>}
         <span className="tabular block text-sm text-muted-foreground">
-          {when}, {relativeTime(call.startedAt, now)}
-          {seconds !== null && `, ${seconds} s`}
-          {live && ", still talking"}
-          {call.encrypted && ", private (encrypted)"}
-          {!call.audioUrl && !call.encrypted && !live && ", no recording"}
+          {when}
+          {seconds !== null && ` · ${seconds} s`}
+          {live && " · live"}
         </span>
         {call.transcript && <span className="mt-0.5 block text-sm text-foreground">“{call.transcript}”</span>}
       </span>
@@ -313,7 +308,7 @@ function BlockSheet({ open }: { open: boolean }) {
     mutationFn: (id: string) => backend.selectBlock(id),
     onSuccess: () => {
       void client.invalidateQueries();
-      toast.success("Changed the listening area");
+      toast.success("Area changed");
       sheetStore.set(null);
       setChoice(null);
     },
@@ -321,11 +316,7 @@ function BlockSheet({ open }: { open: boolean }) {
   });
   const chosen = blocks.find((b) => b.id === choice);
   return (
-    <Sheet
-      open={open}
-      title="Listening area"
-      description="The radio hears one stretch of the airwaves at a time. Everything in your list comes from the area below; switching means the old area's channels go quiet until you switch back."
-    >
+    <Sheet open={open} title="Listening area">
       <ul role="radiogroup" aria-label="Listening areas" className="space-y-2">
         {blocks.map((b) => {
           const active = b.id === current?.id;
@@ -345,9 +336,8 @@ function BlockSheet({ open }: { open: boolean }) {
               >
                 <span className="flex items-baseline justify-between gap-2">
                   <span className="font-semibold text-heading">{b.name}</span>
-                  {active && <span className="text-xs text-ok">Listening here</span>}
+                  {active && <span className="text-xs text-ok">Current</span>}
                 </span>
-                <span className="mt-0.5 block text-sm text-muted-foreground">{b.description}</span>
                 <span className="tabular mt-1 block text-xs text-muted-foreground">
                   {formatMHz(b.centerHz - b.spanHz / 2, 1)}–{formatMHz(b.centerHz + b.spanHz / 2, 1)} MHz
                 </span>
@@ -356,11 +346,6 @@ function BlockSheet({ open }: { open: boolean }) {
           );
         })}
       </ul>
-      {!canChange && (
-        <p className="mt-3 text-sm text-muted-foreground">
-          Changing areas from here isn't available yet. Cory can change it from the operator tools.
-        </p>
-      )}
       {chosen && chosen.id !== current?.id && (
         <Button size="lg" className="mt-4 h-12 w-full" onClick={() => change.mutate(chosen.id)} disabled={change.isPending}>
           Switch to {chosen.name}
@@ -371,7 +356,7 @@ function BlockSheet({ open }: { open: boolean }) {
 }
 
 function AlertsSheet({ open }: { open: boolean }) {
-  const { alertFollowed, alertBusy, followed } = usePrefs();
+  const { alertFollowed, alertBusy } = usePrefs();
   const permission = typeof Notification === "undefined" ? "unsupported" : Notification.permission;
   const enable = async (key: "alertFollowed" | "alertBusy", value: boolean) => {
     if (value && typeof Notification !== "undefined" && Notification.permission === "default")
@@ -379,34 +364,28 @@ function AlertsSheet({ open }: { open: boolean }) {
     prefs.set(key, value);
   };
   return (
-    <Sheet open={open} title="Alerts" description="Get a notification on this device when something happens.">
+    <Sheet open={open} title="Alerts">
       <div className="divide-y divide-border/60">
         <label className="flex min-h-14 items-center gap-3 py-2">
           <span className="flex-1">
-            <span className="block text-heading">A channel I follow gets busy</span>
-            <span className="block text-sm text-muted-foreground">
-              Three or more calls within ten minutes.{" "}
-              {followed.length ? `You follow ${followed.length}.` : "Follow channels with the star to use this."}
-            </span>
+            <span className="block text-heading">Followed channel gets busy</span>
+            <span className="tabular block text-sm text-muted-foreground">3+ calls in 10 min</span>
           </span>
           <Switch checked={alertFollowed} onCheckedChange={(v) => void enable("alertFollowed", v)} />
         </label>
         <label className="flex min-h-14 items-center gap-3 py-2">
           <span className="flex-1">
-            <span className="block text-heading">It's much busier than normal</span>
-            <span className="block text-sm text-muted-foreground">When talk across the area spikes above what's usual for the time.</span>
+            <span className="block text-heading">Busier than usual</span>
           </span>
           <Switch checked={alertBusy} onCheckedChange={(v) => void enable("alertBusy", v)} />
         </label>
       </div>
-      <p className="mt-4 flex gap-2 text-sm text-muted-foreground">
-        <BellRing className="mt-0.5 size-4 shrink-0" aria-hidden />
-        {permission === "denied"
-          ? "Notifications are blocked for this site. Allow them in your browser settings to get alerts."
-          : permission === "unsupported"
-            ? "This browser can't show notifications, so alerts appear inside the app only."
-            : "Alerts work while this page is open. Alerts with the app closed or the phone locked need the radio box to send them, which is coming."}
-      </p>
+      {permission === "denied" && (
+        <p className="mt-4 flex gap-2 text-sm text-muted-foreground">
+          <BellRing className="mt-0.5 size-4 shrink-0" aria-hidden />
+          Notifications blocked in browser settings
+        </p>
+      )}
     </Sheet>
   );
 }
@@ -416,17 +395,20 @@ function StatusSheet({ open }: { open: boolean }) {
   const status = useStatus();
   const now = useNow(1000);
   const last = status.data?.last_samples_at ? status.data.last_samples_at * 1000 : null;
-  const title = { listening: "It's working", paused: "The radio is paused", offline: "The radio isn't connected" }[health.state];
+  const title =
+    health.state === "offline" && health.reconnecting
+      ? "Reconnecting"
+      : { listening: "Working", paused: "Paused", offline: "Not connected" }[health.state];
   return (
     <Sheet open={open} title={title} description={health.detail}>
       <dl className="divide-y divide-border/60">
-        <Fact label="Last heard from the receiver">{last ? relativeTime(last, now) : "Not yet"}</Fact>
-        <Fact label="Channels it knows about">{status.data?.channels.length ?? 0}</Fact>
+        <Fact label="Last data">{last ? relativeTime(last, now) : "Not yet"}</Fact>
+        <Fact label="Channels">{status.data?.channels.length ?? 0}</Fact>
       </dl>
       {health.state === "offline" && health.raw && (
         <Collapsible className="mt-3">
           <CollapsibleTrigger className="flex min-h-11 items-center gap-1 text-sm text-muted-foreground">
-            <ChevronRight className="size-4" aria-hidden /> What the receiver said
+            <ChevronRight className="size-4" aria-hidden /> Error
           </CollapsibleTrigger>
           <CollapsibleContent>
             <p className="rounded-lg bg-secondary p-3 text-sm break-words">{health.raw}</p>
@@ -491,18 +473,12 @@ function PlayerSheet({ open }: { open: boolean }) {
         )}
         {source && (
           <Button variant="ghost" size="lg" className="h-12" onClick={() => openSheet({ type: "source", id: source.id })}>
-            What is this?
+            About
           </Button>
         )}
       </div>
-      {state.kind === "live" && (
-        <p className="mt-5 text-sm text-muted-foreground">
-          {state.background === true && "Keeps playing with the screen locked. "}
-          {state.background === false &&
-            "This browser won't keep playing with the screen locked, so leave the screen on while you listen. "}
-          The radio plays one live channel at a time for everyone in the house, so if someone else picks a channel,
-          you'll see it here.
-        </p>
+      {state.kind === "live" && state.background === false && (
+        <p className="mt-5 text-sm text-muted-foreground">Keep the screen on</p>
       )}
     </Sheet>
   );
@@ -512,16 +488,10 @@ function UnnamedSheet({ frequencyHz }: { frequencyHz: number | null }) {
   return (
     <Sheet
       open={frequencyHz !== null}
-      title={frequencyHz ? `Signal at ${formatMHz(frequencyHz)} MHz` : "Signal"}
-      description="Nothing the radio has identified is on this spot."
+      title={frequencyHz ? `${formatMHz(frequencyHz)} MHz` : "Signal"}
+      description="Unidentified"
     >
-      <p className="text-foreground">
-        A bright line here is someone transmitting, but the radio hasn't picked it out as a channel yet. Once it hears
-        a voice call on it, it will show up in your list, and you can listen and name it.
-      </p>
-      <p className="mt-3 text-sm text-muted-foreground">
-        Faint steady lines are usually data or the radio's own noise. Plain (non-digital) voice can't be played yet.
-      </p>
+      {null}
     </Sheet>
   );
 }

@@ -43,11 +43,7 @@ export function CatchUpScreen({ timeline, embedded = false }: { timeline: boolea
     <div className="pb-4">
       <div className="px-4 pt-3">
         <Title className="text-[1.75rem] leading-tight font-semibold text-heading">Catch up</Title>
-        <p className="mt-1 text-muted-foreground">
-          {visible.length
-            ? `${visible.length} call${visible.length === 1 ? "" : "s"} recently, newest first.`
-            : "No calls yet."}
-        </p>
+        {!visible.length && <p className="mt-1 text-muted-foreground">No calls yet</p>}
       </div>
       <div className="flex flex-wrap items-center gap-2 px-4 py-3">
         <div role="group" aria-label="Show" className="flex rounded-lg bg-secondary p-1">
@@ -80,12 +76,8 @@ export function CatchUpScreen({ timeline, embedded = false }: { timeline: boolea
           </Button>
         )}
       </div>
-      {!recorded && (
-        <p className="mx-4 mb-3 rounded-lg bg-secondary p-3 text-sm text-secondary-foreground">
-          {failed
-            ? "Couldn't load recorded calls from the radio box; trying again. Meanwhile this shows calls heard while this page has been open."
-            : "The radio box doesn't record calls yet, so this list only shows calls heard while this page has been open, without audio."}
-        </p>
+      {!recorded && failed && (
+        <p className="mx-4 mb-3 rounded-lg bg-secondary p-3 text-sm text-secondary-foreground">Couldn't load recordings</p>
       )}
       {timeline && visible.length > 0 && <Timeline calls={visible} sources={sources} now={now} />}
       {[...groups.entries()].map(([group, items]) => (
@@ -99,7 +91,6 @@ export function CatchUpScreen({ timeline, embedded = false }: { timeline: boolea
                 key={c.id}
                 call={c}
                 name={nameOf(c.sourceId)}
-                now={now}
                 queueAfter={() => playable.slice(playable.indexOf(c) + 1)}
                 nameFor={nameOf}
               />
@@ -107,9 +98,6 @@ export function CatchUpScreen({ timeline, embedded = false }: { timeline: boolea
           </ul>
         </section>
       ))}
-      {onlyFollowed && !visible.length && (
-        <p className="px-4 text-sm text-muted-foreground">Follow channels with the star to see just their calls here.</p>
-      )}
     </div>
   );
 }

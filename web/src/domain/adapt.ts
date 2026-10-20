@@ -29,19 +29,20 @@ const modeWords: Record<Mode, string> = {
   dmr: "Digital voice",
   nxdn: "Digital voice",
   p25: "Digital voice",
-  unknown: "Not identified yet",
+  unknown: "Unidentified",
 };
 
 /** What an unlabelled source is, as far as anyone can tell. */
 const unlabelledWords: Record<Mode, string> = {
-  fm: "Unknown business radio",
-  dmr: "Unknown business radio",
-  nxdn: "Unknown business radio",
-  p25: "Unknown radio system",
-  unknown: "Unidentified signal",
+  fm: "Unknown",
+  dmr: "Unknown",
+  nxdn: "Unknown",
+  p25: "Unknown",
+  unknown: "Unidentified",
 };
 
 export const PRIVATE_SUMMARY = "Private (encrypted)";
+export const CONTROL_SUMMARY = "Data, no voice";
 
 /** A name for something nobody has labelled: its number, like an unknown caller. */
 export function numberName(frequencyHz: number, slot: number | null, mode: Mode) {
@@ -59,17 +60,39 @@ export interface SourceOptions {
 }
 
 /** What the engine can play right now, judged by the channel's own protocol. */
-function listenableFor(channel: EngineChannel | undefined, encryption: Encryption, options: SourceOptions): Listenable {
+function listenableFor(
+  channel: EngineChannel | undefined,
+  encryption: Encryption,
+  control: boolean,
+  options: SourceOptions,
+): Listenable {
   if (encryption === "encrypted")
-    return { ok: false, reason: "Private: these calls are encrypted, so nobody outside the group can hear them." };
-  if (!channel) return { ok: false, reason: "The radio isn't picking this up right now." };
+    return { ok: false, reason: "Encrypted. Can't be heard." };
+  if (control)
+    return { ok: false, reason: "Data only. No voices." };
+  if (!channel) return { ok: false, reason: "Not on the air right now." };
   if (channel.in_range === false)
-    return { ok: false, reason: "Outside the part of the airwaves the radio is listening to." };
+    return { ok: false, reason: "Out of range." };
   const mode = modeOf(channel.protocol);
-  if (mode === "unknown") return { ok: false, reason: "The radio is still working out what kind of signal this is." };
+  // An unidentified channel can still be listened to: the engine keeps it pinned and plays
+  // whatever voice it identifies there.
   if (mode === "fm" && !options.fmAudio)
-    return { ok: false, reason: "Plain voice channels can't be played yet; the radio only plays digital voice so far." };
+    return { ok: false, reason: "Analog voice can't play yet." };
   return { ok: true };
+}
+
+/** Labels and catalog entries that say a channel is a trunking control channel. */
+function isControl(channel: EngineChannel, entry?: WireCatalogEntry): boolean {
+  return channel.label_kind === "control" || /control/i.test(entry?.traffic_kind ?? "");
+}
+
+/** Strong evidence of a real transmission: decoded speech, never RF energy alone. */
+function speaking(channel: EngineChannel, control: boolean): boolean {
+  return channel.speech_active === true && !control;
+}
+
+function heard(channel: EngineChannel): boolean {
+  return channel.decoded === true || channel.last_heard != null;
 }
 
 /** Catalog entries match channels this close (kHz raster plus receiver LO error). */
@@ -103,12 +126,13 @@ function named(
     covered.find((c) => c.speech_active) ?? covered.find((c) => modeOf(c.protocol) !== "unknown") ?? covered[0];
   const mode = modeOf(primary.protocol) !== "unknown" ? modeOf(primary.protocol) : entry.mode;
   const encryption = entry.encryption;
+  const control = covered.some((c) => isControl(c, entry));
   return {
     id,
     kind: entry.kind,
     name: entry.name + suffix,
     named: true,
-    summary: encryption === "encrypted" ? PRIVATE_SUMMARY : entry.description || modeWords[mode],
+    summary: encryption === "encrypted" ? PRIVATE_SUMMARY : control ? CONTROL_SUMMARY : entry.description || modeWords[mode],
     description: entry.description,
     probableUser: entry.probable_user ?? null,
     trafficKind: entry.traffic_kind ?? null,
@@ -119,13 +143,16 @@ function named(
     system: entry.system ?? null,
     talkgroupId: entry.talkgroup_id ?? null,
     channelIds: [primary.id, ...covered.filter((c) => c !== primary).map((c) => c.id)],
-    // Encrypted calls never decode to speech; a carrier is the only sign of a call.
-    talking: covered.some((c) => c.speech_active === true || (encryption === "encrypted" && c.rf_active === true)),
+    // Encrypted calls never decode to speech; their carrier is judged with hysteresis in domain/calm.ts.
+    talking: covered.some((c) => speaking(c, control)),
     signal: covered.some((c) => c.rf_active === true),
+    control,
+    heardVoice: !control && covered.some(heard),
     levelDb: primary.level_db ?? null,
-    lastHeardAt: maxOf(covered.map((c) => seconds(c.last_heard) ?? seconds(c.last_rf))),
+    lastHeardAt: maxOf(covered.map((c) => seconds(c.last_heard))),
+    lastSignalAt: maxOf(covered.map((c) => seconds(c.last_rf))),
     inRange: covered.some((c) => c.in_range !== false),
-    listenable: listenableFor(primary, encryption, options),
+    listenable: listenableFor(primary, encryption, control, options),
   };
 }
 
@@ -172,12 +199,14 @@ export function toSources(
     if (claimed.has(channel.id)) continue;
     const mode = modeOf(channel.protocol);
     const slot = channel.slot ?? null;
+    const control = isControl(channel);
+    const label = channel.display_name?.trim() || null;
     sources.push({
       id: channelKey(channel.frequency_hz, slot, mode),
       kind: "channel",
-      name: numberName(channel.frequency_hz, slot, mode),
-      named: false,
-      summary: unlabelledWords[mode],
+      name: label ?? numberName(channel.frequency_hz, slot, mode),
+      named: label !== null,
+      summary: control ? CONTROL_SUMMARY : unlabelledWords[mode],
       description: "",
       probableUser: null,
       trafficKind: null,
@@ -188,12 +217,15 @@ export function toSources(
       system: null,
       talkgroupId: null,
       channelIds: [channel.id],
-      talking: channel.speech_active === true,
+      talking: speaking(channel, control),
       signal: channel.rf_active === true,
+      control,
+      heardVoice: !control && heard(channel),
       levelDb: channel.level_db ?? null,
-      lastHeardAt: seconds(channel.last_heard) ?? seconds(channel.last_rf),
+      lastHeardAt: seconds(channel.last_heard),
+      lastSignalAt: seconds(channel.last_rf),
       inRange: channel.in_range !== false,
-      listenable: listenableFor(channel, "unknown", options),
+      listenable: listenableFor(channel, "unknown", control, options),
     });
   }
   return sources;
@@ -204,32 +236,91 @@ function maxOf(values: (number | null)[]): number | null {
   return real.length ? Math.max(...real) : null;
 }
 
-/** Followed sources pinned first (like pinned chats), then talking, listenable, recent; out of range last. */
+/**
+ * The meaningful order for the home list: followed first (like pinned chats),
+ * then most recently heard voice, then frequency. Deliberately ignores live RF
+ * and talking state, which change by the second; the home screen also freezes
+ * this order while it's on screen (domain/calm.ts).
+ */
 export function rankSources(sources: Source[], followed: ReadonlySet<string>): Source[] {
-  return [...sources].sort((a, b) => {
-    const score = (s: Source) =>
-      (followed.has(s.id) ? 8 : 0) + (s.talking ? 4 : 0) + (s.listenable.ok ? 2 : 0) + (s.inRange ? 1 : 0);
-    return (
-      score(b) - score(a) ||
+  return [...sources].sort(
+    (a, b) =>
+      Number(followed.has(b.id)) - Number(followed.has(a.id)) ||
+      Number(b.inRange) - Number(a.inRange) ||
       (b.lastHeardAt ?? 0) - (a.lastHeardAt ?? 0) ||
       (a.frequencyHz ?? 0) - (b.frequencyHz ?? 0) ||
-      a.id.localeCompare(b.id)
-    );
-  });
+      a.id.localeCompare(b.id),
+  );
 }
+
+/** Why the receiver is away, in words for the household, from what the supervisor reported. */
+function receiverReason(receiver: EngineStatus["receiver"]): string | null {
+  if (!receiver) return null;
+  // A borrowed or cleanly stopped supervisor writes its status once and goes quiet: the age of
+  // that file says nothing about whether it is alive.
+  if (receiver.state === "borrowed") return "In use for a test.";
+  if (receiver.state === "stopped") return "Switched off.";
+  if (receiver.fresh === false)
+    return "Receiver supervisor isn't running.";
+  switch (receiver.state) {
+    case "starting":
+    case "running":
+      return "Starting up.";
+    case "waiting":
+      switch (receiver.reason) {
+        case "lock-held":
+          return "In use for a test.";
+        case "wrong-image":
+          return "Running test software.";
+        case "unreachable":
+          return "Receiver box isn't answering.";
+        case "producer-failed":
+          return "Restarting.";
+        case "radio-state":
+          return "Waiting on the receiver.";
+      }
+  }
+  return null;
+}
+
+function duration(seconds: number): string {
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  return minutes % 60 === 0 ? `${hours} h` : `${hours} h ${minutes % 60} min`;
+}
+
+/** After this long without the receiver the page stops calling it a blip. */
+const LONG_OUTAGE_S = 600;
 
 export function healthOf(status: EngineStatus | undefined, connected: boolean): Health {
   if (!status)
-    return { state: "offline", detail: "Can't reach the radio. Check that the receiver box is on.", raw: null };
+    return { state: "offline", detail: "Can't reach the radio.", raw: null };
+  const link = status.link;
+  // "connected" is only the TCP link: until the first CONFIG arrives the engine is still not receiving.
+  if (link?.mode === "tcp" && (link.state !== "connected" || status.state !== "receiving")) {
+    const reason = receiverReason(status.receiver);
+    const away = link.offline_s ?? 0;
+    const detail =
+      away >= LONG_OUTAGE_S
+        ? `Offline for ${duration(away)}.${reason ? ` ${reason}` : ""}`
+        : (reason ?? "Usually back within a minute.");
+    return {
+      state: "offline",
+      reconnecting: true,
+      detail,
+      raw: link.last_error ?? status.error ?? null,
+    };
+  }
   if (status.state === "receiving" && status.mode === "live")
     return connected
-      ? { state: "listening", detail: "The radio is on and listening." }
-      : { state: "offline", detail: "Lost touch with the radio. Reconnecting.", raw: null };
+      ? { state: "listening", detail: "Receiving." }
+      : { state: "offline", detail: "Reconnecting.", raw: null };
   if (status.state === "error")
     return {
       state: "offline",
-      detail: "The radio lost its feed. It usually reconnects by itself within a minute; if it doesn't, Cory may need to restart it.",
+      detail: "Lost the receiver feed. Usually back within a minute.",
       raw: status.error ?? null,
     };
-  return { state: "paused", detail: "The radio is paused. Nothing new will come in until it's started again." };
+  return { state: "paused", detail: "Paused." };
 }

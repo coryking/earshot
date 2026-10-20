@@ -49,11 +49,11 @@ const SILENT_SOCKET_MS = 3000;
 
 function monitorMessage(error: unknown): string {
   if (error instanceof BackendError) {
-    if (error.status === 422) return "Can't play this one yet: the radio can't decode this kind of signal.";
-    if (error.status === 404) return "That channel isn't being picked up any more.";
-    return `The radio said no: ${error.message}`;
+    if (error.status === 422) return "Can't play this kind of signal yet.";
+    if (error.status === 404) return "Channel gone.";
+    return error.message;
   }
-  return "Couldn't reach the radio. Check the connection and try again.";
+  return "Can't reach the radio.";
 }
 
 /**
@@ -265,7 +265,7 @@ export class Player {
       await unlocked;
     } catch {
       if (intent === this.intent)
-        this.patch({ phase: "error", error: "Audio didn't start on this device. Tap the channel to try again." });
+        this.patch({ phase: "error", error: "Audio didn't start. Tap to retry." });
       return;
     }
     if (intent !== this.intent) return;
@@ -474,10 +474,10 @@ export class Player {
     const callId = call.id;
     try {
       void Promise.resolve(element.play()).catch(() => {
-        if (this.state.get().callId === callId) this.patch({ phase: "error", error: "Tap play again to allow audio." });
+        if (this.state.get().callId === callId) this.patch({ phase: "error", error: "Tap play again." });
       });
     } catch {
-      this.patch({ phase: "error", error: "This browser can't play recordings." });
+      this.patch({ phase: "error", error: "Can't play recordings here." });
     }
   }
 
@@ -491,7 +491,7 @@ export class Player {
     element.onended = () => this.advance();
     element.onerror = () => {
       if (this.state.get().kind === "call" && element.getAttribute("src"))
-        this.patch({ phase: "error", error: "This recording couldn't be played." });
+        this.patch({ phase: "error", error: "Couldn't play." });
     };
     return element;
   }
