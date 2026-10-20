@@ -65,7 +65,7 @@ fn real_adjacent_channels_are_not_polluted_by_strong_neighbors() {
     let mut meter = SliceMeter::new(
         raster
             .iter()
-            .map(|&f| TargetBand { logical: f as u64, offset_hz: f - center, bandwidth_hz: 11_250., active: false, level_dbfs: 0. })
+            .map(|&f| TargetBand::new(f as u64, f - center, 11_250.))
             .collect(),
     );
     // Many short packets average the same way the live meter would.
@@ -169,5 +169,47 @@ fn fm_noise_squelch_on_real_channels() {
         } else {
             assert!(median_noise < 700., "{name}: median noise {median_noise} Hz not quieted");
         }
+    }
+}
+
+/// Carrier estimation plus the ppm correction against channels known from RadioReference
+/// (docs/rf-environment-seattle.md): after correcting the Pluto's 23.3 ppm the measured
+/// carriers must land on the listed raster channels.
+#[test]
+#[ignore = "needs RADIO_WIDEBAND_WAV (private recording)"]
+fn measured_carriers_snap_to_known_channels_after_ppm_correction() {
+    use radio_engine::freq::{Calibration, snap};
+    let path = std::env::var("RADIO_WIDEBAND_WAV").expect("RADIO_WIDEBAND_WAV");
+    let calibration = Calibration { ppm: 23.3 };
+    // (rough reading in Hz, listed channel in Hz)
+    for (rough, listed) in [
+        (454_217_000., 454_206_250.), // Day Wireless Capacity Max control
+        (454_029_000., 454_018_750.), // TRBOWEST control
+        (454_260_500., 454_250_000.), // FleetNet NXDN control
+    ] {
+        let center = rough - 20_000.;
+        let mut meter = SliceMeter::new(vec![TargetBand::new(rough as u64, rough - center, 11_250.)]);
+        // Calls come and go: walk 3 s segments of the 30 s recording until the channel is heard.
+        for start in (0..27).step_by(3) {
+            let samples = read_iq(&path, start as f64, 3.);
+            let iq = slice(&samples, center);
+            for packet in iq[2000..].chunks_exact(10_000) {
+                meter.measure(packet, 100_000., 32768.);
+            }
+            if meter.targets[0].carrier_updates >= 20 {
+                break;
+            }
+        }
+        let target = &meter.targets[0];
+        let offset = target.carrier_hz.unwrap_or_else(|| panic!("{rough}: no carrier ({} updates)", target.carrier_updates));
+        let reading = center + offset;
+        let truth = calibration.true_hz(reading);
+        let (snapped, did_snap) = snap(truth);
+        println!(
+            "rough {rough} -> reading {reading:.0}, corrected {truth:.0} ({:+.0} Hz from listed {listed}), snapped {snapped} ({did_snap}), {} updates, snr {:.1} dB",
+            truth - listed, target.carrier_updates, target.snr_db
+        );
+        assert!(did_snap && snapped == listed, "{rough}: {snapped} != {listed}");
+        assert!((truth - listed).abs() < 600., "{rough}: {:.0} Hz from the listed channel", truth - listed);
     }
 }

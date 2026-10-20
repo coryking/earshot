@@ -322,6 +322,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--center", type=int, default=454216998)
     ap.add_argument("--rate", type=int, default=800000)
     ap.add_argument("--port", type=int, default=18810)
+    ap.add_argument(
+        "--freq-correction-ppm", type=float, default=23.3, help="Pluto reads this many ppm high"
+    )
+    ap.add_argument("--labels", type=Path, default=Path("engine/data/channel-labels.json"))
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--lock-timeout", type=float, default=3600)
     ap.add_argument(
@@ -524,6 +528,10 @@ def run_session(args: argparse.Namespace, out: Path, report: dict, failures: lis
                 "8",
                 "--web-dir",
                 str(args.web_dir),
+                "--freq-correction-ppm",
+                str(args.freq_correction_ppm),
+                "--labels",
+                str(args.labels),
             ],
             stdout=engine_log,
             stderr=subprocess.STDOUT,

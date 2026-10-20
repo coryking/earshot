@@ -2,6 +2,7 @@ use crate::{
     codec::Decoder,
     dsp::{ChannelDsp, ChannelSpec, SliceMeter, TargetBand},
     fm::{FmAudio, Squelch},
+    freq::{Calibration, Labels, label_fields, snap},
     wire::{DISCONTINUITY, Frame, OVERFLOW, PREROLL, START},
 };
 use anyhow::{Context, Result};
@@ -32,6 +33,9 @@ pub struct App {
     pub(crate) audio: broadcast::Sender<Audio>,
     pub(crate) events: broadcast::Sender<Value>,
     pub(crate) max_decoders: usize,
+    /// ppm correction from the Pluto's readings to true frequencies.
+    pub(crate) calibration: Calibration,
+    pub(crate) labels: Arc<Labels>,
 }
 #[derive(Clone)]
 pub(crate) struct Audio {
@@ -59,6 +63,9 @@ pub(crate) struct Engine {
 }
 impl App {
     pub fn new(max_decoders: usize) -> Self {
+        Self::configured(max_decoders, 0., Labels::default())
+    }
+    pub fn configured(max_decoders: usize, ppm: f64, labels: Labels) -> Self {
         let (audio, _) = broadcast::channel(16);
         let (events, _) = broadcast::channel(256);
         Self {
@@ -83,7 +90,13 @@ impl App {
             audio,
             events,
             max_decoders,
+            calibration: Calibration { ppm },
+            labels: Arc::new(labels),
         }
+    }
+    /// The calibrated, raster-snapped frequency for a device reading, and whether it snapped.
+    pub(crate) fn display_frequency(&self, reading_hz: f64) -> (f64, bool) {
+        snap(self.calibration.true_hz(reading_hz))
     }
     pub fn error(&self, msg: String) {
         let mut e = self.inner.lock().unwrap();
@@ -123,7 +136,7 @@ fn selected_logical(e: &Engine) -> Option<u64> {
     e.selected
         .as_deref()
         .and_then(|id| e.channels.get(id))
-        .and_then(|c| c["frequency_hz"].as_f64())
+        .and_then(|c| c["logical_hz"].as_f64())
         .map(|v| v.round() as u64)
 }
 fn channel_id(frequency: f64, protocol: &str, slot: u8) -> String {
@@ -143,8 +156,19 @@ fn refresh_rf(c: &mut Value) {
         c["slice_level_db"].clone()
     };
 }
-fn make_channel(stream: u32, frequency: f64, protocol: &str, slot: u8) -> Value {
-    json!({"id":channel_id(frequency,protocol,slot),"stream_id":stream,"frequency_hz":frequency,"protocol":protocol,"slot":slot,"kind":"unidentified","rf_active":false,"slice_rf_active":false,"slice_level_db":null,"slice_targets":1,"target_rf_active":null,"target_level_db":null,"decoded":false,"speech_active":false,"last_heard":null,"last_rf":null,"level_db":null,"audio_seconds":0.,"sequence":0,"in_range":true,"available":false})
+fn make_channel(app: &App, stream: u32, reading: f64, protocol: &str, slot: u8) -> Value {
+    let (frequency, snapped) = app.display_frequency(reading);
+    let mut channel = make_channel_json(stream, reading, frequency, snapped, protocol, slot);
+    if let (Some(fields), Some(extra)) = (
+        channel.as_object_mut(),
+        label_fields(app.labels.lookup(app.calibration.true_hz(reading))).as_object(),
+    ) {
+        fields.extend(extra.clone());
+    }
+    channel
+}
+fn make_channel_json(stream: u32, reading: f64, frequency: f64, snapped: bool, protocol: &str, slot: u8) -> Value {
+    json!({"id":channel_id(frequency,protocol,slot),"stream_id":stream,"frequency_hz":frequency,"frequency_snapped":snapped,"logical_hz":reading,"reading_hz":reading,"carrier_offset_hz":null,"protocol":protocol,"slot":slot,"kind":"unidentified","rf_active":false,"slice_rf_active":false,"slice_level_db":null,"slice_targets":1,"target_rf_active":null,"target_level_db":null,"decoded":false,"speech_active":false,"last_heard":null,"last_rf":null,"level_db":null,"audio_seconds":0.,"sequence":0,"in_range":true,"available":false})
 }
 /// Whether a logical target's channel lies inside its physical slice. Without a declared
 /// slice rate and center there is nothing to check.
@@ -335,7 +359,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
             }
             for (protocol, slot, audio, confirmed) in heard {
                 let speech = confirmed && !audio.is_empty() && frame.flags & PREROLL == 0;
-                let id = channel_id(frequency, protocol, slot);
+                let id = channel_id(app.display_frequency(frequency).0, protocol, slot);
                 let mut e = app.inner.lock().unwrap();
                 if frame.generation != e.generation
                     || !e.active
@@ -354,7 +378,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                     .find(|c| {
                         c["stream_id"] == stream
                             && c["id"] != id.as_str()
-                            && c["frequency_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
+                            && c["logical_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
                     })
                     .cloned();
                 let speech = speech && physical.is_some();
@@ -365,7 +389,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                     let entry = e
                         .channels
                         .entry(id.clone())
-                        .or_insert_with(|| make_channel(stream, frequency, protocol, slot));
+                        .or_insert_with(|| make_channel(&app, stream, frequency, protocol, slot));
                     if let Some(sibling) = &sibling {
                         for key in [
                             "slice_rf_active",
@@ -376,6 +400,12 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                             "rf_active",
                             "last_rf",
                             "level_db",
+                            "carrier_offset_hz",
+                            "frequency_hz",
+                            "frequency_snapped",
+                            "label",
+                            "label_kind",
+                            "label_detail",
                         ] {
                             entry[key] = sibling[key].clone();
                         }
@@ -404,7 +434,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                 let pinned_unknown = e.selected.as_deref().is_some_and(|s| {
                     e.channels.get(s).is_some_and(|c| {
                         c["protocol"] == "Unknown"
-                            && c["frequency_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
+                            && c["logical_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
                     })
                 });
                 let selected = e.selected.as_deref() == Some(&id) || pinned_unknown;
@@ -495,7 +525,7 @@ fn schedule(
                 .channels
                 .values()
                 .find(|c| {
-                    c["frequency_hz"].as_f64().map(|v| v.round() as u64) == Some(stream)
+                    c["logical_hz"].as_f64().map(|v| v.round() as u64) == Some(stream)
                         && c["in_range"] == true
                         && c["decoded"] == true
                 })
@@ -526,7 +556,7 @@ fn schedule(
                 pin_pending,
                 forwarded: declared || received,
                 rf_active: e.channels.values().any(|c| {
-                    c["frequency_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
+                    c["logical_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
                         && c["rf_active"] == true
                 }),
                 cost: workers
@@ -566,7 +596,7 @@ fn schedule(
     e.source["skipped_streams"] = json!(configs.len() - workers.len());
     e.source["metadata_only_streams"] = json!(metadata_only);
     for c in e.channels.values_mut() {
-        let logical = c["frequency_hz"]
+        let logical = c["logical_hz"]
             .as_f64()
             .map(|v| v.round() as u64)
             .unwrap_or(0);
@@ -575,31 +605,47 @@ fn schedule(
     }
     Ok(())
 }
-/// One spectrum meter per physical stream that carries several logical targets.
-/// Targets already measured keep their open/closed state across CONFIG refreshes.
+/// One spectrum meter per physical stream: per-target activity for shared slices, and the
+/// carrier estimate for every target. Targets already measured keep their state across
+/// CONFIG refreshes.
 fn rebuild_meters(configs: &HashMap<u64, Value>, meters: &mut HashMap<u32, SliceMeter>) {
     let mut grouped: HashMap<u32, Vec<TargetBand>> = HashMap::new();
     for (&logical, cfg) in configs {
         let stream = cfg["stream_id"].as_u64().unwrap_or(0) as u32;
         let spec = spec_for(cfg["protocol"].as_str().unwrap_or("Unknown"));
-        grouped.entry(stream).or_default().push(TargetBand {
-            logical,
-            offset_hz: 0.,
-            bandwidth_hz: spec.band_hz,
-            active: meters
-                .get(&stream)
-                .and_then(|m| m.targets.iter().find(|t| t.logical == logical))
-                .is_some_and(|t| t.active),
-            level_dbfs: f64::NEG_INFINITY,
-        });
+        let mut target = TargetBand::new(logical, 0., spec.band_hz);
+        if let Some(old) = meters
+            .get(&stream)
+            .and_then(|m| m.targets.iter().find(|t| t.logical == logical))
+        {
+            target.active = old.active;
+            target.carrier_hz = old.carrier_hz;
+            target.carrier_updates = old.carrier_updates;
+        }
+        grouped.entry(stream).or_default().push(target);
     }
     meters.clear();
     for (stream, mut targets) in grouped {
-        if targets.len() > 1 {
-            targets.sort_by_key(|t| t.logical);
-            meters.insert(stream, SliceMeter::new(targets));
-        }
+        targets.sort_by_key(|t| t.logical);
+        meters.insert(stream, SliceMeter::new(targets));
     }
+}
+/// Record a measured carrier on a channel entry: the calibrated frequency (snapped to the
+/// raster when close), and the plain-name label for that frequency. Returns whether the
+/// published frequency or label changed.
+fn apply_carrier(app: &App, c: &mut Value, reading_hz: f64, offset_hz: f64) -> bool {
+    let truth = app.calibration.true_hz(reading_hz);
+    let (frequency, snapped) = snap(truth);
+    let label = app.labels.lookup(truth).cloned();
+    let before = (c["frequency_hz"].clone(), c["label"].clone());
+    c["carrier_offset_hz"] = json!(offset_hz.round());
+    c["carrier_hz"] = json!(truth.round());
+    c["frequency_hz"] = json!(frequency);
+    c["frequency_snapped"] = json!(snapped);
+    if let (Some(fields), Some(extra)) = (c.as_object_mut(), label_fields(label.as_ref()).as_object()) {
+        fields.extend(extra.clone());
+    }
+    before != (c["frequency_hz"].clone(), c["label"].clone())
 }
 pub fn attach_control(stream: &TcpStream, app: &App) -> Result<()> {
     let mut writer = stream.try_clone()?;
@@ -780,15 +826,15 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                         continue;
                     }
                     let slot = cfg["slot"].as_u64().unwrap_or(1) as u8;
-                    let id = channel_id(frequency, protocol, slot);
+                    let id = channel_id(app.display_frequency(frequency).0, protocol, slot);
                     let channel = e
                         .channels
                         .entry(id)
-                        .or_insert_with(|| make_channel(stream, frequency, protocol, slot));
+                        .or_insert_with(|| make_channel(&app, stream, frequency, protocol, slot));
                     channel["stream_id"] = json!(stream);
                     channel["in_range"] = json!(true);
                     for channel in e.channels.values_mut() {
-                        if channel["frequency_hz"] == frequency {
+                        if channel["logical_hz"] == frequency {
                             channel["stream_id"] = json!(stream);
                             channel["in_range"] = json!(true);
                             channel["slice_targets"] = json!(target_count);
@@ -866,17 +912,23 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                         for target in &meter.targets {
                             for c in e.channels.values_mut().filter(|c| {
                                 c["stream_id"] == frame.stream_id
-                                    && c["frequency_hz"].as_f64().map(|v| v.round() as u64)
+                                    && c["logical_hz"].as_f64().map(|v| v.round() as u64)
                                         == Some(target.logical)
                             }) {
                                 let before = c["rf_active"].clone();
                                 c["target_rf_active"] = json!(target.active);
                                 c["target_level_db"] = json!(target.level_dbfs);
                                 refresh_rf(c);
+                                let moved = match target.carrier_hz {
+                                    Some(offset) if target.carrier_updates >= 3 => {
+                                        apply_carrier(&app, c, frame.center_hz as f64 + offset, offset)
+                                    }
+                                    _ => false,
+                                };
                                 if c["rf_active"] == true {
                                     c["last_rf"] = json!(now());
                                 }
-                                if c["rf_active"] != before {
+                                if c["rf_active"] != before || moved {
                                     let _ = app.events.send(json!({"type":"channel","generation":frame.generation,"channel":c}));
                                 }
                             }
@@ -1334,6 +1386,51 @@ mod tests {
         assert!(!audio_ids.is_empty(), "no audio reached the listener");
         assert!(audio_ids.iter().all(|id| id == "454000000-Unknown-1"), "{audio_ids:?}");
     }
+    /// With the Pluto's ppm correction, a measured carrier is published at its true raster
+    /// frequency and carries the plain-name label for that channel.
+    #[test]
+    fn measured_carrier_is_published_calibrated_snapped_and_labeled() {
+        let labels = Labels::load(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/channel-labels.json")).unwrap();
+        let app = App::configured(8, 23.3, labels);
+        let config = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,
+            "streams":[{"stream_id":1,"center_hz":454217000u64,"target_hz":454217000u64,"rate_hz":25000,"protocol":"Unknown","iq_forwarded":true}],"psd":{"unit":"dBFS"}});
+        let mut bytes = Vec::new();
+        let mut cfg = frame(4, 1, 0, 0, 0, config.to_string().into_bytes());
+        cfg.center_hz = 454_217_000;
+        cfg.write(&mut bytes).unwrap();
+        let mut sample = 0u64;
+        for packet in 0..8u64 {
+            let mut iq = frame(1, 1, 1, packet + 1, sample, fm_stream_payload(true, sample));
+            iq.center_hz = 454_217_000;
+            iq.write(&mut bytes).unwrap();
+            sample += 2500;
+        }
+        let (release, rx) = mpsc::channel();
+        let runner = {
+            let app = app.clone();
+            let input = HeldOpen { data: std::io::Cursor::new(bytes), release: rx };
+            thread::spawn(move || ingest(input, app))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let channel = loop {
+            let c = app.inner.lock().unwrap().channels.values().find(|c| c["label"].is_string()).cloned();
+            if c.is_some() || Instant::now() > deadline {
+                break c;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        release.send(()).unwrap();
+        runner.join().unwrap().unwrap();
+        let channel = channel.expect("labeled channel");
+        assert_eq!(channel["frequency_hz"], 454_206_250.0);
+        assert_eq!(channel["frequency_snapped"], true);
+        assert_eq!(channel["label"], "Day Wireless (business trunked)");
+        assert_eq!(channel["label_kind"], "control");
+        assert_eq!(channel["reading_hz"], 454_217_000.0);
+        assert!(channel["carrier_offset_hz"].as_f64().unwrap().abs() < 100.);
+        // The id was fixed from the calibrated nominal frequency, not the reading.
+        assert_eq!(channel["id"], "454206250-Unknown-1");
+    }
     #[test]
     fn rf_active_metadata_only_streams_do_not_starve_forwarded_stream() {
         let candidates = vec![
@@ -1522,7 +1619,7 @@ mod tests {
                 e.channels
                     .values()
                     .filter(|c| c["protocol"] == "DMR" && c["slot"] == 1)
-                    .map(|c| (c["frequency_hz"].as_f64().unwrap() as u64, c.clone()))
+                    .map(|c| (c["logical_hz"].as_f64().unwrap() as u64, c.clone()))
                     .collect()
             };
             if snap.get(&454_087_500).is_some_and(|c| c["rf_active"] == true)
@@ -1568,7 +1665,7 @@ mod tests {
         ingest(&bytes[..], app.clone()).unwrap();
         let e = app.inner.lock().unwrap();
         assert_eq!(e.channels.len(), 2);
-        assert_eq!(e.channels["454029223-Unknown-1"]["in_range"], false);
-        assert_eq!(e.channels["452685504-Unknown-1"]["in_range"], true);
+        assert_eq!(e.channels["454029200-Unknown-1"]["in_range"], false);
+        assert_eq!(e.channels["452685500-Unknown-1"]["in_range"], true);
     }
 }

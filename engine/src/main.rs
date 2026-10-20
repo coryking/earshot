@@ -32,6 +32,13 @@ enum Command {
         source: Option<String>,
         #[arg(long)]
         web_dir: Option<std::path::PathBuf>,
+        /// How many ppm HIGH the radio reads (true = reading / (1 + ppm*1e-6)). Pluto Rev.B on
+        /// wigglebutt measured +23.3 (ATSC pilots, RadioReference raster fit).
+        #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
+        freq_correction_ppm: f64,
+        /// Plain-name channel labels (engine/data/channel-labels.json).
+        #[arg(long)]
+        labels: Option<std::path::PathBuf>,
     },
     /// Offline fixture only: mono 48 kHz discriminator signed16 raw input; '-' for stdin.
     Probe {
@@ -101,12 +108,23 @@ async fn main() -> Result<()> {
             max_decoders,
             source,
             web_dir,
+            freq_correction_ppm,
+            labels,
         } => {
             anyhow::ensure!(
                 (3..=64).contains(&max_decoders),
                 "max-decoders must be 3..64"
             );
-            let app = App::new(max_decoders);
+            anyhow::ensure!(
+                freq_correction_ppm.abs() <= 500.,
+                "freq-correction-ppm must be within +-500"
+            );
+            let labels = match labels {
+                Some(path) => radio_engine::freq::Labels::load(&path)
+                    .with_context(|| format!("cannot load labels {}", path.display()))?,
+                None => Default::default(),
+            };
+            let app = App::configured(max_decoders, freq_correction_ppm, labels);
             let ingest_app = app.clone();
             thread::spawn(move || {
                 let run = || -> Result<()> {

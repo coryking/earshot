@@ -267,6 +267,31 @@ pub struct TargetBand {
     pub bandwidth_hz: f64,
     pub active: bool,
     pub level_dbfs: f64,
+    /// Power-weighted spectral centroid of this packet's occupied bins, Hz from the slice
+    /// center; `None` when the band holds no carrier.
+    pub centroid_hz: Option<f64>,
+    /// Running estimate of the carrier's offset from the slice center (Hz), smoothed over
+    /// packets whose in-band power was well above noise.
+    pub carrier_hz: Option<f64>,
+    /// Packets that contributed to `carrier_hz`.
+    pub carrier_updates: u32,
+    /// In-band power over the slice noise reference, dB, from the latest packet.
+    pub snr_db: f64,
+}
+impl TargetBand {
+    pub fn new(logical: u64, offset_hz: f64, bandwidth_hz: f64) -> Self {
+        Self {
+            logical,
+            offset_hz,
+            bandwidth_hz,
+            active: false,
+            level_dbfs: f64::NEG_INFINITY,
+            centroid_hz: None,
+            carrier_hz: None,
+            carrier_updates: 0,
+            snr_db: 0.,
+        }
+    }
 }
 /// Per-target RF activity from the shared slice's spectrum. It does not depend on
 /// codec admission, and it is separate from the physical slice's activity: a
@@ -285,6 +310,15 @@ impl SliceMeter {
     /// DB above the slice noise to open a target, and to keep it open.
     const OPEN_DB: f64 = 8.;
     const CLOSE_DB: f64 = 5.;
+    /// Carrier estimation window around the nominal frequency: half the 12.5 kHz raster, so
+    /// a neighboring channel's emissions (which begin 6.875 kHz out) stay outside.
+    const CARRIER_WINDOW_HZ: f64 = 6250.;
+    /// Bins at least 4 dB over the noise estimate count toward the centroid.
+    const CARRIER_BIN_RATIO: f64 = 2.512;
+    /// Minimum in-band excess for any centroid, and for it to move the tracked estimate.
+    const CARRIER_MIN_DB: f64 = 6.;
+    const CARRIER_TRACK_DB: f64 = 10.;
+    const CARRIER_SMOOTH: f64 = 0.25;
     pub fn new(targets: Vec<TargetBand>) -> Self {
         let window: Vec<f32> = (0..Self::FFT)
             .map(|i| {
@@ -353,6 +387,32 @@ impl SliceMeter {
             }
             let noise = noise_bin * bins.max(1) as f64;
             let ratio_db = 10. * (total.max(1e-18) / noise).log10();
+            // Carrier estimate: power-weighted centroid over bins that stand 4 dB above noise.
+            let (mut weight, mut moment) = (0., 0.);
+            for (k, p) in power.iter().enumerate() {
+                let f = if k < Self::FFT / 2 {
+                    k as f64 * bin_hz
+                } else {
+                    (k as f64 - Self::FFT as f64) * bin_hz
+                };
+                if (f - target.offset_hz).abs() <= Self::CARRIER_WINDOW_HZ
+                    && *p > noise_bin * Self::CARRIER_BIN_RATIO
+                {
+                    weight += p - noise_bin;
+                    moment += f * (p - noise_bin);
+                }
+            }
+            target.snr_db = ratio_db;
+            target.centroid_hz = (weight > 0. && ratio_db > Self::CARRIER_MIN_DB).then(|| moment / weight);
+            if let Some(c) = target.centroid_hz
+                && ratio_db >= Self::CARRIER_TRACK_DB
+            {
+                target.carrier_hz = Some(match target.carrier_hz {
+                    None => c,
+                    Some(old) => old + Self::CARRIER_SMOOTH * (c - old),
+                });
+                target.carrier_updates += 1;
+            }
             target.active = if target.active {
                 ratio_db > Self::CLOSE_DB
             } else {
@@ -497,6 +557,32 @@ mod tests {
         assert!(power(&leak[leak.len() / 2..]) > 1e5, "wide filter unexpectedly rejects 6.25 kHz");
     }
     /// The ARM gate emits blocks of at most 256 samples; the meter must still work on them.
+    /// The carrier estimate must land within 150 Hz of the truth wherever in the +-3 kHz
+    /// range the carrier sits inside its channel, for voice-modulated FM at 2.5 kHz deviation.
+    #[test]
+    fn carrier_estimate_locates_an_off_center_fm_carrier() {
+        let rate = 100000.;
+        for truth in [-3000., -1200., 0., 800., 3000.] {
+            let mut meter = SliceMeter::new(vec![band(0., 11250.)]);
+            let mut iq = noise(40000, 100., 21);
+            for (s, c) in iq.iter_mut().zip(fm(40000, rate, truth, 3000., 1000., 2500.)) {
+                *s += c;
+            }
+            for packet in iq.chunks(10000) {
+                assert!(meter.measure(packet, rate, 32768.));
+            }
+            let est = meter.targets[0].carrier_hz.expect("carrier");
+            println!("carrier truth {truth} est {est:.0}");
+            assert!((est - truth).abs() < 150., "truth {truth}, estimate {est}");
+            assert!(meter.targets[0].carrier_updates >= 3);
+        }
+        // Noise alone never produces a tracked carrier.
+        let mut meter = SliceMeter::new(vec![band(0., 11250.)]);
+        for seed in 0..10 {
+            meter.measure(&noise(10000, 100., 50 + seed), rate, 32768.);
+        }
+        assert!(meter.targets[0].carrier_hz.is_none());
+    }
     #[test]
     fn slice_meter_accumulates_short_packets() {
         let rate = 100000.;
@@ -549,7 +635,17 @@ mod tests {
         }
     }
     fn band(offset_hz: f64, bandwidth_hz: f64) -> TargetBand {
-        TargetBand { logical: offset_hz as u64, offset_hz, bandwidth_hz, active: false, level_dbfs: f64::NEG_INFINITY }
+        TargetBand {
+            logical: offset_hz as u64,
+            offset_hz,
+            bandwidth_hz,
+            active: false,
+            level_dbfs: f64::NEG_INFINITY,
+            centroid_hz: None,
+            carrier_hz: None,
+            carrier_updates: 0,
+            snr_db: 0.,
+        }
     }
     #[test]
     fn fft_matches_direct_dft() {

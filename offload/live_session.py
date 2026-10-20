@@ -54,6 +54,8 @@ def main() -> int:
     ap.add_argument("--center", type=int, default=454216998)
     ap.add_argument("--rate", type=int, default=800000)
     ap.add_argument("--port", type=int, default=8810)
+    ap.add_argument("--freq-correction-ppm", type=float, default=23.3)
+    ap.add_argument("--labels", type=Path, default=Path("engine/data/channel-labels.json"))
     ap.add_argument("--lock-timeout", type=float, default=3600)
     ap.add_argument("--allow-firmware", action="store_true")
     args = ap.parse_args()
@@ -117,6 +119,10 @@ def main() -> int:
                         "8",
                         "--web-dir",
                         str(args.web_dir),
+                        "--freq-correction-ppm",
+                        str(args.freq_correction_ppm),
+                        "--labels",
+                        str(args.labels),
                     ],
                     stdout=log,
                     stderr=subprocess.STDOUT,
