@@ -108,13 +108,13 @@ def alias_cmd() -> dict:
     rows = []
     for off in [0, 6250, 12500, 18750, 25000, 31250, 40000, 50000, 60000, 68750, 75000,
                 100000, 150000, 250000, 1_000_000, 5_000_000, 12_000_000]:
-        r = pfb_fixed(_tone(off, n, amp, cfg) + 0.0, cfg)
+        r = pfb_fixed(_tone(off, n, amp, cfg) + 0.0, cfg, require_bit_exact=True)
         y0 = (r.y_re[:, 0] + 1j * r.y_im[:, 0])[8:]
         p = np.mean(np.abs(y0) ** 2)
         rows.append({"offset_hz": off, "bin0_rel_db": float(10 * np.log10(p / ref_p + 1e-30)),
                      "aliases_into_protected_band": bool(off >= ALIAS_EDGE_HZ)})
     # quantization floor of the fixed-point path with zero input
-    z = pfb_fixed(np.zeros(n, complex), cfg)
+    z = pfb_fixed(np.zeros(n, complex), cfg, require_bit_exact=True)
     worst = max(r["bin0_rel_db"] for r in rows if r["aliases_into_protected_band"])
     out = {"tone_amplitude_adc": amp, "rows": rows, "worst_alias_db": worst,
            "zero_input_max_abs_y": int(np.abs(z.y_re).max())}
@@ -223,14 +223,13 @@ def straddle_cmd(seconds: float = 0.25) -> dict:
 
             row["float_snr_db"] = snr(pfb_float(xq, None, cfg)[:, k])
             row["arm_c_filter_snr_db"] = snr(pfb_float(xq, c_reference_prototype(cfg.n, cfg.taps), cfg)[:, k])
-            r = pfb_fixed(xq, cfg)
+            r = pfb_fixed(xq, cfg, require_bit_exact=True)
             row["fixed_snr_db"] = snr((r.y_re[:, k] + 1j * r.y_im[:, k]).astype(complex))
             row["fixed_16bit_snr_db"] = snr((r.out_re[:, k] + 1j * r.out_im[:, k]).astype(complex))
             row["fpga_loss_db"] = row["float_snr_db"] - row["fixed_16bit_snr_db"]
             row["out_saturated"] = int(r.out_sat[:, k].sum())
             cases.append(row)
             print(json.dumps(row, default=float), flush=True)
-    # host-filter rejection of a lone interferer at +12.5 kHz (no desired signal)
     out = {"seconds": seconds, "strong_rms_adc": strong, "noise_rms_per_component": 1.5,
            "note": "SNR = recovered desired vs. the clean fixture after the host filter "
                    "(engine/src/dsp.rs equivalent), best lag and complex gain.",
@@ -250,7 +249,7 @@ def real_cmd(seconds: float = 0.1) -> dict:
     x = signal.resample_poly(x20, 32, 25)
     xq = np.rint(x.real) + 1j * np.rint(x.imag)
     t0 = time.time()
-    r = pfb_fixed(xq, cfg)
+    r = pfb_fixed(xq, cfg, require_bit_exact=True)
     yf = pfb_float(xq, cfg=cfg)
     elapsed = time.time() - t0
     g = fixed_gain(cfg)
@@ -297,7 +296,7 @@ def real_dmr_cmd(seconds: float = 0.5) -> dict:
     k = int(np.round(off / cfg.bin_hz)) % cfg.n
     resid = off - (k - cfg.n) * cfg.bin_hz
     res = {}
-    r = pfb_fixed(xq, cfg)
+    r = pfb_fixed(xq, cfg, require_bit_exact=True)
     for label, y in [("float", pfb_float(xq, cfg=cfg)[:, k]),
                      ("fixed", (r.y_re[:, k] + 1j * r.y_im[:, k]).astype(complex)),
                      ("fixed_16bit", (r.out_re[:, k] + 1j * r.out_im[:, k]).astype(complex))]:
@@ -403,7 +402,6 @@ def activity_real(seconds: float, det: act.DetectorConfig, cfg: Config) -> dict:
     fs = 6e6
     n = int(round(fs / cfg.bin_hz))
     chunk = int(fs)                         # 1 s
-    hist = n * cfg.taps - cfg.hop * 0
     st = act.initial_state(n, det)
     tail = np.zeros(0, complex)
     levels, floors, actives = [], [], []

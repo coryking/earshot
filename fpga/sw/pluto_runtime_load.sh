@@ -17,19 +17,22 @@ PLUTO=${PLUTO:-root@192.168.10.10}
 LOCK=/tmp/pluto-radio.lock
 STATE=${STATE:-$HOME/.cache/amateur-radio-fpga/pluto-session}
 mkdir -p "$STATE"
-SSHOPT=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR)
+SSHOPT=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10
+        -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o LogLevel=ERROR)
 p() { sshpass -p analog ssh "${SSHOPT[@]}" "$PLUTO" "$@"; }
 put() { sshpass -p analog scp -O "${SSHOPT[@]}" "$1" "$PLUTO:$2"; }
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$STATE/session.log"; }
 
-exec 9>"$LOCK"
+exec 9>>"$LOCK"
 flock -w 900 9 || { echo "could not get $LOCK"; exit 1; }
 
-PHY='d=$(grep -l ad9361-phy /sys/bus/iio/devices/iio:device*/name | xargs dirname)'
+PHY='d=$(grep -l ad9361-phy /sys/bus/iio/devices/iio:device*/name | xargs dirname); [ -n "$d" ] || { echo "no ad9361-phy" >&2; exit 1; }'
 ATTRS="in_voltage_sampling_frequency in_voltage_rf_bandwidth out_altvoltage0_RX_LO_frequency in_voltage0_gain_control_mode in_voltage0_hardwaregain in_voltage_filter_fir_en out_voltage_filter_fir_en out_voltage_sampling_frequency"
 
 save_settings() {
-  p "$PHY; for a in $ATTRS; do echo \"\$a=\$(cat \$d/\$a)\"; done" > "$1"
+  p "$PHY; for a in $ATTRS; do echo \"\$a=\$(cat \$d/\$a)\"; done" > "$1.tmp"
+  grep -q '^in_voltage_sampling_frequency=[0-9]' "$1.tmp" || { log "settings read failed"; exit 1; }
+  mv "$1.tmp" "$1"
   log "saved settings to $1: $(tr '\n' ' ' < "$1")"
 }
 
@@ -82,15 +85,37 @@ case "${1:-}" in
     log "load $(basename "$bin") sha256 $(sha256sum "$bin" | cut -c1-64)"
     save_settings "$STATE/settings-before.txt"
     put "$bin" /lib/firmware/pluto_chan.bin
-    log "on-device sha256: $(p sha256sum /lib/firmware/pluto_chan.bin | cut -c1-64)"
+    local_sha=$(sha256sum "$bin" | cut -c1-64)
+    dev_sha=$(p sha256sum /lib/firmware/pluto_chan.bin | cut -c1-64)
+    [ "$local_sha" = "$dev_sha" ] || { log "sha256 mismatch on device ($dev_sha); aborting before unbind"; exit 1; }
     if [ -n "$tool" ]; then put "$tool" /tmp/chanctl; p chmod +x /tmp/chanctl; fi
-    p "$UNBIND"
-    log "PL drivers unbound; programming"
-    p 'echo 0 > /sys/class/fpga_manager/fpga0/flags && echo pluto_chan.bin > /sys/class/fpga_manager/fpga0/firmware; cat /sys/class/fpga_manager/fpga0/state; dmesg | tail -3'
-    log "rebinding"
-    p "$BIND" | tee -a "$STATE/session.log"
+    # Unbind, program, verify and rebind run as one detached script on the Pluto, so
+    # an ssh drop cannot strand it half-way. If programming does not reach
+    # 'operating', it reboots (stock PL) instead of rebinding drivers onto dead fabric.
+    p "cat > /tmp/pl_swap.sh <<'EOS'
+[ -f /tmp/pl_is_chan ] && /tmp/chanctl stop
+rm -f /tmp/pl_is_chan
+$UNBIND
+echo 0 > /sys/class/fpga_manager/fpga0/flags
+echo pluto_chan.bin > /sys/class/fpga_manager/fpga0/firmware || true
+state=\$(cat /sys/class/fpga_manager/fpga0/state)
+echo \"fpga0 state: \$state\"
+if [ \"\$state\" != operating ]; then echo 'programming failed: rebooting to stock'; sync; reboot; exit 1; fi
+$BIND
+touch /tmp/pl_is_chan
+echo PL_SWAP_DONE
+EOS
+setsid sh /tmp/pl_swap.sh > /tmp/pl_swap.log 2>&1 < /dev/null &"
+    log "PL swap running on the device"
+    for _ in $(seq 60); do
+      sleep 2
+      out=$(p 'cat /tmp/pl_swap.log' 2>/dev/null || true)
+      case "$out" in *PL_SWAP_DONE*|*"programming failed"*) break;; esac
+    done
+    echo "$out" | tee -a "$STATE/session.log"
+    case "$out" in *PL_SWAP_DONE*) ;; *) log "PL swap did not complete; run '$0 restore' after the device is back"; exit 1;; esac
     apply_settings "$STATE/settings-before.txt"
-    [ -n "$tool" ] && p /tmp/chanctl info | tee -a "$STATE/session.log"
+    if [ -n "$tool" ]; then p /tmp/chanctl info | tee -a "$STATE/session.log"; fi
     ;;
   restore)
     log "restore: reboot to the stock image"

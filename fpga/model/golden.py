@@ -9,7 +9,9 @@ Vector files (hex, one value per line) consumed by fpga/tb/tb_chan.sv:
   level.hex       expected LEVEL window {floor, level} after the last complete block
   active.hex      expected ACTIVE bitmap, 16 x 32-bit words
   psd.hex         expected PSD window after the last complete long-PSD period
-  params.txt      scenario parameters for the testbench (plusargs)
+  mask.hex        FORWARD_MASK, 16 x 32-bit words
+  params.json     scenario summary (expected counters)
+  plusargs.txt    the same values as testbench plusargs
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 # Small detector constants so a simulation covers several blocks, sub-window
 # rotations and long-PSD periods; the RTL takes the same values as parameters.
-SIM_DET = act.DetectorConfig(block_log2=2, sub_blocks=3, sub_windows=4, bias_q8=0,
+SIM_DET = act.DetectorConfig(block_log2=2, sub_blocks=2, sub_windows=4, bias_q8=20,
                              on_q8=300, off_q8=150, hang=2, psd_log2=3)
 
 
@@ -57,15 +59,16 @@ def stimulus(name: str, rng: np.random.Generator) -> tuple[np.ndarray, dict]:
     def tone(f, a):
         return a * np.exp(1j * (2 * np.pi * f * t / cfg.fs + rng.uniform(0, 2 * np.pi)))
 
-    opts = {"out_shift": 9, "ready_pct": 70, "adc_period_ns": 39.0625, "adc_gap_pct": 0,
+    opts = {"out_shift": DEFAULT.out_shift, "ready_pct": 70, "adc_period_ns": 39.0625, "adc_gap_pct": 0,
             "mask_bins": [0, 1, 7, 40, 41, 255, 256, 300, 511], "auto_forward": 0,
             "expect_drops": 0, "expect_overflow": 0, "reset_at_frame": -1,
-            "snapshot_at_frame": -1}
+            "snapshot_at_frame": -1, "det_reset_at_frame": -1, "adc_losses": 0}
     if name == "mixed":
         x = (tone(0, 300) + tone(40 * cfg.bin_hz, 600) + tone(41 * cfg.bin_hz + 25e3, 400)
              + tone(-212 * cfg.bin_hz + 12.5e3, 200) + tone(7 * cfg.bin_hz + 31.25e3, 100)
              + 30 * (rng.standard_normal(n) + 1j * rng.standard_normal(n)))
-        x[n // 2:] += tone(300 * cfg.bin_hz, 900)[n // 2:]   # a carrier that keys up
+        # a carrier that keys up, then down: exercises open, hang and close
+        x[n // 4: 5 * n // 8] += tone(300 * cfg.bin_hz, 900)[n // 4: 5 * n // 8]
         opts["adc_gap_pct"] = 20
     elif name == "fullscale":
         # beyond the 12-bit range (clipped), with DC; small out_shift forces 16-bit
@@ -98,6 +101,15 @@ def stimulus(name: str, rng: np.random.Generator) -> tuple[np.ndarray, dict]:
     elif name == "reset":
         x = tone(20 * cfg.bin_hz, 800) + 10 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
         opts["reset_at_frame"] = 20
+        opts["adc_losses"] = 1                # the ADC core reset counts as one loss
+    elif name == "autofwd":
+        # auto-forward (mask | ACTIVE) and a detector reset while running; data words
+        # are still checked bit-exactly whatever selected them
+        x = (tone(60 * cfg.bin_hz, 800) + tone(-30 * cfg.bin_hz + 20e3, 500)
+             + 15 * (rng.standard_normal(n) + 1j * rng.standard_normal(n)))
+        opts["auto_forward"] = 1
+        opts["det_reset_at_frame"] = 24
+        opts["mask_bins"] = [5]
     else:
         raise typer.BadParameter(name)
     return x, opts
@@ -150,7 +162,9 @@ def vectors(scenario: str, outdir: Path, seed: int = 1) -> None:
             f"+EXPECT_OVERFLOW={opts['expect_overflow']}", f"+SAT_SAMPLES={params['sat_samples']}",
             f"+CLIPPED={params['clipped_samples']}", f"+RESET_AT_FRAME={opts['reset_at_frame']}",
             f"+ON_Q8={SIM_DET.on_q8}", f"+OFF_Q8={SIM_DET.off_q8}", f"+HANG={SIM_DET.hang}",
-            f"+BIAS_Q8={SIM_DET.bias_q8}", f"+SNAPSHOT_AT_FRAME={opts['snapshot_at_frame']}"]
+            f"+BIAS_Q8={SIM_DET.bias_q8}", f"+SNAPSHOT_AT_FRAME={opts['snapshot_at_frame']}",
+            f"+AUTO_FWD={opts['auto_forward']}", f"+DET_RESET_AT_FRAME={opts['det_reset_at_frame']}",
+            f"+ADC_LOSSES={opts['adc_losses']}"]
     (outdir / "plusargs.txt").write_text(" ".join(plus) + "\n")
     print(json.dumps({k: v for k, v in params.items() if k != "det"}))
 

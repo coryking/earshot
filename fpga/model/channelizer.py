@@ -34,13 +34,13 @@ class Config:
     kaiser_beta: float = 9.4    # Kaiser (1974): beta = 0.1102 (A - 8.7) for A ~ 94 dB
     adc_bits: int = 12          # AD9363 ADC; input is clipped to this range before the FIR
     coef_bits: int = 18         # DSP48E1 B port
-    fir_shift: int = 12         # rounding right shift of the 8-tap integer sum
-    fft_in_bits: int = 18       # xfft input width (FIR output saturates here)
+    fir_shift: int = 14         # rounding right shift of the 8-tap integer sum
+    fft_in_bits: int = 16       # xfft input width (FIR output saturates here)
     twiddle_bits: int = 18
     fft_arch: str = "pipelined"
     fft_rounding: bool = True   # convergent rounding inside xfft (C_HAS_ROUNDING)
-    out_shift: int = 9          # default output gain: |y| >> 9 -> 16-bit, x16 ADC units
-    psd_shift: int = 8          # power path: y >> 8 saturated to 18 bits before squaring
+    out_shift: int = 7          # default output gain: |y| >> 7 -> 16-bit, x16 ADC units
+    psd_shift: int = 6          # power path: y >> 6 saturated to 18 bits before squaring
 
     @property
     def hop(self) -> int:

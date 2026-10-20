@@ -1,10 +1,11 @@
 // FFT output stage: phase correction, output scaling, power word.
 //
-// Input: xfft m_axis_data (natural order, XK_INDEX in tuser), unscaled 28-bit.
+// Input: xfft m_axis_data (any order: XK_INDEX in tuser gives k), unscaled 26-bit
+// in 32-bit fields.
 // * Odd bins of odd frames are negated: a hop of M/2 rotates bin k by
 //   exp(-j pi k f) = (-1)^(k f) (harris 2004; Vallance 2017), matching pfb.c.
 // * Slice samples: round-half-up >> out_shift, saturate to signed 16 (RIQ1 I16/Q16).
-// * Power word for PSD/activity: components rounded >> 8 and saturated to 18 bits,
+// * Power word for PSD/activity: components rounded >> 6 and saturated to 18 bits,
 //   then I^2 + Q^2 (two DSP48E1 multiplies). Matches channelizer.power_word().
 //
 // Never applies backpressure (s_ready = 1): every downstream consumer either keeps
@@ -62,7 +63,7 @@ module chan_post (
     f1 <= frame;
   end
 
-  // c2: phase correction (the bound |y| < 2^25.2 makes negation overflow-free)
+  // c2: phase correction (the bound |y| < 2^23.2 makes negation overflow-free)
   reg               v2 = 1'b0;
   reg signed [27:0] yi2, yq2;
   reg        [8:0]  k2;
@@ -99,8 +100,8 @@ module chan_post (
   always @(posedge clk) begin
     oi3 <= rshift(yi2, out_shift);
     oq3 <= rshift(yq2, out_shift);
-    ai3 <= sat18(rshift(yi2, 4'd8));
-    aq3 <= sat18(rshift(yq2, 4'd8));
+    ai3 <= sat18(rshift(yi2, 4'd6));    // = Config.psd_shift
+    aq3 <= sat18(rshift(yq2, 4'd6));
     k3 <= k2; last3 <= last2; f3 <= f2;
   end
 

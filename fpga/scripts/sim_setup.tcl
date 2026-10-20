@@ -15,7 +15,7 @@ add_files -fileset sim_1 [glob $fpga/tb/*.sv]
 create_ip -name xfft -vendor xilinx.com -library ip -module_name chan_xfft
 set_property -dict [chan_xfft_config] [get_ips chan_xfft]
 
-foreach {name bytes user} {axis_pc_fftin 6 0 axis_pc_fftout 8 16 axis_pc_hist 8 0 axis_pc_sel 8 0} {
+foreach {name bytes user} {axis_pc_fftin 4 0 axis_pc_fftout 8 16 axis_pc_hist 8 0 axis_pc_sel 8 0} {
   create_ip -name axis_protocol_checker -vendor xilinx.com -library ip -module_name $name
   set_property -dict [list CONFIG.TDATA_NUM_BYTES $bytes CONFIG.TUSER_WIDTH $user \
     CONFIG.HAS_TREADY 1 CONFIG.HAS_TLAST 1 CONFIG.HAS_TSTRB 0 CONFIG.HAS_TKEEP 0 \

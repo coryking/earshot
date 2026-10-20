@@ -6,13 +6,10 @@
 // opened or configured here (no IIO, no transmit); the AD9363 keeps whatever
 // settings the caller applied.
 //
-// DMA without a driver: `dma` takes N pinned user pages, translates them through
-// /proc/self/pagemap, and queues one 4 KiB axi_dmac transfer per page. HP-port
-// writes bypass the CPU caches, so the pages are cleaned/invalidated with the ARM
-// cacheflush syscall before submission and again before they are read.
+// DMA without a driver: `dma` captures one transfer into the no-map carve-out that
+// the channelizer firmware image reserves (see dma_capture()).
 //
-// Build (static, so the uClibc root filesystem does not matter):
-//   arm-linux-gnueabihf-gcc -O2 -static -Wall -Wextra -o chanctl chanctl.c
+// Build: fpga/sw/build.sh (static ARMv7 musl, so the uClibc rootfs does not matter).
 // Exit codes: 0 ok, 1 runtime failure, 2 usage.
 
 #define _GNU_SOURCE
@@ -24,7 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/syscall.h>
+#include <signal.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -80,7 +77,13 @@ static void active(void) {
 }
 
 // ---------------------------------------------------------------------------
-// DMA test through pinned user pages
+// DMA into the reserved carve-out
+//
+// HP-port writes bypass the CPU caches, and user-space cache maintenance on ARMv7
+// cannot invalidate L1 or the PL310 L2, so DMA targets must be memory Linux never
+// maps cacheable. The channelizer firmware image (make_frm.py) reserves
+// DMA_BASE..+DMA_SIZE as no-map; /dev/mem with O_SYNC maps it uncached. On stock
+// firmware that range is ordinary System RAM and this command refuses to run.
 
 #define DMA_CONTROL 0x100
 #define DMA_TRANSFER_ID 0x101
@@ -90,65 +93,76 @@ static void active(void) {
 #define DMA_XLEN 0x106
 #define DMA_YLEN 0x107
 #define DMA_DONE 0x10A
+#define DMA_BASE 0x04000000u
+#define DMA_SIZE 0x04000000u
 
-static uint64_t virt_to_phys(void *v) {
-    int fd = open("/proc/self/pagemap", O_RDONLY);
-    if (fd < 0) { perror("pagemap"); exit(1); }
-    uint64_t e;
-    off_t off = ((uintptr_t)v / 4096) * 8;
-    if (pread(fd, &e, 8, off) != 8) { perror("pagemap read"); exit(1); }
-    close(fd);
-    if (!(e >> 63)) { fprintf(stderr, "page not present\n"); exit(1); }
-    return (e & ((1ULL << 55) - 1)) * 4096;
+static void dma_stop_all(void) {
+    if (hist_dma) hist_dma[DMA_CONTROL] = 0;
+    if (sel_dma) sel_dma[DMA_CONTROL] = 0;
 }
 
-static void cache_flush(void *p, size_t n) {
-    // ARM private syscall: clean and invalidate the D-cache over [p, p + n)
-    syscall(0xf0002, p, (char *)p + n, 0);
+static void on_signal(int sig) {
+    dma_stop_all();
+    _exit(128 + sig);
 }
 
-static int dma_test(volatile uint32_t *dma, int pages, const char *out) {
-    uint8_t *buf = aligned_alloc(4096, (size_t)pages * 4096);
-    if (!buf) return 1;
-    memset(buf, 0xEE, (size_t)pages * 4096);
-    if (mlock(buf, (size_t)pages * 4096)) { perror("mlock"); return 1; }
-    uint64_t *phys = calloc(pages, sizeof(uint64_t));
-    for (int i = 0; i < pages; ++i) {
-        phys[i] = virt_to_phys(buf + (size_t)i * 4096);
-        if (phys[i] >= 0x20000000ULL) { fprintf(stderr, "page above HP window\n"); return 1; }
+static int region_is_free(uint32_t base, uint32_t size) {
+    // the carve-out must not be part of Linux's System RAM (it is no-map reserved)
+    FILE *f = fopen("/proc/iomem", "r");
+    if (!f) return 0;
+    char line[256];
+    int ok = 1;
+    while (fgets(line, sizeof line, f)) {
+        unsigned long lo, hi;
+        if (line[0] == ' ') continue;
+        if (sscanf(line, "%lx-%lx", &lo, &hi) == 2 && strstr(line, "System RAM") &&
+            lo < (unsigned long)base + size && hi >= base) ok = 0;
     }
-    cache_flush(buf, (size_t)pages * 4096);
+    fclose(f);
+    return ok;
+}
 
-    wr(dma, DMA_CONTROL, 0);
-    wr(dma, DMA_CONTROL, 1);              // enable
-    wr(dma, DMA_FLAGS, 0);                // not cyclic, no TLAST handling
-    // At most two transfers in flight: transfer IDs are 2 bits and an ID's DONE
-    // bit is cleared when that ID is resubmitted, so each one is retired (seen
-    // done) well before its ID comes round again.
-    int submitted = 0, done = 0;
-    uint32_t id_of[4096];
-    if (pages > 4096) pages = 4096;
+// One non-cyclic transfer of `bytes` (multiple of 8, <= 16 MiB) into the carve-out
+// (selected stream at DMA_BASE, history at DMA_BASE + 32 MiB), then copy it out.
+static int dma_capture(int fd, volatile uint32_t *dma, uint32_t offset, uint32_t bytes,
+                       const char *out) {
+    if (bytes == 0 || bytes > (16u << 20) || (bytes & 7)) { fprintf(stderr, "bad size\n"); return 2; }
+    if (!region_is_free(DMA_BASE, DMA_SIZE)) {
+        fprintf(stderr, "0x%08x is System RAM here: needs the channelizer firmware's reserved "
+                "region\n", DMA_BASE);
+        return 1;
+    }
+    volatile uint8_t *buf = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, DMA_BASE + offset);
+    if (buf == MAP_FAILED) { perror("mmap carve-out"); return 1; }
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+    signal(SIGHUP, on_signal);
+    for (uint32_t i = 0; i < bytes; i += 4) *(volatile uint32_t *)(buf + i) = 0xEEEEEEEEu;
+    dma[DMA_CONTROL] = 0;
+    dma[DMA_CONTROL] = 1;
+    dma[DMA_FLAGS] = 0;
+    dma[DMA_DEST] = DMA_BASE + offset;
+    dma[DMA_XLEN] = bytes - 1;
+    dma[DMA_YLEN] = 0;
+    uint32_t id = dma[DMA_TRANSFER_ID];
+    dma[DMA_SUBMIT] = 1;
     double t0 = now();
-    while (done < pages && now() - t0 < 10.0) {
-        while (done < submitted && (rd(dma, DMA_DONE) >> (id_of[done] & 3) & 1)) done++;
-        if (submitted < pages && submitted - done < 2 && (rd(dma, DMA_SUBMIT) & 1) == 0) {
-            wr(dma, DMA_DEST, (uint32_t)phys[submitted]);
-            wr(dma, DMA_XLEN, 4096 - 1);
-            wr(dma, DMA_YLEN, 0);
-            id_of[submitted] = rd(dma, DMA_TRANSFER_ID);
-            wr(dma, DMA_SUBMIT, 1);
-            submitted++;
-        }
+    int done = 0;
+    while (now() - t0 < 10.0) {
+        if ((dma[DMA_DONE] >> (id & 3)) & 1) { done = 1; break; }
+        usleep(1000);
     }
-    wr(dma, DMA_CONTROL, 0);
-    cache_flush(buf, (size_t)pages * 4096);
+    dma[DMA_CONTROL] = 0;
+    uint8_t *copy = malloc(bytes);
+    if (!copy) return 1;
+    for (uint32_t i = 0; i < bytes; i += 4) *(uint32_t *)(copy + i) = *(volatile uint32_t *)(buf + i);
     FILE *f = fopen(out, "wb");
     if (!f) { perror(out); return 1; }
-    fwrite(buf, 4096, done, f);
-    fclose(f);
-    printf("{\"pages\":%d,\"submitted\":%d,\"completed\":%d,\"seconds\":%.3f}\n", pages, submitted,
-           done, now() - t0);
-    return done == pages ? 0 : 1;
+    int ok = fwrite(copy, 1, bytes, f) == bytes;
+    ok &= fclose(f) == 0;
+    printf("{\"bytes\":%u,\"completed\":%s,\"seconds\":%.3f}\n", bytes, done ? "true" : "false",
+           now() - t0);
+    return (done && ok) ? 0 : 1;
 }
 
 // Live self-test: freeze at the next frame boundary, then read that frame's exact
@@ -163,6 +177,7 @@ static int snapshot(const char *out) {
     }
     uint32_t frame = rd(chan, 0x23);
     uint32_t *buf = malloc((1 + 4096 + 512) * 4);
+    if (!buf) { wr(chan, 0x22, 0); return 1; }
     buf[0] = frame;
     for (int i = 0; i < 4096; ++i) {
         uint32_t v = rd(chan, 0x1000 + i);       // {Q[15:0] sign-ext, I[15:0] sign-ext}
@@ -172,10 +187,10 @@ static int snapshot(const char *out) {
     wr(chan, 0x22, 0);
     FILE *f = fopen(out, "wb");
     if (!f) { perror(out); return 1; }
-    fwrite(buf, 4, 1 + 4096 + 512, f);
-    fclose(f);
-    printf("{\"snapshot_frame\":%u}\n", frame);
-    return 0;
+    int ok = fwrite(buf, 4, 1 + 4096 + 512, f) == 1 + 4096 + 512;
+    ok &= fclose(f) == 0;
+    printf("{\"snapshot_frame\":%u,\"out_shift\":%u}\n", frame, rd(chan, 6) & 0xF);
+    return ok ? 0 : 1;
 }
 
 static void usage(void) {
@@ -183,12 +198,18 @@ static void usage(void) {
         "usage: chanctl info | psd | level | active | stop\n"
         "       chanctl start [--out-shift N] [--hist] [--sel] [--auto] [--bins a,b,...]\n"
         "       chanctl set-det ON OFF BIAS HANG | det-reset\n"
-        "       chanctl dma hist|sel PAGES OUTFILE | snap OUTFILE\n"
+        "       chanctl dma hist|sel BYTES OUTFILE | snap OUTFILE\n"
         "Accesses the channelizer at 0x%08x via /dev/mem. Never opens the radio.\n", CHAN_BASE);
 }
 
 int main(int argc, char **argv) {
     if (argc < 2) { usage(); return 2; }
+    // Only touch 0x7C4x0000 when the channelizer image is loaded: on the stock PL
+    // those addresses are not decoded and an access can stall the bus.
+    if (access("/tmp/pl_is_chan", F_OK) != 0) {
+        fprintf(stderr, "channelizer PL not loaded (no /tmp/pl_is_chan); see pluto_runtime_load.sh\n");
+        return 1;
+    }
     int fd = open("/dev/mem", O_RDWR | O_SYNC);
     if (fd < 0) { perror("/dev/mem"); return 1; }
     chan = map_phys(fd, CHAN_BASE);
@@ -201,7 +222,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cmd, "psd")) dump_window(0x400, 0);
     else if (!strcmp(cmd, "level")) dump_window(0x200, 1);
     else if (!strcmp(cmd, "active")) active();
-    else if (!strcmp(cmd, "stop")) wr(chan, 4, 0);
+    else if (!strcmp(cmd, "stop")) { dma_stop_all(); wr(chan, 4, 0); wr(chan, 0x22, 0); }
     else if (!strcmp(cmd, "det-reset")) wr(chan, 4, rd(chan, 4) | 0x10);
     else if (!strcmp(cmd, "set-det") && argc == 6) {
         wr(chan, 8, atoi(argv[2])); wr(chan, 9, atoi(argv[3]));
@@ -230,8 +251,9 @@ int main(int argc, char **argv) {
     } else if (!strcmp(cmd, "snap") && argc == 3) {
         return snapshot(argv[2]);
     } else if (!strcmp(cmd, "dma") && argc == 5) {
-        volatile uint32_t *dma = !strcmp(argv[2], "hist") ? hist_dma : sel_dma;
-        return dma_test(dma, atoi(argv[3]), argv[4]);
+        int hist = !strcmp(argv[2], "hist");
+        return dma_capture(fd, hist ? hist_dma : sel_dma, hist ? (32u << 20) : 0,
+                           (uint32_t)strtoul(argv[3], NULL, 0), argv[4]);
     } else { usage(); return 2; }
     return 0;
 }

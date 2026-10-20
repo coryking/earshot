@@ -11,8 +11,9 @@
 //    L > N + on_q8; stay open while L > N + off_q8, then for `hang` more blocks.
 //  * Long PSD: linear sum over 2^PSD_LOG2 frames, reported as Q8 log2.
 //
-// State is in block RAM, read-modify-written once per bin per frame. A bin recurs
-// every 512 words, so the 5-cycle read-to-write distance never aliases.
+// State is in block RAM, read-modify-written once per bin per frame (the window
+// keeps V = 4 sub-window minima in one 64-bit word). A bin recurs every 512 words,
+// so the read-to-write distance (a few cycles) never aliases.
 
 `timescale 1ns/1ps
 `default_nettype none
@@ -20,7 +21,6 @@
 module chan_activity #(
   parameter BLOCK_LOG2 = 8,
   parameter SUB_BLOCKS = 128,
-  parameter SUB_WINDOWS = 4,           // fixed at 4 by the 64-bit minima word
   parameter PSD_LOG2 = 13,
   parameter LOG_TABLE = "chan_log2_table.mem"
 ) (
@@ -71,34 +71,30 @@ module chan_activity #(
   end
 
   // ---------------------------------------------------------------------------
-  // state RAMs (simple dual port, read latency 1)
-  //  A: {hang[7:0], active, sub_min[15:0], acc[42:0]} = 68 bits
-  //  B: {min3, min2, min1, min0} (min0 newest)       = 64 bits
-  //  C: psd_acc[47:0]
-  reg  [67:0] ram_a [0:511];
-  reg  [63:0] ram_b [0:511];
-  reg  [47:0] ram_c [0:511];
-  reg  [67:0] a1;
-  reg  [63:0] b1;
-  reg  [47:0] c1;
+  // Two RAMs (simple dual port, read latency 1), both read-modify-written once per
+  // bin per frame. A bin recurs every 512 words, so neither RMW can alias.
+  //  ACC   {psd_acc[47:0], acc[42:0]}: read at stage 0, written back at stage 2
+  //  STATE {hang[7:0], active, sub_min[15:0], min3..min0 (min0 newest)}: read with
+  //        the stage-2 address, used from stage 3, written back after the decision
+  localparam [88:0] STATE_INIT = {8'd0, 1'b0, EMPTY, {4{EMPTY}}};
+  reg  [90:0] ram_acc [0:511];
+  reg  [88:0] ram_s   [0:511];
+  reg  [90:0] acc1;
+  reg  [88:0] st3;
 
   reg         we_w;
   reg  [8:0]  k_w;
-  reg  [67:0] a_w;
-  reg  [63:0] b_w;
-  reg  [47:0] c_w;
+  reg  [88:0] s_w;
 
-  // init so simulation and hardware start from "empty" minima and zero sums
   integer i;
   initial begin
     for (i = 0; i < 512; i = i + 1) begin
-      ram_a[i] = {8'd0, 1'b0, EMPTY, 43'd0};
-      ram_b[i] = {4{EMPTY}};
-      ram_c[i] = 48'd0;
+      ram_acc[i] = 91'd0;
+      ram_s[i] = STATE_INIT;
     end
   end
 
-  // After any reset the state RAMs are swept back to their initial contents (512
+  // After any reset both RAMs are swept back to their initial contents (512
   // cycles). The first frame cannot arrive sooner: the PFB needs 4096 samples.
   reg        clearing = 1'b1;
   reg  [8:0] clr_addr = 9'd0;
@@ -112,22 +108,7 @@ module chan_activity #(
     end
   end
 
-  always @(posedge clk) begin
-    a1 <= ram_a[pw_k];
-    b1 <= ram_b[pw_k];
-    c1 <= ram_c[pw_k];
-    if (clearing) begin
-      ram_a[clr_addr] <= {8'd0, 1'b0, EMPTY, 43'd0};
-      ram_b[clr_addr] <= {4{EMPTY}};
-      ram_c[clr_addr] <= 48'd0;
-    end else if (we_w) begin
-      ram_a[k_w] <= a_w;
-      ram_b[k_w] <= b_w;
-      ram_c[k_w] <= c_w;
-    end
-  end
-
-  // stage 1: side information aligned with RAM output
+  // stage 1: side information aligned with the ACC read
   reg        v1 = 1'b0, blk1, sub1, psd1, last1;
   reg [8:0]  k1;
   reg [35:0] p1;
@@ -141,18 +122,22 @@ module chan_activity #(
   reg [8:0]  k2;
   reg [42:0] acc2;
   reg [47:0] pacc2;
-  reg [15:0] smin2;
-  reg        act2;
-  reg [7:0]  hang2;
-  reg [63:0] mins2;
   always @(posedge clk) begin
-    acc2  <= a1[42:0] + {7'd0, p1};
-    pacc2 <= c1 + {12'd0, p1};
-    smin2 <= a1[58:43];
-    act2  <= a1[59];
-    hang2 <= a1[67:60];
-    mins2 <= b1;
+    acc2  <= acc1[42:0] + {7'd0, p1};
+    pacc2 <= acc1[90:43] + {12'd0, p1};
     k2 <= k1; blk2 <= blk1; sub2 <= sub1; psd2 <= psd1; last2 <= last1;
+  end
+
+  always @(posedge clk) begin
+    acc1 <= ram_acc[pw_k];
+    st3  <= ram_s[k2];
+    if (clearing) begin
+      ram_acc[clr_addr] <= 91'd0;
+      ram_s[clr_addr] <= STATE_INIT;
+    end else begin
+      if (v2) ram_acc[k2] <= {(psd2 ? 48'd0 : pacc2), (blk2 ? 43'd0 : acc2)};
+      if (we_w) ram_s[k_w] <= s_w;
+    end
   end
 
   // stages 3-4: log2 (3-cycle pipeline) of both sums; side information waits in
@@ -163,70 +148,68 @@ module chan_activity #(
   chan_log2 #(.W(48), .TABLE(LOG_TABLE)) i_log_psd (
     .clk(clk), .v(pacc2), .l(plv4));
 
-  reg        v3 = 1'b0, blk3, sub3, psd3, last3, act3;
+  function [15:0] min16(input [15:0] x, input [15:0] y);
+    min16 = (x < y) ? x : y;
+  endfunction
+
+  reg        v3 = 1'b0, blk3, sub3, psd3, last3;
   reg [8:0]  k3;
-  reg [42:0] acc3;
-  reg [47:0] pacc3;
-  reg [15:0] smin3;
-  reg [7:0]  hang3;
-  reg [63:0] mins3;
-  reg [15:0] mmin3;
   always @(posedge clk) begin
     k3 <= k2; blk3 <= blk2; sub3 <= sub2; psd3 <= psd2; last3 <= last2;
-    acc3 <= acc2; pacc3 <= pacc2; smin3 <= smin2; act3 <= act2; hang3 <= hang2; mins3 <= mins2;
-    mmin3 <= min16(min16(mins2[15:0], mins2[31:16]), min16(mins2[47:32], mins2[63:48]));
   end
 
+  // stage 3b: state from RAM (st3, valid in stage 3), minimum of the stored minima
   reg        v3b = 1'b0, blk3b, sub3b, psd3b, last3b, act3b;
   reg [8:0]  k3b;
-  reg [42:0] acc3b;
-  reg [47:0] pacc3b;
   reg [15:0] smin3b, mmin3b;
   reg [7:0]  hang3b;
   reg [63:0] mins3b;
   always @(posedge clk) begin
     k3b <= k3; blk3b <= blk3; sub3b <= sub3; psd3b <= psd3; last3b <= last3;
-    acc3b <= acc3; pacc3b <= pacc3; smin3b <= smin3; act3b <= act3; hang3b <= hang3;
-    mins3b <= mins3; mmin3b <= mmin3;
+    hang3b <= st3[88:81]; act3b <= st3[80]; smin3b <= st3[79:64]; mins3b <= st3[63:0];
+    mmin3b <= min16(min16(st3[15:0], st3[31:16]), min16(st3[47:32], st3[63:48]));
   end
 
   reg        v4 = 1'b0, blk4, sub4, psd4, last4, act4;
   reg [8:0]  k4;
-  reg [42:0] acc4;
-  reg [47:0] pacc4;
   reg [15:0] smin4, mmin4;
   reg [7:0]  hang4;
   reg [63:0] mins4;
   always @(posedge clk) begin
     k4 <= k3b; blk4 <= blk3b; sub4 <= sub3b; psd4 <= psd3b; last4 <= last3b;
-    acc4 <= acc3b; pacc4 <= pacc3b; smin4 <= smin3b; act4 <= act3b; hang4 <= hang3b;
-    mins4 <= mins3b; mmin4 <= mmin3b;
+    smin4 <= smin3b; act4 <= act3b; hang4 <= hang3b; mins4 <= mins3b; mmin4 <= mmin3b;
   end
 
-  function [15:0] min16(input [15:0] x, input [15:0] y);
-    min16 = (x < y) ? x : y;
-  endfunction
+  // stage 4b: minimum statistics (two compares), registered
+  reg        v4b = 1'b0, blk4b, sub4b, psd4b, last4b, act4b;
+  reg [8:0]  k4b;
+  reg [15:0] lvl4b, plv4b, smin4b, sminold4b, floor_raw4b;
+  reg [7:0]  hang4b;
+  reg [63:0] mins4b;
+  always @(posedge clk) begin
+    k4b <= k4; blk4b <= blk4; sub4b <= sub4; psd4b <= psd4; last4b <= last4; act4b <= act4;
+    lvl4b <= lvl4; plv4b <= plv4; sminold4b <= smin4;
+    smin4b <= min16(smin4, lvl4);
+    floor_raw4b <= min16(min16(smin4, lvl4), mmin4);
+    hang4b <= hang4; mins4b <= mins4;
+  end
 
-  // stage 5: floor (min statistics + bias) and thresholds, registered
-  wire [15:0] smin_new = min16(smin4, lvl4);
-  wire [15:0] floor_raw = min16(smin_new, mmin4);
-  wire [16:0] floor_b = {1'b0, floor_raw} + {1'b0, bias_q8};
+  // stage 5: bias (saturating) and thresholds, registered
+  wire [16:0] floor_b = {1'b0, floor_raw4b} + {1'b0, bias_q8};
   wire [15:0] floor_v = floor_b[16] ? EMPTY : floor_b[15:0];
 
   reg        v5 = 1'b0, blk5, sub5, psd5, last5, act5;
   reg [8:0]  k5;
   reg [15:0] lvl5, plv5, floor5, smin5, sminold5;
   reg [17:0] thr_on5, thr_off5;
-  reg [42:0] acc5;
-  reg [47:0] pacc5;
   reg [7:0]  hang5;
   reg [63:0] mins5;
   always @(posedge clk) begin
-    k5 <= k4; blk5 <= blk4; sub5 <= sub4; psd5 <= psd4; last5 <= last4; act5 <= act4;
-    lvl5 <= lvl4; plv5 <= plv4; floor5 <= floor_v; smin5 <= smin_new; sminold5 <= smin4;
+    k5 <= k4b; blk5 <= blk4b; sub5 <= sub4b; psd5 <= psd4b; last5 <= last4b; act5 <= act4b;
+    lvl5 <= lvl4b; plv5 <= plv4b; floor5 <= floor_v; smin5 <= smin4b; sminold5 <= sminold4b;
     thr_on5 <= {2'b0, floor_v} + {2'b0, on_q8};
     thr_off5 <= {2'b0, floor_v} + {2'b0, off_q8};
-    acc5 <= acc4; pacc5 <= pacc4; hang5 <= hang4; mins5 <= mins4;
+    hang5 <= hang4b; mins5 <= mins4b;
   end
 
   // stage 6: CFAR decision with hysteresis and hang; write-back
@@ -240,14 +223,9 @@ module chan_activity #(
 
   always @(posedge clk) begin
     k_w <= k5;
-    if (blk5) begin
-      a_w <= {hang_n, act_n, (sub5 ? EMPTY : smin5), 43'd0};
-      b_w <= sub5 ? {mins5[47:0], smin5} : mins5;
-    end else begin
-      a_w <= {hang5, act5, sminold5, acc5};
-      b_w <= mins5;
-    end
-    c_w <= psd5 ? 48'd0 : pacc5;
+    if (blk5) s_w <= {hang_n, act_n, (sub5 ? EMPTY : smin5),
+                      (sub5 ? {mins5[47:0], smin5} : mins5)};
+    else      s_w <= {hang5, act5, sminold5, mins5};
   end
 
   // activity bitmap: written per bin at block end (cleared during the RAM sweep)
@@ -272,10 +250,10 @@ module chan_activity #(
 
   always @(posedge clk) begin
     if (rst) begin
-      v1 <= 1'b0; v2 <= 1'b0; v3 <= 1'b0; v3b <= 1'b0; v4 <= 1'b0; v5 <= 1'b0; we_w <= 1'b0;
+      v1 <= 1'b0; v2 <= 1'b0; v3 <= 1'b0; v3b <= 1'b0; v4 <= 1'b0; v4b <= 1'b0; v5 <= 1'b0; we_w <= 1'b0;
       block_count <= 32'd0; psd_count <= 32'd0;
     end else begin
-      v1 <= pw_valid & ~clearing; v2 <= v1; v3 <= v2; v3b <= v3; v4 <= v3b; v5 <= v4;
+      v1 <= pw_valid & ~clearing; v2 <= v1; v3 <= v2; v3b <= v3; v4 <= v3b; v4b <= v4; v5 <= v4b;
       we_w <= v5;
       if (v5 & blk5 & last5) block_count <= block_count + 32'd1;
       if (v5 & psd5 & last5) psd_count <= psd_count + 32'd1;
@@ -295,7 +273,7 @@ module chan_log2 #(
   input  wire [W-1:0] v,
   output reg  [15:0]  l = 16'd0
 );
-  reg [7:0] tbl [0:255];
+  (* rom_style = "distributed" *) reg [7:0] tbl [0:255];
   initial $readmemh(TABLE, tbl);
 
   integer n;

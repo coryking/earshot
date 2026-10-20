@@ -98,40 +98,45 @@ Comparison with open designs:
 | --- | --- | --- |
 | ADC | 12-bit, sign-extended to 16 by axi_ad9361 | clipped to [−2048, 2047] (counted) |
 | Coefficients | 18-bit, Σh = 2^25 | |
-| Branch sum | 30-bit products, 34-bit sum, round-half-up >> 12, saturate 18 | max 0.555 FS for any 12-bit input |
-| FFT (xfft, unscaled) | 18-bit in, 18-bit twiddles, convergent rounding, 28-bit out | Σ\|h\|·2048·√2/2^12 = 2^25.2 < 2^27 |
-| Slice | round >> out_shift (default 9), saturate 16 | gain ×16 ADC units, no saturation for 12-bit input |
-| Power word | round >> 8, saturate 18, I²+Q² | 35-bit |
+| Branch sum | 30-bit products, 34-bit sum, round-half-up >> 14, saturate 16 | max 0.555 FS for any 12-bit input |
+| FFT (xfft, unscaled) | 16-bit in, 18-bit twiddles, convergent rounding, 26-bit out | Σ\|h\|·2048·√2/2^14 = 2^23.2 < 2^25 |
+| Slice | round >> out_shift (default 7), saturate 16 | gain ×16 ADC units, no saturation for 12-bit input |
+| Power word | round >> 6, saturate 18, I²+Q² | 35-bit |
 
-Gain from the ADC to the FFT output is exactly 2^13. The 18-bit FIR output keeps one
+Gain from the ADC to the FFT output is exactly 2^11. The 16-bit FIR output keeps one
 bit of headroom over the worst case, which makes the FFT overflow-free by
 construction (no scaling schedule needed). The model asserts the bound on every
-frame.
+frame. The FFT input was first 18 bits; it was cut to 16 to fit the device (§4).
+That costs about 12 dB of rounding headroom, which is still far below receiver
+noise (below).
 
-SNR loss against a float channelizer on the same quantized input:
-- Synthetic tone plus white noise: core 0.017 dB with ADC quantization noise only,
-  0.002 dB at 1 LSB rms.
-- 16-bit slice: 2.5, 0.62 and 0.08 dB at 0, 1 and 3 LSB rms. Real receiver noise
-  is about 90 LSB rms wideband in the captures, so the slice quantization is
-  irrelevant there.
-- Real DMR in the straddle sweep (`results/straddle.json`): **≤ 0.16 dB** worst
-  case across offsets 0–25 kHz and interferers at 12.5–150 kHz with 40–60 dB
-  near/far.
+SNR loss against a float channelizer on the same quantized input is in
+`results/straddle.json`, `real.json` and `real_dmr.json`; the README table gives
+current values. Real receiver noise is about 90 LSB rms wideband in the captures,
+so the FPGA's rounding is negligible next to it.
 
 ## 4. FFT: xfft, pipelined streaming
 
 The FFT has to take 512 points per 256-sample hop (1000 clocks at 100 MHz).
 
-| Option (512-point, 18-bit, synthesized OOC) | LUT | BRAM36 | DSP | Fits 1000 clocks/frame? |
-| --- | ---: | ---: | ---: | --- |
-| xfft pipelined streaming [pg109] | 2,969 | 4 | 24 | yes, 1 sample/clock |
-| xfft radix-4 burst, natural order | 2,277 | 7 | 18 | no: load + unload alone is 1024 clocks |
-| Custom R2²SDF [he96], as Maia does | ~1.5k (est.) | ~3 | 12 | yes |
+| Option (512-point, synthesized OOC) | LUT | FF | BRAM | DSP | Fits 1000 clocks/frame? |
+| --- | ---: | ---: | ---: | ---: | --- |
+| xfft pipelined, 18-bit, natural order, 2 BRAM stages [pg109] | 2,969 | 5,554 | 4 | 24 | yes, 1 sample/clock |
+| xfft pipelined, 16-bit, bit-reversed, 4 BRAM stages (**used**) | 2,461 | 4,756 | 5 | 22 | yes |
+| xfft radix-4 burst, natural order | 2,277 | — | 7 | 18 | no: load + unload alone is 1024 clocks |
+| Custom R2²SDF [he96], as Maia does | ~1.5k (est.) | — | ~3 | 13 | yes |
 
-Pipelined xfft was chosen: it is AMD IP with a shipped bit-accurate C model, and
-after the TX trim the DSP budget holds its 24 multipliers (§9). R2²SDF is the
-documented fallback if DSPs become tight. It saves 12 DSPs, at the cost of an
-in-house FFT and its own bit-exact model.
+Pipelined xfft was chosen: it is AMD IP with a shipped bit-accurate C model.
+- **Bit-reversed output order.** Every consumer downstream addresses by XK_INDEX:
+  the frame buffer, the activity RAMs and the phase correction. So the core's
+  reorder memory isn't needed.
+- **What closed the fit.** The first full build of the 18-bit natural-order
+  configuration failed placement: 15,641 LUT, 89%, and slices exhausted. The
+  smaller configuration above closed the gap, together with disabling
+  axi_ad9361's internal TDD controller (§10).
+- **Fallback.** R2²SDF is the documented fallback if more room is needed. It saves
+  about 1k LUT and 9 DSP, at the cost of an in-house FFT and its own bit-exact
+  model.
 
 ## 5. Spectrum and activity detection
 
@@ -224,7 +229,9 @@ Per coarse bin k, from the power word P_k = |Y_k|²:
 
 Flags:
 - bit 0: frames of this stream were dropped before this record.
-- bit 1: ADC samples were lost (CDC FIFO full) since the last header.
+- bit 1: this frame's 4096-sample window may contain lost ADC samples (CDC FIFO
+  full, or an ADC core reset such as a sample-rate change). Set on the 16 frames
+  after each loss, since every window spanning the gap is affected.
 - bit 2: a sample in this frame hit 16-bit saturation.
 
 **Frame numbering.**
@@ -243,12 +250,39 @@ Flags:
 - Frame f is at ((f − first) mod N) × 2056, provided HIST_DROPS has not moved. The
   record header confirms the frame, and that check catches overwrite races.
 - At 205.6 MB/s, 64 MiB holds 326 ms of pre-roll for every bin.
+- DMA targets must be memory Linux never maps cacheable. HP-port writes bypass
+  the caches, and user space cannot invalidate L1 or the PL310 L2.
+- The firmware image built by `sw/make_frm.py` reserves 0x04000000–0x07FFFFFF
+  (no-map). User space maps it uncached through /dev/mem (O_SYNC).
+- The placement avoids the FIT staging area (0x02080000), the initrd/FDT that
+  U-Boot puts just below 512 MiB, and the 256 MiB CMA pool, which needs a
+  contiguous span.
+- `chanctl dma` refuses to run when that range is still System RAM, as it is on
+  stock firmware. So the DMA streams are exercised only after the firmware stage;
+  runtime load covers registers, PSD/activity and the snapshot.
 
 **Selected stream.**
 - A non-cyclic transfer queue on chan_sel_dma. Records are self-describing, so the
   ARM parses whole buffers.
 - The selection is FORWARD_MASK, optionally ORed with the activity bitmap
   (CONTROL.auto_forward).
+
+**Live self-test (snapshot).**
+1. Write SNAP_CTRL.FREEZE = 1. Writes into the PFB history stop at the next frame
+   boundary, and that frame's reads still issue.
+2. When SNAP_CTRL reads frozen and output-ready, SNAP_IN holds exactly the 4096
+   samples of frame SNAP_FRAME, and SNAP_OUT holds its 512 output bins.
+3. `model/live_check.py snap` recomputes the frame and requires every bin to match.
+4. While frozen the ADC FIFO overflows. That is counted and flagged like any other
+   loss, so resume with FREEZE = 0.
+
+**Stopping and re-arming.**
+- RUN = 0 lets the packetizer finish the record it is writing, so records are never
+  truncated. Records already queued keep draining to the DMA.
+- To re-arm the history ring, leave the DMA running until STATUS shows both FIFOs
+  empty. Then restart the cyclic transfer and set HIST_EN. HIST_FIRST_FRAME then
+  names the record at the ring base.
+- Frame numbers restart at 0 on every RUN 0→1.
 
 ## 8. Register map (`chan_top`, DWORD addresses; byte address = 4 × DWORD)
 
@@ -259,10 +293,10 @@ Flags:
 | 0x002 | SCRATCH | RW | |
 | 0x003 | MAGIC | RO | 0x4348_414E "CHAN" |
 | 0x004 | CONTROL | RW | [0] RUN (0 = soft reset of the datapath) [1] HIST_EN [2] SEL_EN [3] AUTO_FORWARD [4] DET_RESET (self-clearing) |
-| 0x005 | STATUS | RO | [0] running |
-| 0x006 | OUT_SHIFT | RW | slice gain, default 9 (×16 ADC units) |
+| 0x005 | STATUS | RO | [0] running [1] history FIFO empty [2] selected FIFO empty [3] packetizer busy |
+| 0x006 | OUT_SHIFT | RW | slice gain, default 7 (×16 ADC units) |
 | 0x007 | CONFIG | RO | [15:0] bins, [23:16] taps/branch, [31:24] block log2 |
-| 0x008–0x00B | DET_ON / DET_OFF / DET_BIAS (Q8 log2) / DET_HANG (blocks) | RW | defaults 221 / 133 / 0 / 39 |
+| 0x008–0x00B | DET_ON / DET_OFF / DET_BIAS (Q8 log2) / DET_HANG (blocks) | RW | reset defaults 221 / 133 / 0 / 39 |
 | 0x00C | DET_CONFIG | RO | [15:0] U, [23:16] V, [31:24] PSD log2 |
 | 0x010/0x011 | SAMPLES lo/hi | RO | reading lo latches hi |
 | 0x012/0x013 | FRAMES lo/hi | RO | frames out of the FFT |
@@ -278,11 +312,15 @@ Flags:
 | 0x021 | FIR_FRAMES | RO | |
 | 0x040–0x04F | FORWARD_MASK | RW | bit b of word w = bin 32w + b |
 | 0x050–0x05F | ACTIVE | RO | activity bitmap |
+| 0x022 | SNAP_CTRL | RW/RO | [0] FREEZE request (RW; cleared while RUN = 0) [1] frozen [2] output ready |
+| 0x023 | SNAP_FRAME | RO | frame number of the frozen window |
+| 0x600–0x7FF | SNAP_OUT[k] | RO | frozen frame's slice samples {Q,I} |
+| 0x1000–0x1FFF | SNAP_IN[n] | RO | frozen frame's 4096 input samples {Q,I} (12-bit, sign-extended), n = 0 oldest |
 | 0x200–0x3FF | LEVEL[k] | RO | [15:0] block level L, [31:16] floor N (Q8 log2) |
 | 0x400–0x5FF | PSD[k] | RO | long PSD (Q8 log2) |
 
 **Level calibration.** A complex tone of amplitude A ADC units at a bin centre gives
-|Y| = 2^13 A, a power word of (2^13 A / 2^8)² = 2^10 A², and a sum of S frames of S
+|Y| = 2^11 A, a power word of (2^11 A / 2^6)² = 2^10 A², and a sum of S frames of S
 times that (S = 2^8 for LEVEL, 2^13 for PSD). So, with full scale = 2048 ADC units:
 
     P [dBFS] = 3.0103 · L / 256 − 10 log10(S · 2^10 · 2048²)
@@ -317,6 +355,25 @@ is 1.865 bins [harris78], and the label is then `dBFS/Hz` per PROTOCOL.md.
 See `fpga/README.md` for current numbers and how to reproduce them.
 
 ## 11. Deviations from the cited approaches
+
+- **PSD resolution.** "Fine PSD" is implemented as one estimate per coarse bin
+  (50 kHz spacing, 93.3 kHz ENBW): a 2.56 ms Welch level for detection, and an 82 ms
+  average for the waterfall. Resolving 12.5/6.25 kHz channels inside a bin is left
+  to the host, which receives the complex slice. A zoom FFT per bin (16 frames,
+  about 6.25 kHz) was considered and dropped for the LUT budget.
+- **Activity is per coarse bin.** AUTO_FORWARD therefore forwards whole bins, and
+  a strong signal can open its neighbours, since adjacent bins overlap at −6 dB.
+- **Not ADI's ADC data path.** The output records are a tagged 64-bit format of our
+  own, not util_cpack2 channel interleaving. A record has to say which bins and
+  which frame it carries, and whether samples were lost. The DMA is ADI axi_dmac,
+  driven from user space (/dev/mem) rather than through the dmaengine/IIO buffer
+  stack. A small IIO driver is the ADI-conventional follow-up once the format
+  settles.
+- **"RX-only" means TX DSP removed, not TX removed.** The TX DMA, upack and DAC
+  interface stay, so the stock device tree (which references them) still probes.
+  Transmit through DMA at native rates is still possible. Rates below about
+  2.08 Msps are broken, because the driver still expects the removed x8
+  interpolator.
 
 - **Kaiser vs. Parks–McClellan.** A remez design of the same length would reach
   about 100 dB. Kaiser was kept for its monotonic sidelobe decay and its

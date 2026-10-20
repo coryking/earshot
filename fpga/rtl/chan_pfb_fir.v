@@ -14,11 +14,12 @@
 // frame takes 512 clocks of the 1000 available per hop at 25.6 Msps / 100 MHz.
 //
 // Write protection: sample n overwrites sample n-4096. It may only do so once the
-// engine has issued the read of that address for the oldest unfinished frame, so
-// writes are allowed while d < 4096 + j_issued, with d = samples written past the
-// current frame's first sample. The FIFO in front absorbs the brief stalls.
+// engine has issued the read of that address for the oldest unfinished frame, and
+// at most one hop (256 samples) ahead of it, so writes are allowed while
+// d < 4096 + min(j_issued, 256), with d = samples written past the current frame's
+// first sample. The FIFO in front absorbs the brief stalls.
 //
-// Output: AXI4-Stream-like (valid/ready/last) of 18-bit branch sums, last on j=511.
+// Output: AXI4-Stream-like (valid/ready/last) of 16-bit branch sums, last on j=511.
 // A small FIFO after the arithmetic pipeline lets the FFT apply backpressure; the
 // issue stage only starts a read when the FIFO has room for everything in flight.
 
@@ -37,8 +38,8 @@ module chan_pfb_fir #(
   output wire        s_ready,
 
   output wire        m_valid,
-  output wire [17:0] m_i,
-  output wire [17:0] m_q,
+  output wire [15:0] m_i,
+  output wire [15:0] m_q,
   output wire        m_last,
   input  wire        m_ready,
 
@@ -54,7 +55,7 @@ module chan_pfb_fir #(
   output wire [23:0] snap_data         // {Q, I}, latency 2 from snap_i
 );
 
-  localparam FIR_SHIFT = 12;
+  localparam FIR_SHIFT = 14;     // = fpga/model/channelizer.py Config.fir_shift
   localparam PIPE = 9;             // issue (cycle c) -> FIFO write (cycle c+9)
   localparam FIFO_AW = 5;          // 32-entry output FIFO
 
@@ -69,7 +70,11 @@ module chan_pfb_fir #(
   reg  [1:0]  snap_st = 2'd0;
   reg  [11:0] snap_base = 12'd0;
   wire frame_ready = (d >= 13'd4096) & (snap_st != 2'd3);
-  wire write_ok    = (d < 13'd4096 + {3'd0, j_issued}) &
+  // A write may replace sample n-4096 only after its read issued, and never more
+  // than one hop ahead: samples beyond 256 into the current frame belong to the
+  // next frame's first tap, which has not been read yet.
+  wire [12:0] wlim = (j_issued > 10'd256) ? 13'd4352 : 13'd4096 + {3'd0, j_issued};
+  wire write_ok    = (d < wlim) &
                      ((snap_st == 2'd0) | ((snap_st == 2'd1) & (d < 13'd4096)));
   wire do_write    = s_valid & write_ok;
   assign s_ready   = write_ok;   // while frozen the CDC FIFO fills and counts overflows
@@ -233,18 +238,18 @@ module chan_pfb_fir #(
     last_p6 <= last_p5; last_p7 <= last_p6; last_p8 <= last_p7;
   end
 
-  // p9: round half up, >> 12, saturate to 18 bits
-  function [17:0] round_sat(input signed [33:0] v);
+  // p9: round half up, >> FIR_SHIFT, saturate to 16 bits (xfft input width)
+  function [15:0] round_sat(input signed [33:0] v);
     reg signed [33:0] r;
     begin
-      r = (v + 34'sd2048) >>> FIR_SHIFT;
-      if (r > 34'sd131071)       round_sat = 18'h1FFFF;
-      else if (r < -34'sd131072) round_sat = 18'h20000;
-      else                       round_sat = r[17:0];
+      r = (v + (34'sd1 <<< (FIR_SHIFT - 1))) >>> FIR_SHIFT;
+      if (r > 34'sd32767)       round_sat = 16'h7FFF;
+      else if (r < -34'sd32768) round_sat = 16'h8000;
+      else                      round_sat = r[15:0];
     end
   endfunction
 
-  reg [17:0] ui_p9, uq_p9;
+  reg [15:0] ui_p9, uq_p9;
   reg        last_p9;
   always @(posedge clk) begin
     ui_p9 <= round_sat(si_p8);
@@ -266,7 +271,7 @@ module chan_pfb_fir #(
 
   // ---------------------------------------------------------------------------
   // output FIFO (distributed RAM)
-  reg [36:0] fifo_mem [0:(1<<FIFO_AW)-1];
+  reg [32:0] fifo_mem [0:(1<<FIFO_AW)-1];
   reg [FIFO_AW-1:0] wp = 0, rp = 0;
   wire fifo_rd = m_valid & m_ready;
   always @(posedge clk) begin

@@ -7,9 +7,14 @@ runs) and changes exactly two things:
 
 * images/fpga@1: the new bitstream (.bit with header, as in the stock image), with
   its md5 hash node recomputed so U-Boot's FIT verification passes;
-* every flat_dt image: a `reserved-memory` node that takes the top 64 MiB of DDR
-  out of Linux's hands (no-map) as the channelizer's DMA area, so user space can
-  map it through /dev/mem without colliding with kernel allocations.
+* every flat_dt image: a `reserved-memory` node that takes 64 MiB at 64 MiB out of
+  Linux's hands (no-map) as the channelizer's DMA area, so user space can map it
+  uncached through /dev/mem without colliding with kernel allocations.
+  Placement (from this unit's U-Boot environment and boot log): the FIT is staged at
+  0x02080000 (about 11 MiB), the kernel runs from 0x8000, initrd_high = fdt_high =
+  0x20000000 puts the initrd and FDT just below 512 MiB, and the kernel's 256 MiB
+  CMA pool needs a contiguous span (today 0x0E400000-0x1E400000). 0x04000000-
+  0x08000000 avoids all of them and leaves ~380 MiB contiguous above it for CMA.
 
 Kernel and ramdisk are carried over byte-for-byte (their hashes are checked). The
 output is the FIT plus the md5 trailer ADI's update path expects. Nothing is
@@ -26,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import fit  # noqa: E402
 
-DMA_BASE = 0x1C000000
+DMA_BASE = 0x04000000   # see module docstring for why 64 MiB at 64 MiB
 DMA_SIZE = 0x04000000
 
 
@@ -72,7 +77,10 @@ def main(stock: Path, bit: Path, out: Path) -> None:
     for img in chk.child("images").children:
         h = next((c for c in img.children if c.name.startswith("hash")), None)
         if h is not None:
-            assert hashlib.md5(img.props["data"]).digest() == h.props["value"], img.name
+            if h.props.get("algo") != b"md5\0":
+                raise SystemExit(f"{img.name}: unsupported hash {h.props.get('algo')!r}")
+            if hashlib.md5(img.props["data"]).digest() != h.props["value"]:
+                raise SystemExit(f"{img.name}: hash mismatch after rebuild")
     md5 = hashlib.md5(new_itb).hexdigest()
     out.write_bytes(new_itb + md5.encode() + b"\n")
     report.update({"bitstream_sha256": hashlib.sha256(new_bit).hexdigest(),
@@ -85,4 +93,6 @@ def main(stock: Path, bit: Path, out: Path) -> None:
 if __name__ == "__main__":
     if len(sys.argv) != 4:
         raise SystemExit(__doc__)
+    if Path(sys.argv[3]).resolve() == Path(sys.argv[1]).resolve():
+        raise SystemExit("refusing to overwrite the stock image")
     main(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))

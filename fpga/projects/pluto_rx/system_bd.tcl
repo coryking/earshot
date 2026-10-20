@@ -5,9 +5,13 @@
 #   * axi_ad9361 DAC DDS tone generators        (DAC_DDS_DISABLE)
 #   * axi_ad9361 DAC IQ correction              (DAC_IQCORRECTION_DISABLE)
 #   * tx_fir_interpolator (x8 FIR for low TX rates) and its GPIO slice / valid OR
+#   * axi_ad9361's internal TDD controller (TDD_DISABLE): it only sequences TX/RX
+#     switching; with it disabled the ENSM ENABLE/TXNRX pins follow the GPIO-driven
+#     up_enable/up_txnrx exactly as in the stock FDD mode
 # The AD9363 interface, the whole RX path, the TX DMA + upack (kept so the stock
 # device tree, which references the TX DMA and DDS core, still probes) and the
-# TDD block are unchanged. TX through DMA remains possible at the native rate.
+# external axi_tdd block are unchanged. TX through DMA remains possible at the
+# native rate.
 
 source $ad_hdl_dir/projects/pluto/system_bd.tcl
 
@@ -38,6 +42,7 @@ rx_only_remove_cell logic_or
 
 ad_ip_parameter axi_ad9361 CONFIG.DAC_DDS_DISABLE 1
 ad_ip_parameter axi_ad9361 CONFIG.DAC_IQCORRECTION_DISABLE 1
+ad_ip_parameter axi_ad9361 CONFIG.TDD_DISABLE 1
 
 # Channel 0 of the upack now feeds the core directly, like the other ADI
 # AD9361 projects that have no interpolator (e.g. fmcomms2 via its DAC FIFO).

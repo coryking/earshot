@@ -17,8 +17,10 @@ module chan_top #(
   parameter ID = 0,
   parameter COEF_FILE_PREFIX = "pfb_coef_p",
   parameter LOG_TABLE = "chan_log2_table.mem",
-  parameter [15:0] DEFAULT_ON_Q8 = 16'd0,
-  parameter [15:0] DEFAULT_OFF_Q8 = 16'd0,
+  // CFAR thresholds above the minimum-statistics floor (Q8 log2): 2.60 dB gives
+  // Pfa 1e-8 per bin-block and 1.57 dB gives 1e-2 (fpga/model/results/activity.json)
+  parameter [15:0] DEFAULT_ON_Q8 = 16'd221,
+  parameter [15:0] DEFAULT_OFF_Q8 = 16'd133,
   parameter [15:0] DEFAULT_BIAS_Q8 = 16'd0,
   parameter [7:0]  DEFAULT_HANG = 8'd39,
   parameter BLOCK_LOG2 = 8,             // detector block = 2^8 frames (2.56 ms)
@@ -64,7 +66,7 @@ module chan_top #(
   input  wire [15:0]  adc_data_q,
 
   // to xfft S_AXIS_DATA / S_AXIS_CONFIG
-  output wire [47:0]  m_axis_fft_tdata,
+  output wire [31:0]  m_axis_fft_tdata,
   output wire         m_axis_fft_tvalid,
   input  wire         m_axis_fft_tready,
   output wire         m_axis_fft_tlast,
@@ -128,7 +130,7 @@ module chan_top #(
   reg  [13:0]  raddr2 = 14'd0;       // read address, registered (see read pipeline)
   reg  [31:0]  scratch = 32'd0;
   reg          run = 1'b0, hist_en = 1'b0, sel_en = 1'b0, auto_fwd = 1'b0;
-  reg  [3:0]   out_shift = 4'd9;
+  reg  [3:0]   out_shift = 4'd7;
   reg  [15:0]  on_q8 = DEFAULT_ON_Q8, off_q8 = DEFAULT_OFF_Q8, bias_q8 = DEFAULT_BIAS_Q8;
   reg  [7:0]   hang = DEFAULT_HANG;
   reg          det_clear = 1'b0;     // CONTROL bit 4: self-clearing detector reset
@@ -140,12 +142,13 @@ module chan_top #(
       scratch <= 32'd0;
       run <= 1'b0; hist_en <= 1'b0; sel_en <= 1'b0; auto_fwd <= 1'b0;
       freeze <= 1'b0;
-      out_shift <= 4'd9;
+      out_shift <= 4'd7;
       on_q8 <= DEFAULT_ON_Q8; off_q8 <= DEFAULT_OFF_Q8; bias_q8 <= DEFAULT_BIAS_Q8;
       hang <= DEFAULT_HANG;
     end else begin
       up_wack <= up_wreq;
       det_clear <= up_wreq & (up_waddr == 14'h004) & up_wdata[4];
+      if (dp_rst) freeze <= 1'b0;       // a stopped core never stays frozen
       if (up_wreq) begin
         case (up_waddr)
           14'h002: scratch <= up_wdata;
@@ -165,6 +168,7 @@ module chan_top #(
   // datapath soft reset while not running (also during system reset)
   reg dp_rst = 1'b1;
   always @(posedge clk) dp_rst <= srst | ~run;
+  wire hist_fifo_empty, sel_fifo_empty;
 
   // xfft: aresetn low >= 2 cycles with the datapath; one config beat (forward)
   always @(posedge clk) begin
@@ -196,7 +200,7 @@ module chan_top #(
                  (($signed(cdc_i) > 16'sd2047) | ($signed(cdc_i) < -16'sd2048) |
                   ($signed(cdc_q) > 16'sd2047) | ($signed(cdc_q) < -16'sd2048));
 
-  wire [17:0] u_i, u_q;
+  wire [15:0] u_i, u_q;
   wire        frozen;
   wire [31:0] snap_frame;
   reg  [11:0] snap_i = 12'd0;
@@ -215,8 +219,8 @@ module chan_top #(
     .freeze_req (freeze), .frozen (frozen), .snap_frame (snap_frame),
     .snap_i (snap_i), .snap_data (snap_in_data)
   );
-  // xfft input: XN_RE [17:0] and XN_IM [41:24], each sign-extended to 24 bits
-  assign m_axis_fft_tdata = {{6{u_q[17]}}, u_q, {6{u_i[17]}}, u_i};
+  // xfft input: XN_RE [15:0], XN_IM [31:16]
+  assign m_axis_fft_tdata = {u_q, u_i};
   assign m_axis_fft_tlast = u_last;
 
   wire        fb_we, fb_bank, fd_valid, fd_sat;
@@ -286,7 +290,8 @@ module chan_top #(
     .m_sel_ready (m_axis_sel_tready), .m_sel_last (m_axis_sel_tlast),
     .hist_frames (hist_frames), .hist_drops (hist_drops), .hist_first_frame (hist_first),
     .sel_frames (sel_frames), .sel_drops (sel_drops), .overruns (overruns),
-    .busy_o (pack_busy), .snap_addr (snap_addr), .snap_data (snap_out_data)
+    .busy_o (pack_busy), .hist_empty_o (hist_fifo_empty), .sel_empty_o (sel_fifo_empty),
+    .snap_addr (snap_addr), .snap_data (snap_out_data)
   );
 
   // ---------------------------------------------------------------------------
@@ -333,7 +338,7 @@ module chan_top #(
           14'h002: up_rdata <= scratch;
           14'h003: up_rdata <= MAGIC;
           14'h004: up_rdata <= {28'd0, auto_fwd, sel_en, hist_en, run};
-          14'h005: up_rdata <= {31'd0, ~dp_rst};
+          14'h005: up_rdata <= {28'd0, pack_busy, sel_fifo_empty, hist_fifo_empty, ~dp_rst};
           14'h006: up_rdata <= {28'd0, out_shift};
           14'h007: up_rdata <= {BLOCK_LOG2[7:0], 8'd8, 16'd512};  // block_log2, taps, bins
           14'h00C: up_rdata <= {PSD_LOG2[7:0], 8'd4, SUB_BLOCKS[15:0]};  // psd_log2, sub-windows, U

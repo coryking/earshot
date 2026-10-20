@@ -18,14 +18,13 @@ import numpy as np
 import typer
 
 from . import activity as act
-from .channelizer import (DEFAULT, fir_fixed, output_quantize, phase_correct,
-                          power_word, prototype_fixed)
+from .channelizer import DEFAULT, fir_fixed, output_quantize, power_word, prototype_fixed
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 
 @app.command()
-def snap(path: Path, out_shift: int = 9) -> None:
+def snap(path: Path, out_shift: int = DEFAULT.out_shift) -> None:
     from . import xfft_cmodel
 
     raw = np.fromfile(path, "<u4")

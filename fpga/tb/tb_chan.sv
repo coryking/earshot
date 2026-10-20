@@ -17,7 +17,8 @@ module tb_chan;
   string vec;
   int frames, samples, out_shift, ready_pct, adc_period_ps, adc_gap_pct;
   int expect_drops, expect_overflow, sat_samples, clipped, reset_at_frame;
-  int on_q8, off_q8, hang, bias_q8, snapshot_at;
+  int on_q8, off_q8, hang, bias_q8, snapshot_at, auto_fwd, det_reset_at, adc_losses;
+  bit h_lost = 0, s_lost = 0;    // a loss flag was seen: later records are not model-exact
   int errors = 0;
 
   logic [31:0] stim   [];
@@ -51,7 +52,7 @@ module tb_chan;
   logic        adc_valid = 0;
   logic [15:0] adc_i = 0, adc_q = 0;
 
-  wire [47:0] fft_in_data;   wire fft_in_valid, fft_in_ready, fft_in_last;
+  wire [31:0] fft_in_data;   wire fft_in_valid, fft_in_ready, fft_in_last;
   wire [7:0]  cfg_data;      wire cfg_valid, cfg_ready;
   wire [63:0] fft_out_data;  wire [15:0] fft_out_user;
   wire        fft_out_valid, fft_out_ready, fft_out_last;
@@ -62,7 +63,7 @@ module tb_chan;
 
   chan_top #(
     .ID(7), .COEF_FILE_PREFIX("pfb_coef_p"), .LOG_TABLE("chan_log2_table.mem"),
-    .BLOCK_LOG2(2), .SUB_BLOCKS(3), .PSD_LOG2(3)
+    .BLOCK_LOG2(2), .SUB_BLOCKS(2), .PSD_LOG2(3)   // = golden.SIM_DET
   ) dut (
     .s_axi_aclk (clk), .s_axi_aresetn (aresetn),
     .s_axi_awvalid (awvalid), .s_axi_awaddr (awaddr), .s_axi_awprot (3'd0),
@@ -190,7 +191,7 @@ module tb_chan;
       end else begin
         h_frame = hist_data[47:0];
         if (hist_data[48]) h_disc_flags++;
-        if (hist_data[49]) h_ovf_flags++;
+        if (hist_data[49]) begin h_ovf_flags++; h_lost = 1; end
         if (hist_data[50]) h_sat_flags++;
         if (h_frame != h_last + 1 && h_frame != 0) begin
           h_gaps++;
@@ -203,7 +204,7 @@ module tb_chan;
         h_word = 0;
       end
     end else begin
-      if (!expect_overflow && h_frame < frames &&
+      if (!h_lost && h_frame < frames &&
           hist_data !== {exp_bins[h_frame*512 + 2*h_word + 1], exp_bins[h_frame*512 + 2*h_word]}) begin
         if (errors < 20) $error("hist f%0d p%0d: got %h expected %h", h_frame, h_word, hist_data,
                {exp_bins[h_frame*512 + 2*h_word + 1], exp_bins[h_frame*512 + 2*h_word]});
@@ -218,7 +219,7 @@ module tb_chan;
   longint s_frame = -1, s_last = -1;
   int     s_prev_bin, s_count, s_records = 0, s_gaps = 0;
   task automatic sel_close();
-    if (s_frame >= 0 && s_count != mask_count) begin
+    if (s_frame >= 0 && (auto_fwd ? s_count < mask_count : s_count != mask_count)) begin
       $error("sel f%0d: %0d samples, expected %0d", s_frame, s_count, mask_count); errors++;
     end
   endtask
@@ -230,12 +231,14 @@ module tb_chan;
         s_gaps++;
         if (!sel_data[48]) begin $error("sel: gap without flag at %0d", s_frame); errors++; end
       end
+      if (sel_data[49]) s_lost = 1;
       s_last = s_frame; s_prev_bin = -1; s_count = 0; s_records++;
     end else if (sel_data[63:60] == 4'h5) begin
       automatic int bn = sel_data[56:48];
-      if (s_frame < 0 || bn <= s_prev_bin || !mask_bit[bn] || sel_data[47:32] != s_frame[15:0]) begin
+      if (s_frame < 0 || bn <= s_prev_bin || (!mask_bit[bn] && !auto_fwd) ||
+          sel_data[47:32] != s_frame[15:0]) begin
         $error("sel: bad sample word %h in frame %0d", sel_data, s_frame); errors++;
-      end else if (!expect_overflow && s_frame < frames && sel_data[31:0] !== exp_bins[s_frame*512 + bn]) begin
+      end else if (!s_lost && s_frame < frames && sel_data[31:0] !== exp_bins[s_frame*512 + bn]) begin
         if (errors < 20) $error("sel f%0d bin %0d: got %h expected %h", s_frame, bn,
                                 sel_data[31:0], exp_bins[s_frame*512 + bn]);
         errors++;
@@ -364,7 +367,10 @@ module tb_chan;
     void'($value$plusargs("OFF_Q8=%d", off_q8));
     void'($value$plusargs("HANG=%d", hang));
     void'($value$plusargs("BIAS_Q8=%d", bias_q8));
-    snapshot_at = -1;
+    snapshot_at = -1; auto_fwd = 0; det_reset_at = -1; adc_losses = 0;
+    void'($value$plusargs("AUTO_FWD=%d", auto_fwd));
+    void'($value$plusargs("DET_RESET_AT_FRAME=%d", det_reset_at));
+    void'($value$plusargs("ADC_LOSSES=%d", adc_losses));
     void'($value$plusargs("SNAPSHOT_AT_FRAME=%d", snapshot_at));
     stim = new[samples];
     exp_bins = new[frames * 512];
@@ -395,26 +401,57 @@ module tb_chan;
     axi_read(reg_addr(2), v);
     if (v != 32'h5A5A1234) begin $error("SCRATCH 0x%h", v); errors++; end
 
+    // reset defaults, then configuration readback
+    check_reg(4, "control@reset", 0);
+    check_reg(6, "out_shift@reset", 7);
+    check_reg(8, "det_on@reset", 221);
+    check_reg(9, "det_off@reset", 133);
+    check_reg(11, "det_hang@reset", 39);
+    check_reg(1, "id", 7);
+    check_reg(7, "config", {8'd2, 8'd8, 16'd512});
+    check_reg('hC, "det_config", {8'd3, 8'd4, 16'd2});
     configure();
-    axi_write(reg_addr(4), 32'h7);                 // run, hist_en, sel_en
+    check_reg(6, "out_shift", out_shift);
+    check_reg(8, "det_on", on_q8);
+    check_reg(9, "det_off", off_q8);
+    check_reg(10, "det_bias", bias_q8);
+    check_reg(11, "det_hang", hang);
+    for (int w = 0; w < 16; w++) check_reg('h40 + w, "mask", mask_words[w]);
+    axi_write(reg_addr(4), auto_fwd ? 32'hF : 32'h7);  // run, hist_en, sel_en[, auto]
     repeat (100) @(posedge clk);
     feed_go = 1;
 
+    if (det_reset_at > 0) begin
+      wait_frames(det_reset_at);
+      axi_write(reg_addr(4), 32'h1F);              // DET_RESET pulse while running
+      check_reg(4, "control", 32'hF);
+    end
+
     if (reset_at_frame > 0) begin
-      // reset mid-stream: stop while samples and records are in flight, restart,
-      // then replay the stimulus from sample 0 (frame numbers restart at 0)
+      // (1) soft stop while the packetizer is mid-record: the record must complete
       wait_frames(reset_at_frame);
+      wait (dut.i_pack.busy && dut.i_pack.hist_go && dut.i_pack.b > 100);
       axi_write(reg_addr(4), 32'h6);
       repeat (3000) @(posedge clk);
-      wait (feed_done);
       axi_read(reg_addr(5), v);
-      if (v[0]) begin $error("datapath still running after stop"); errors++; end
+      if (v[0] || v[3]) begin $error("datapath still running/packing after stop: %h", v); errors++; end
+      // (2) system and ADC-core reset while samples are still streaming in
+      @(posedge clk) aresetn <= 0;
+      @(posedge adc_clk) adc_rst <= 1;
+      repeat (16) @(posedge clk);
+      aresetn <= 1;
+      @(posedge adc_clk) adc_rst <= 0;
+      repeat (50) @(posedge clk);
+      check_reg(4, "control@sysreset", 0);
+      check_reg(6, "out_shift@sysreset", 7);
+      check_reg('h12, "frames@sysreset", 0);
+      if (h_word != -1) begin $error("hist record truncated by the stop (word %0d)", h_word); errors++; end
+      wait (feed_done);
       h_last = -1; s_last = -1;
+      configure();
       axi_write(reg_addr(4), 32'h7);
       feed_done = 0;
     end
-
-    if (snapshot_at > 0) snapshot_check();
 
     wait (feed_done);
     wait_frames(frames);
@@ -427,7 +464,7 @@ module tb_chan;
       check_reg('h10, "samples", samples);
       check_reg('h15, "clips", clipped);
       check_reg('h16, "saturations", sat_samples);
-      check_reg('h14, "adc_overflows", 0);
+      check_reg('h14, "adc_losses", adc_losses);
     end else begin
       axi_read(reg_addr('h14), v);
       $display("  adc_overflows    = %0d", v);
@@ -441,12 +478,24 @@ module tb_chan;
     if (expect_drops && v == 0 && !expect_overflow) begin $error("expected hist drops"); errors++; end
     axi_read(reg_addr('h1A), v);  $display("  sel_drops        = %0d", v);
     if (!expect_drops && v != 0) begin $error("unexpected sel drops"); errors++; end
+    sel_close();
+    if (h_word != -1) begin $error("partial history record at end (word %0d)", h_word); errors++; end
     $display("  hist records %0d (gaps %0d), sel records %0d (gaps %0d), sat flags %0d",
              h_records, h_gaps, s_records, s_gaps, h_sat_flags);
+    if (!expect_drops && !expect_overflow && reset_at_frame < 0 && snapshot_at < 0) begin
+      if (h_records != frames || s_records != frames) begin
+        $error("records hist %0d sel %0d, expected %0d each", h_records, s_records, frames); errors++;
+      end
+    end else if (reset_at_frame < 0 && snapshot_at < 0) begin
+      axi_read(reg_addr('h17), v);
+      if (h_records != v) begin $error("hist records %0d != HIST_FRAMES %0d", h_records, v); errors++; end
+      axi_read(reg_addr('h19), v);
+      if (s_records != v) begin $error("sel records %0d != SEL_FRAMES %0d", s_records, v); errors++; end
+    end
     if (h_records == 0 || s_records == 0) begin $error("no records"); errors++; end
     if (sat_samples > 0 && h_sat_flags == 0) begin $error("no saturation flag"); errors++; end
 
-    if (!expect_overflow) begin
+    if (!expect_overflow && det_reset_at < 0) begin
       int lv_err = 0;
       for (int k = 0; k < 512; k++) begin
         axi_read(reg_addr('h200 + k), v);

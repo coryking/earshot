@@ -50,6 +50,13 @@ confirmed. The design note (`design.md`) cites these by key.
   - Burst I/O with natural-order output runs load, process and unload serially.
   - Latency is reported in the IP GUI; there's no closed-form formula.
 
+- **[xapp1161]** AMD/Xilinx XAPP1161, *Polyphase Filter Bank Channelizer*, Rev 1.0,
+  2013 [P metadata; PDF not read]. A multi-channel FDM channelizer reference design.
+  It was consulted only as to its existence and scope, so nothing here depends on
+  it. **[xd100]** AMD Vitis Tutorial XD100, "Polyphase Channelizer" (AI Engine,
+  Versal) [P]: a P/Q-oversampled channelizer after [harris03], M = 16, 8 taps per
+  phase. It targets Versal AI Engines, so its architecture does not carry over.
+
 ## Open FPGA references
 
 - **[casper]** A. Parsons et al., "PetaOp/second FPGA signal processing for SETI

@@ -7,7 +7,8 @@
 //   hist data [15:0]=I(2p) [31:16]=Q(2p) [47:32]=I(2p+1) [63:48]=Q(2p+1), p=0..255
 //   sel data  [63:60]=0x5 [56:48]=bin [47:32]=frame[15:0] [31:16]=Q [15:0]=I
 //   flags: bit0 frames of this stream were dropped before this one
-//          bit1 ADC samples were dropped (CDC FIFO overflow) since the last header
+//          bit1 this frame's 4096-sample window may span lost ADC samples (CDC FIFO
+//               overflow or ADC core reset): set for the 16 frames after a loss
 //          bit2 a sample in this frame saturated the 16-bit output
 //
 // Admission is per frame: a frame enters a stream only if that stream's FIFO has
@@ -59,6 +60,8 @@ module chan_pack #(
   output reg  [31:0]  sel_drops = 32'd0,
   output reg  [31:0]  overruns = 32'd0,
   output wire         busy_o,
+  output wire         hist_empty_o,
+  output wire         sel_empty_o,
   // frame-buffer readback for the live self-test (valid while not busy)
   input  wire [9:0]   snap_addr,      // {bank, bin}
   output wire [31:0]  snap_data       // latency 1
@@ -88,7 +91,7 @@ module chan_pack #(
   reg  [9:0]  b = 10'd0;          // bin being read (0..511), 512 = done
   reg         hist_go, sel_go;
   reg         hist_disc = 1'b0, sel_disc = 1'b0;
-  reg         hist_ovf = 1'b0, sel_ovf = 1'b0;
+  reg  [4:0]  ovf_frames = 5'd0;  // frames still overlapping a sample loss
   reg  [31:0] ovf_seen = 32'd0;
   reg         hist_armed = 1'b0;   // first frame after enable not yet recorded
 
@@ -105,20 +108,25 @@ module chan_pack #(
   reg  [8:0]  rb;
   reg  [31:0] even_word;
 
-  wire start = ~busy & (pend | fd_valid);
+  wire start = ~busy & ~rst & (pend | fd_valid);
   wire [47:0] start_frame = pend ? pend_frame : fd_frame;
   wire        start_sat   = pend ? pend_sat : fd_sat;
   wire        start_bank  = start_frame[0];
   wire        ovf_new     = (adc_overflow_count != ovf_seen);
+  wire        ovf_flag    = ovf_new | (ovf_frames != 5'd0);
 
   assign sel_query = rb;
   wire sel_bit = mask_bit | (auto_forward & active_bit);
 
+  // A soft reset (RUN = 0) waits for the record being written to finish, so the
+  // output streams never carry a truncated record (the history ring's fixed
+  // record size depends on it). New frames are not admitted meanwhile.
+  wire rst_now = rst & ~busy;
   always @(posedge clk) begin
-    if (rst) begin
+    if (rst_now) begin
       busy <= 1'b0; pend <= 1'b0; b <= 10'd0; rv <= 1'b0;
       hw_en <= 1'b0; sw_en <= 1'b0;
-      hist_disc <= 1'b0; sel_disc <= 1'b0; hist_ovf <= 1'b0; sel_ovf <= 1'b0;
+      hist_disc <= 1'b0; sel_disc <= 1'b0; ovf_frames <= 5'd0;
       ovf_seen <= adc_overflow_count; hist_armed <= 1'b1;
       hist_frames <= 32'd0; hist_drops <= 32'd0; sel_frames <= 32'd0;
       sel_drops <= 32'd0; overruns <= 32'd0; hist_first_frame <= 48'd0;
@@ -127,15 +135,17 @@ module chan_pack #(
       hw_en <= 1'b0;
       sw_en <= 1'b0;
 
+      // A loss affects every frame whose 4096-sample window (16 hops) spans it.
       if (ovf_new) begin
         ovf_seen <= adc_overflow_count;
-        hist_ovf <= 1'b1;
-        sel_ovf <= 1'b1;
+        ovf_frames <= 5'd16;
+      end else if (start && ovf_frames != 5'd0) begin
+        ovf_frames <= ovf_frames - 5'd1;
       end
       if (!hist_en) hist_armed <= 1'b1;
 
       // queue a frame that arrives while busy; a third one is an overrun
-      if (fd_valid & ~start) begin
+      if (fd_valid & ~start & ~rst) begin
         if (pend) begin
           overruns <= overruns + 32'd1;
           hist_disc <= hist_disc | hist_en;
@@ -162,9 +172,8 @@ module chan_pack #(
         sel_go <= sel_en & sel_room;
         if (hist_en & hist_room) begin
           hw_en <= 1'b1;
-          hw_data <= {4'hA, 4'h1, 5'd0, start_sat, hist_ovf | ovf_new, hist_disc, start_frame};
+          hw_data <= {4'hA, 4'h1, 5'd0, start_sat, ovf_flag, hist_disc, start_frame};
           hist_disc <= 1'b0;
-          hist_ovf <= 1'b0;
           hist_frames <= hist_frames + 32'd1;
           if (hist_armed) begin
             hist_first_frame <= start_frame;
@@ -176,9 +185,8 @@ module chan_pack #(
         end
         if (sel_en & sel_room) begin
           sw_en <= 1'b1;
-          sw_data <= {4'hA, 4'h2, 5'd0, start_sat, sel_ovf | ovf_new, sel_disc, start_frame};
+          sw_data <= {4'hA, 4'h2, 5'd0, start_sat, ovf_flag, sel_disc, start_frame};
           sel_disc <= 1'b0;
-          sel_ovf <= 1'b0;
           sel_frames <= sel_frames + 32'd1;
         end else if (sel_en) begin
           sel_drops <= sel_drops + 32'd1;
@@ -244,6 +252,8 @@ module chan_pack #(
     .rd_rst_busy (), .sbiterr (), .underflow (), .wr_ack (), .wr_rst_busy ()
   );
 
+  assign hist_empty_o = hist_empty;
+  assign sel_empty_o = sel_empty;
   assign m_hist_valid = ~hist_empty;
   assign m_sel_valid = ~sel_empty;
   assign m_hist_last = 1'b0;

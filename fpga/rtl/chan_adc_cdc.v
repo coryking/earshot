@@ -8,7 +8,7 @@
 // Samples are written whenever axi_ad9361 marks channel 0 valid and the proc side
 // has requested capture (run, synchronized into adc_clk). If the FIFO is full the
 // sample is dropped and counted; the count crosses back as a Gray-coded bus
-// (xpm_cdc_gray). A non-zero increment is a hardware-detected discontinuity.
+// (xpm_cdc_gray). Any increment is a hardware-detected discontinuity.
 
 `timescale 1ns/1ps
 `default_nettype none
@@ -53,11 +53,13 @@ module chan_adc_cdc #(
 
   wire wr_en = adc_valid & run_adc & ~full & ~wr_rst_busy;
 
-  // Control-path counter: no reset needed beyond the ADC core reset.
+  // Loss-event counter: samples dropped on a full FIFO, plus one per ADC core reset
+  // (which discards whatever the FIFO held, e.g. on a sample-rate change). It is
+  // never reset, so it only ever steps by one per adc_clk as xpm_cdc_gray requires.
+  reg adc_rst_d = 1'b1;          // the power-up reset is not a loss
   always @(posedge adc_clk) begin
-    if (adc_rst) begin
-      overflow_adc <= 32'd0;
-    end else if (adc_valid & run_adc & (full | wr_rst_busy)) begin
+    adc_rst_d <= adc_rst;
+    if ((adc_rst & ~adc_rst_d) | (~adc_rst & adc_valid & run_adc & (full | wr_rst_busy))) begin
       overflow_adc <= overflow_adc + 32'd1;
     end
   end
