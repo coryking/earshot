@@ -20,7 +20,9 @@ use tokio::sync::broadcast;
 /// A channel entry with the operator's edits (name, followed, muted, notes) attached.
 fn with_user(c: &Value, user: &std::collections::BTreeMap<String, Value>) -> Value {
     let mut out = c.clone();
-    let edits = c["id"].as_str().and_then(|id| user.get(id));
+    // Edits are stored under the catalog source id (frequency and slot), not the channel id.
+    let source = c["id"].as_str().map(|id| source_id(id, c["slot"].as_u64().unwrap_or(1)));
+    let edits = source.as_deref().and_then(|id| user.get(id));
     out["user"] = edits.cloned().unwrap_or(Value::Null);
     out["display_name"] = edits
         .and_then(|u| u["name"].as_str())
@@ -53,6 +55,9 @@ fn status_json(app: &App) -> Value {
     // The engine adds what it can do on top of what the producer advertises.
     let mut source = e.source.clone();
     if source.is_object() {
+        if !source["capabilities"].is_object() {
+            source["capabilities"] = json!({});
+        }
         source["capabilities"]["fm_audio"] = json!(true);
         source["capabilities"]["per_client_listening"] = json!(true);
     }
@@ -166,12 +171,25 @@ async fn ws(State(app): State<App>, Query(q): Query<Listen>, ws: WebSocketUpgrad
             // 422, not 404: the frontend reads 404 on its paths as "not built yet".
             return api_error(StatusCode::UNPROCESSABLE_ENTITY, format!("unknown channel {id}")).into_response();
         }
-        if e.listeners.len() >= MAX_LISTENERS {
-            return api_error(StatusCode::TOO_MANY_REQUESTS, "too many listeners").into_response();
-        }
     }
+    // Reserve the listener slot now, under the same lock as the cap check, so parallel
+    // handshakes cannot exceed it. The guard releases it if the upgrade never completes.
+    let guard = requested.as_ref().map(|id| {
+        let connection = NEXT_CONNECTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut e = app.engine();
+        if e.listeners.len() >= MAX_LISTENERS {
+            return None;
+        }
+        e.listeners.insert(connection, id.clone());
+        sync_pins(&mut e);
+        Some(ListenerGuard { app: app.clone(), connection })
+    });
+    if matches!(guard, Some(None)) {
+        return api_error(StatusCode::TOO_MANY_REQUESTS, "too many listeners").into_response();
+    }
+    let guard = guard.flatten();
     ws.max_message_size(8192)
-        .on_upgrade(move |s| socket(s, app, requested))
+        .on_upgrade(move |s| socket(s, app, requested, guard))
         .into_response()
 }
 static NEXT_CONNECTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -187,15 +205,8 @@ impl Drop for ListenerGuard {
         sync_pins(&mut e);
     }
 }
-async fn socket(mut socket: WebSocket, app: App, requested: Option<String>) {
+async fn socket(mut socket: WebSocket, app: App, requested: Option<String>, _guard: Option<ListenerGuard>) {
     let joined = Instant::now();
-    let connection = NEXT_CONNECTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let _guard = requested.as_ref().map(|id| {
-        let mut e = app.engine();
-        e.listeners.insert(connection, id.clone());
-        sync_pins(&mut e);
-        ListenerGuard { app: app.clone(), connection }
-    });
     let mut rx = app.audio.subscribe();
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     loop {
@@ -542,14 +553,24 @@ async fn catalog_edit(State(app): State<App>, Path(id): Path<String>, Json(body)
                 }
                 _ => return Err(api_error(StatusCode::BAD_REQUEST, format!("{key} must be a boolean"))),
             }
-        } else if matches!(key.as_str(), "frequency_hz" | "slot") {
+        } else if key == "frequency_hz" {
             if let Some(n) = value.as_f64().filter(|n| n.is_finite()) {
                 edits[key] = json!(n);
+            }
+        } else if key == "slot" {
+            // Integral slots only (the UI may send 1.0).
+            if let Some(n) = value.as_f64().filter(|n| n.is_finite() && n.fract() == 0. && (0. ..=255.).contains(n)) {
+                edits[key] = json!(n as u64);
             }
         }
         // Anything else is a read-only field of the entry the UI read: ignored.
     }
-    e.store.user.insert(id.clone(), edits);
+    // Nothing left to remember: drop the key instead of keeping an empty edit around.
+    if edits.as_object().is_none_or(|o| o.is_empty()) {
+        e.store.user.remove(&id);
+    } else {
+        e.store.user.insert(id.clone(), edits);
+    }
     e.store.user_dirty = true;
     let group: Vec<&Value> = e
         .channels
@@ -798,6 +819,7 @@ mod tests {
         let garage = after["sources"].as_array().unwrap().iter().find(|s| s["id"] == "452000000-1").expect("user-only source listed");
         assert_eq!(garage["name"], "Garage");
         assert_eq!(garage["frequency_hz"], 452000000.0);
+        assert_eq!(garage["slot"], 1, "the remembered slot reads back as an integer");
         let status = status_json(&app);
         assert!(status["channels"].as_array().unwrap().iter().any(|c| c["user"].is_object() || c["display_name"].is_string()));
     }
@@ -820,6 +842,15 @@ mod tests {
         assert!(put("454018750-2", json!({"name":"changed","followed":123})).await.is_err());
         assert_eq!(app.engine().store.user.get("454018750-2").cloned(), before);
         assert!(put("454018750-2", json!({"name":null})).await.is_ok());
+        // An edit that ends up empty leaves no entry behind (and cannot be used to fill the store).
+        put("452111111-1", json!({})).await.unwrap();
+        assert!(!app.engine().store.user.contains_key("452111111-1"));
+        put("452111111-1", json!({"name":"n"})).await.unwrap();
+        put("452111111-1", json!({"name":null})).await.unwrap();
+        assert!(!app.engine().store.user.contains_key("452111111-1"), "clearing the last edit removes the entry");
+        // A producer that sends capabilities as a non-object cannot panic /api/status.
+        app.engine().source = json!({"capabilities": 7});
+        assert_eq!(status_json(&app)["source"]["capabilities"]["fm_audio"], true);
         // A hand-damaged state file (an edit that is not an object) cannot panic the handler.
         app.engine().store.user.insert("454018750-2".into(), json!("garbage"));
         assert!(put("454018750-2", json!({"followed":true})).await.is_ok());
@@ -983,6 +1014,33 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let _ = app.audio.send(audio("C-1", 7));
         assert_eq!(read_audio(&mut legacy).await, vec![("C-1".to_string(), 7)]);
+    }
+    #[tokio::test]
+    async fn the_listener_cap_holds_under_parallel_handshakes() {
+        let app = App::new(3);
+        {
+            let mut e = app.engine();
+            e.channels.insert("A-1".into(), json!({"id":"A-1","stream_id":1,"in_range":true,"logical_hz":454000001.0}));
+        }
+        let router = router(app.clone(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let url = format!("ws://127.0.0.1:{port}/api/listen?channel_id=A-1");
+        let attempts: Vec<_> = (0..MAX_LISTENERS + 8).map(|_| tokio::spawn(tokio_tungstenite::connect_async(url.clone()))).collect();
+        let mut sockets = vec![];
+        let (mut accepted, mut refused) = (0, 0);
+        for attempt in attempts {
+            match attempt.await.unwrap() {
+                Ok(socket) => {
+                    accepted += 1;
+                    sockets.push(socket);
+                }
+                Err(_) => refused += 1,
+            }
+        }
+        assert_eq!(accepted, MAX_LISTENERS, "exactly the cap is admitted ({refused} refused)");
+        assert_eq!(app.engine().listeners.len(), MAX_LISTENERS);
     }
     #[tokio::test]
     async fn missing_source_controls_never_report_applied() {

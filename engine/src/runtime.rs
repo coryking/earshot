@@ -1284,57 +1284,74 @@ pub fn spawn_janitor(app: App) {
             thread::sleep(Duration::from_millis(500));
             let dt = last.elapsed().as_secs_f32();
             last = Instant::now();
-            let at = now();
-            let mut e = app.engine();
-            let events = e.store.close_idle(at);
-            for event in events {
-                let _ = app.events.send(json!({"type":"call","phase":event.phase,"generation":e.generation,"call":event.call}));
-            }
-            // Every entry at one frequency (Unknown, DMR slots, FM) sees the same slice RF; credit
-            // it once per (stream, frequency) so the block's RF total is not multiplied.
-            let mut rf_credited: HashSet<(u64, u64)> = HashSet::new();
-            let observed: Vec<(String, bool, bool, bool, Option<Value>)> = e
-                .channels
-                .values()
-                .map(|c| {
-                    let keep = c["decoded"] == true || c["carrier_snapped"] == true;
-                    let rf = c["rf_active"] == true;
-                    let first_rf = rf
-                        && rf_credited.insert((
-                            c["stream_id"].as_u64().unwrap_or(0),
-                            c["logical_hz"].as_f64().map_or(0, |v| v.round() as u64),
-                        ));
-                    (
-                        c["id"].as_str().unwrap_or("").to_string(),
-                        first_rf,
-                        c["speech_active"] == true,
-                        rf,
-                        keep.then(|| persisted_entry(c)),
-                    )
-                })
-                .collect();
-            for (id, first_rf, talk, _rf, entry) in observed {
-                e.store.add_activity(&id, at, if first_rf { dt } else { 0. }, if talk { dt } else { 0. });
-                if let Some(entry) = entry
-                    && e.store.known.get(&id) != Some(&entry)
-                {
-                    e.store.known.insert(id, entry);
-                    e.store.known_dirty = true;
-                }
-            }
-            if last_save.elapsed() > Duration::from_secs(10) {
-                e.store.save();
-                e.store.prune(at);
+            let save = last_save.elapsed() > Duration::from_secs(10);
+            if save {
                 last_save = Instant::now();
             }
+            janitor_tick(&app, dt, now(), save);
         }
     });
+}
+/// One upkeep pass: close finished calls, add `dt` seconds of activity, keep the persisted
+/// catalog current, and (when `save`) queue writes and prune old history.
+pub(crate) fn janitor_tick(app: &App, dt: f32, at: f64, save: bool) {
+    let mut e = app.engine();
+    let events = e.store.close_idle(at);
+    for event in events {
+        let _ = app.events.send(json!({"type":"call","phase":event.phase,"generation":e.generation,"call":event.call}));
+    }
+    // Activity is kept per catalog source (the id the catalog and calls use), so the Unknown, DMR
+    // and FM entries at one frequency and slot share a series. Every entry at one frequency sees
+    // the same slice RF; credit it once per (stream, frequency) so the block total is not multiplied.
+    let mut rf_credited: HashSet<(u64, u64)> = HashSet::new();
+    let observed: Vec<(String, String, bool, bool, Option<Value>)> = e
+        .channels
+        .values()
+        .map(|c| {
+            let keep = c["decoded"] == true || c["carrier_snapped"] == true;
+            let rf = c["rf_active"] == true
+                && rf_credited.insert((
+                    c["stream_id"].as_u64().unwrap_or(0),
+                    c["logical_hz"].as_f64().map_or(0, |v| v.round() as u64),
+                ));
+            let id = c["id"].as_str().unwrap_or("").to_string();
+            let source = source_id(&id, c["slot"].as_u64().unwrap_or(1));
+            (id, source, rf, c["speech_active"] == true, keep.then(|| persisted_entry(c)))
+        })
+        .collect();
+    for (id, source, rf, talk, entry) in observed {
+        e.store.add_activity(&source, at, if rf { dt } else { 0. }, if talk { dt } else { 0. });
+        if let Some(entry) = entry {
+            // Rewrite catalog.json only when what identifies a channel changes; the volatile
+            // counters ride along in memory and reach disk with the next identity change or at
+            // shutdown.
+            let identity = |v: &Value| {
+                let mut v = v.clone();
+                if let Some(o) = v.as_object_mut() {
+                    for key in ["last_rf", "last_heard", "audio_seconds", "sequence"] {
+                        o.remove(key);
+                    }
+                }
+                v
+            };
+            let changed = e.store.known.get(&id).is_none_or(|old| identity(old) != identity(&entry));
+            e.store.known.insert(id, entry);
+            if changed {
+                e.store.known_dirty = true;
+            }
+        }
+    }
+    if save {
+        e.store.save();
+        e.store.prune(at);
+    }
 }
 /// Flush persistent state now (graceful shutdown).
 pub fn flush(app: &App) {
     let mut e = app.engine();
     // Calls still open when the engine stops keep their audio.
     e.store.close_all();
+    e.store.known_dirty = true; // carry the volatile counters to disk
     e.store.save();
     e.store.sync();
 }
@@ -1917,6 +1934,34 @@ mod tests {
         let (fm, _, _, calls) = fm_session_in(app, true, false, true);
         assert!(fm.is_none() && calls.is_empty(), "control channels carry data, not calls");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn activity_is_kept_per_catalog_source_and_known_entries_persist_on_identity_change() {
+        let app = App::new(8);
+        {
+            let mut e = app.engine();
+            for (id, slot, protocol) in [("454018750-DMR-2", 2, "DMR"), ("454018750-Unknown-1", 1, "Unknown")] {
+                e.channels.insert(id.into(), json!({"id":id,"slot":slot,"protocol":protocol,"stream_id":50,"logical_hz":454029498.0,
+                    "rf_active":true,"speech_active": protocol=="DMR","decoded": protocol=="DMR","audio_seconds":1.0}));
+            }
+        }
+        janitor_tick(&app, 0.5, 1_800_000_000., false);
+        let report = app.engine().store.activity(1_800_000_000., 3600, 300);
+        assert_eq!(report["sources"]["454018750-2"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum::<f64>(), 0.5);
+        assert!(report["sources"].get("454018750-DMR-2").is_none(), "keyed by source id, not channel id");
+        let rf: f64 = report["rf_total"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum();
+        assert_eq!(rf, 0.5, "slice RF is credited once, not once per entry");
+        // Volatile counters alone do not dirty the catalog; an identity change does.
+        let mut e = app.engine();
+        e.store.known_dirty = false;
+        drop(e);
+        app.engine().channels.get_mut("454018750-DMR-2").unwrap()["audio_seconds"] = json!(5.0);
+        janitor_tick(&app, 0.5, 1_800_000_001., false);
+        assert!(!app.engine().store.known_dirty, "audio_seconds is volatile");
+        app.engine().channels.get_mut("454018750-DMR-2").unwrap()["label"] = json!("Day Wireless");
+        // `label` is persisted identity.
+        janitor_tick(&app, 0.5, 1_800_000_002., false);
+        assert!(app.engine().store.known_dirty, "a new label is an identity change");
     }
     #[test]
     fn rf_active_metadata_only_streams_do_not_starve_forwarded_stream() {

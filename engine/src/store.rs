@@ -318,6 +318,7 @@ impl Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0., |d| d.as_secs_f64());
         self.prune(now);
+        self.evict(now); // retention also applies to what was loaded
     }
     /// Queue whatever changed for the writer thread. Cheap enough to call every few seconds;
     /// serialization is bounded by one day of activity, not the whole history.
@@ -799,9 +800,10 @@ mod tests {
         let dir = temp("mem");
         let mut store = Store::new(Some(dir.clone()), 1);
         let mut ids = vec![];
+        let base = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64() - 1000.;
         for i in 0..5 {
-            record(&mut store, "a", i as f64 * 100., 40.0); // 640 kB each
-            ids.push(id_of(&store.close_idle(i as f64 * 100. + 50.)[0]));
+            record(&mut store, "a", base + i as f64 * 100., 40.0); // 640 kB each
+            ids.push(id_of(&store.close_idle(base + i as f64 * 100. + 50.)[0]));
         }
         assert!(store.memory_used <= 1024 * 1024, "{}", store.memory_used);
         assert!(
@@ -818,6 +820,18 @@ mod tests {
             }
             _ => panic!("a restarted store reads from disk"),
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn retention_also_applies_to_calls_loaded_from_a_previous_run() {
+        let dir = temp("age");
+        let mut store = Store::new(Some(dir.clone()), 8);
+        record(&mut store, "a", 1000., 1.0); // 1970: far older than the retention window
+        store.close_idle(1010.);
+        store.save();
+        store.sync();
+        let reopened = Store::new(Some(dir.clone()), 8);
+        assert!(reopened.list(None, 10, None).0.is_empty(), "expired calls are dropped at load");
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
