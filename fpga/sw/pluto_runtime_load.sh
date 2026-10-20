@@ -19,8 +19,8 @@ STATE=${STATE:-$HOME/.cache/amateur-radio-fpga/pluto-session}
 mkdir -p "$STATE"
 SSHOPT=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10
         -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o LogLevel=ERROR)
-p() { sshpass -p analog ssh "${SSHOPT[@]}" "$PLUTO" "$@"; }
-put() { sshpass -p analog scp -O "${SSHOPT[@]}" "$1" "$PLUTO:$2"; }
+p() { sshpass -p "${PLUTO_SSH_PASSWORD:-analog}" ssh "${SSHOPT[@]}" "$PLUTO" "$@"; }
+put() { sshpass -p "${PLUTO_SSH_PASSWORD:-analog}" scp -O "${SSHOPT[@]}" "$1" "$PLUTO:$2"; }
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$STATE/session.log"; }
 
 exec 9>>"$LOCK"

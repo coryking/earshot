@@ -11,8 +11,12 @@ bit-accurate model, the RTL, the testbench and the Pluto block design are here.
 
 ## Status
 
-The bitstream is routed with timing met. The bit-exact simulation regression
-passes. It has **not** yet been loaded on hardware.
+The routed bitstream meets timing and has been tested on the Pluto Rev.B. A live
+25.6 Msps input advanced at 100,000 channelizer frames/s; a frozen frame matched
+the bit-exact model in all 512 bins. Selected DMA and the RIQ1 producer delivered
+continuous 100 ksps IQ, measured FPGA PSD, and live unencrypted DMR audio. The
+boot image currently reserves DMA memory while the tested FPGA image is loaded at
+runtime.
 
 ### Implementation (Vivado 2026.1, ADI hdl_2026_r1, xc7z010clg225-1, routed)
 
@@ -150,112 +154,57 @@ Every run also reads back the reset defaults and the configuration registers.
 Where nothing is dropped, it checks that every frame produced exactly one record
 per stream.
 
-## Live bring-up (for the agent doing it)
+## Live operation
 
-One path: check the bitstream with a runtime load, flash it, then run
-`pluto-fpga-source` under a plain restart loop. Once it runs, it is the only
-producer. The stock ARM producer and the supervisor's image detection and
-profiles are retired, not extended.
+The Pluto Rev.B currently boots ADI v0.37 with a 64 MiB `no-map` reservation at
+0x04000000 for DMA. The stock FPGA, kernel and ramdisk remain byte-identical to
+the verified backup. `fpga/sw/ensure_pluto_fpga.sh` checks that reservation and
+Linux's memory map, then loads the already routed image through FPGA manager if
+needed. It checks the channelizer magic before reporting ready. The runtime loader
+unbinds and rebinds the USB gadget around `iiod`; a 90-second on-device timer
+reboots if the host never confirms reconnection. A normal Pluto reboot loses the
+runtime image. The installed `amateur-radio-live` preflight reloads it, and its
+one-minute guard restarts the unit after an unexpected Pluto reboot.
 
-**State at hand-off.**
-- Nothing from this work has been loaded or flashed. The Pluto runs stock ADI
-  v0.37.
-- **Wait for home-it-services#258 before any of this.** A Pluto reboot currently
-  drops its network link (the ESXi vSwitchPluto uplink), and a Codex session is
-  fixing that. Both the runtime load's fail-safe and the flash end in a reboot.
-- The release bundle, with `SHA256SUMS`, is listed under "Release" below:
-  `system_top.bit` / `.xsa`, `system_top.bit.bin` (for fpga_manager), `pluto.frm`
-  (flash image), `chanctl`, `pluto-fpga-source`.
-
-**Rules.** RX only. Use radio-borrow (`offload/radio-borrow` on main) for any
-Pluto access while the stock live receiver is still running: it stops live,
-restores the radio, runs your command and resumes live. Device-write commands
-were denied by this session's permission classifier ("Remote Shell Writes");
-check that you have permission before starting.
-
-### 1. Runtime load and check (non-persistent)
+On wigglebutt, build the ARM tools and supervisor, and install the home-it-services
+radio units. With the managed units installed:
 
 ```sh
-B=~/.cache/amateur-radio-fpga/release/pluto_chan-<sha>
-offload/radio-borrow fpga/sw/pluto_runtime_load.sh load $B/system_top.bit.bin $B/chanctl
+fpga/sw/build.sh ~/.cache/amateur-radio-fpga/sw
+cargo build --release --locked --manifest-path supervisor/Cargo.toml
+systemctl --user start amateur-radio amateur-radio-live
+systemctl --user status amateur-radio amateur-radio-live
 ```
 
-`pluto_runtime_load.sh` saves the RX settings, copies the `.bin` to
-`/lib/firmware` (sha256 checked), then runs a detached swap script on the Pluto.
-That script kills any producer, unbinds the PL drivers, programs through
-`/sys/class/fpga_manager/fpga0`, rebinds and touches `/tmp/pl_is_chan`. If the
-state isn't `operating` it reboots the Pluto to stock. The RX settings are then
-re-applied and read back. Log: `~/.cache/amateur-radio-fpga/pluto-session/session.log`.
+`amateur-radio-live` owns Pluto and starts the single RX-only producer. The
+producer receives at 25.6 Msps, covers about 20 MHz around the configured LO,
+and sends one 100 ksps IQ slice per selected bin. The engine pins the bin when a
+browser selects a frequency; the selection stays armed through silence. The
+measured 512-bin FPGA PSD is sent at 10 Hz, activity at 1 Hz. Current activity
+flags overreport occupied bins, so `activity_calibrated` is false and the host
+does not use those flags to admit decoders. Read `/api/status` for live vs
+reconnecting, drops, and measured spectrum geometry.
 
-Check, inside one `radio-borrow --lock` session, with RX set by hand (25.6 Msps,
-20 MHz, LO 460 MHz, `gain_control_mode=manual`, gain 40):
-- `/tmp/chanctl start --sel --bins 1`, then `/tmp/chanctl info` twice 1 s apart:
-  FRAMES advances about 100,000/s; `adc_losses`, `pack_overruns`, `fft_events` stay 0.
-- `/tmp/chanctl snap /tmp/s.bin`, copy it back, then
-  `PYTHONPATH=. uv run python -m fpga.model.live_check snap s.bin --out-shift 7`.
-  It **must report 0 mismatches** (hardware vs model, bit-exact, live input), with
-  `input_peak_adc` ≤ 2048.
-- `/tmp/chanctl psd`: occupied bins in 450–470 MHz stand out (bin k at LO + k·50 kHz,
-  k ≥ 256 negative). Then `/tmp/chanctl stop`.
+The default radio-reading LO is 460016998 Hz (roughly 450–470 MHz receive
+window), with +23.3 ppm display correction and an initial forwarded bin near
+the live 454.54375 MHz DMR voice channel. To move the window, put
+`FPGA_CENTER=<radio-reading Hz>` in `~/.config/amateur-radio/fpga-window.env`
+and restart `amateur-radio-live`; use the browser to choose an individual
+frequency. The operator control and audio are served through the existing
+tailnet-only radio ingress. The original boot image and DFU recovery procedure
+are in `offload/RECOVERY.md`; do not flash an unchanged older channelizer image
+that failed to boot during historical bring-up.
 
-The DMA streams need the flashed carve-out, so they aren't tested here.
-`fpga/sw/pluto_runtime_load.sh restore` reboots to stock.
-
-### 2. Flash
-
-`pluto.frm` in the bundle is ADI's v0.37 release image with the FPGA swapped and a
-no-map `reserved-memory/chan_dma@4000000` (64 MiB at 0x04000000) added to every DT
-(`fpga/sw/make_frm.py`; kernel and ramdisk byte-identical). Flash it with the stock
-updater (checked in the v0.37 ramdisk):
+For a direct maintenance preflight, with no service owning Pluto:
 
 ```sh
-scp -O pluto.frm root@192.168.10.10:/tmp/pluto.frm
-ssh root@192.168.10.10 'update_frm.sh /tmp/pluto.frm && reboot'
+B=~/.cache/amateur-radio-fpga/release/pluto_chan-8cea8ae
+fpga/sw/ensure_pluto_fpga.sh "$B/system_top.bit.bin" "$B/chanctl"
 ```
 
-`update_frm.sh` checks the md5 trailer and FIT magic, writes `/dev/mtdblock3`
-(firmware only, never boot or env) and sets `fit_size`; it doesn't reboot on its
-own. After the reboot, check `/proc/iomem`: System RAM excludes
-0x04000000–0x07FFFFFF. Record the hashes on issue #1. Recovery if it doesn't
-boot: USB DFU from the Mac, `offload/RECOVERY.md`.
-
-### 3. Run the producer
-
-Stop the stock live receiver first, so nothing else opens the radio. Then run
-the producer from the host in a restart loop. The loop re-copies the binary each
-time, since `/tmp` on the Pluto doesn't survive a reboot:
-
-```sh
-B=~/.cache/amateur-radio-fpga/release/pluto_chan-<sha>
-while :; do
-  scp -O $B/pluto-fpga-source root@192.168.10.10:/tmp/ &&
-  ssh root@192.168.10.10 'chmod +x /tmp/pluto-fpga-source &&
-    exec /tmp/pluto-fpga-source --center 460000000 --gain 40 --forward-streams 1'
-  sleep 5
-done
-```
-
-`pluto-fpga-source` accepts the flashed image by its DT carve-out node. It:
-- listens on TCP 9010 (`pluto-fpga-source waiting on TCP:9010; radio unopened`);
-- opens RX when a client connects, saving and restoring the RX settings;
-- serves RIQ1 with 512 streams (stream = bin + 1, 100 ksps, centre LO + k·50 kHz,
-  `hardware_counter: true`);
-- sends IQ for forwarded or pinned bins, PSD every 100 ms, and activity for
-  active, forwarded or pinned bins (all bins every 2 s);
-- accepts `get_config`, `pin` and `stop`.
-
-**Unverified or risky** (none of this has run on hardware):
-- hdl_2026_r1 IP against the v0.37 kernel 5.10 drivers: cf_axi_dds probes a core
-  with DDS and TX IQ correction off, and axi_ad9361 has TDD off. A probe failure
-  aborts the runtime load before `PL_SWAP_DONE`; run restore.
-- During the swap the AD9363 RESETB/ENABLE/TXNRX pins pass through the PL and
-  float. Nothing transmits by design (TX LO off, DDS scale 0), but the loader
-  doesn't explicitly hold TX quiet.
-- The PL rebind can renumber IIO devices under iiod. Network libiio clients may
-  need an iiod restart; sysfs is unaffected.
-- `pluto-fpga-source` has never run. Its record parser is checked against the
-  format spec, not against an RTL sel-stream dump.
-- The detector thresholds assume manual gain; under AGC every bin reads active.
+This preflight is idempotent. It refuses DMA if the reservation is missing and
+will not touch custom registers on a stock FPGA boot. Stop the live unit before
+other hardware experiments; `offload/radio-borrow` manages that handoff.
 
 ## Reproduce
 
@@ -276,37 +225,26 @@ python3 fpga/sw/make_frm.py <plutosdr-fw-v0.37/pluto.frm> <system_top.bit> <out/
 The xfft bit-accurate C model ships with Vivado. The Python CLIs set its
 `LD_LIBRARY_PATH` themselves.
 
-## Open issues
+## Current limitations
 
-1. **Hardware validation has not run.** Runtime load, live snapshot and PSD
-   checks, then firmware ramboot and flash, as above.
-2. **ARM/RIQ1 consumer.** No ARM producer reads the selected-bin records yet. The
-   mapping is direct:
-   - stream = bin;
-   - `first_sample` = frame;
-   - header bit0/bit1 → discontinuity/overflow, GAP;
-   - `hardware_counter: true` from the frame numbers and SAMPLES.
-   That belongs to the ARM/Rust side.
-3. **Activity detection needs manual gain.** Under AGC the floor tracker can't work.
-   Cross-bin normalization (a per-block percentile across bins) is the candidate fix.
-4. **DMA access path.** DMA is driven from user space through `/dev/mem`. An ADI
-   IIO driver for the two streams is the conventional follow-up.
-5. **Fit margin.** Slices are 99.8% packed, DSP 92.5%. Further logic needs the
-   R2²SDF FFT (about −1k LUT and −9 DSP) or giving up the RX low-rate decimator.
-6. **Detector floor freeze (P2, review 20261019-212400).** Freezing the floor
-   while a bin is active keeps long overs open, but false opens and small floor
-   rises now latch for up to about 30 s. The level-gated fix is in design.md §5,
-   not yet implemented. Carriers on for longer than about 31 s read inactive.
-   Also open: a frame that starts during a DET_RESET sweep is still counted as
-   whole (P3; it only follows an operator reset).
-7. **Host channel filter.** It limits 12.5 kHz adjacent-channel rejection
-   (−8.8 dB SNR with a 40 dB-stronger neighbour), whatever the channelizer does.
+- Pluto's FPGA image is loaded into volatile PL after each boot. The installed
+  guard handles a normal Pluto reboot, but physical USB/power faults can still
+  require someone at the device. The hardware watchdog is fed by Linux and does
+  not detect a detached but otherwise healthy USB gadget.
+- The FPGA activity detector overflags quiet bins on live RF; PSD, IQ and DMR
+  voice work, while the host treats activity as uncalibrated. See `docs/design.md`
+  for the floor-tracking behavior. No new RTL was built for this milestone.
+- The user-space `/dev/mem` DMA path is suitable for this prototype. A kernel
+  driver and a persistent FPGA boot image are future reliability work.
+- The host channel filter limits rejection of a 40 dB stronger adjacent DMR
+  channel at a 12.5 kHz offset (model result: −8.8 dB SNR).
 
-## Next phase: freeing DSPs (planned, not started; waits for on-device validation)
+## Next phase: freeing DSPs (planned, not started)
 
 The DDR history ring already exists and uses **no** DSPs: `chan_hist_dma`, in
-cyclic mode, writes every bin of every frame. What gates it is the carve-out in
-the flashed image, not fabric. DSPs matter for 1024 bins. Where the 74 used DSPs
+cyclic mode, writes every bin of every frame. The installed DMA carve-out permits
+testing it; host support for consuming that ring is still future work. DSPs matter
+for 1024 bins. Where the 74 used DSPs
 are: axi_ad9361 RX 12 (4 channels × DC filter + IQ correction), rx_fir_decimator
 22, PFB FIR 16, power 2, xfft 22.
 

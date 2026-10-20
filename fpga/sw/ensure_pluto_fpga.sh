@@ -20,8 +20,8 @@ fi
 PLUTO=${PLUTO:-root@192.168.10.10}
 SSHOPT=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
         -o ConnectTimeout=5 -o LogLevel=ERROR)
-p() { sshpass -p analog ssh "${SSHOPT[@]}" "$PLUTO" "$@"; }
-put() { sshpass -p analog scp -O -q "${SSHOPT[@]}" "$1" "$PLUTO:$2"; }
+p() { sshpass -p "${PLUTO_SSH_PASSWORD:-analog}" ssh "${SSHOPT[@]}" "$PLUTO" "$@"; }
+put() { sshpass -p "${PLUTO_SSH_PASSWORD:-analog}" scp -O -q "${SSHOPT[@]}" "$1" "$PLUTO:$2"; }
 
 for attempt in $(seq 1 30); do
   if p true 2>/dev/null; then break; fi
