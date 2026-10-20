@@ -181,6 +181,33 @@ def detection(snr_db: float, threshold_db: float, nu: float) -> float:
     return float(stats.ncx2.sf(nu * t, nu, nu * snr))
 
 
+def pfa_min_floor(threshold_db: float, nu: float, draws: int) -> float:
+    """False-alarm probability when the floor is the minimum of `draws` noise blocks.
+
+    Order-statistic CFAR (Rohling 1983) with k = 1: L and the floor are independent
+    chi2_nu/nu variables (blocks are ~independent: K = 256 frames >> the 2-frame
+    correlation of the 2x-oversampled bank). With F, f the chi2_nu/nu CDF/PDF,
+      Pfa(t) = integral f_min(m) (1 - F(m t)) dm,  f_min = D f (1 - F)^(D-1).
+    """
+    t = 10 ** (threshold_db / 10)
+    dist = stats.chi2(nu, scale=1 / nu)
+    lo, hi = dist.ppf(1e-12), dist.ppf(1 - 1e-12)
+    m = np.linspace(lo, hi, 20001)
+    fmin = draws * dist.pdf(m) * dist.sf(m) ** (draws - 1)
+    return float(np.trapezoid(fmin * dist.sf(m * t), m))
+
+
+def threshold_min_floor(pfa: float, nu: float, draws: int) -> float:
+    lo, hi = 0.0, 10.0
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if pfa_min_floor(mid, nu, draws) > pfa:
+            lo = mid
+        else:
+            hi = mid
+    return hi
+
+
 def expected_min_bias_db(nu: float, draws: int, trials: int = 20000, seed: int = 1) -> float:
     """E[10 log10(min of `draws` chi2_nu/nu)]: how far below the mean a minimum lands."""
     rng = np.random.default_rng(seed)

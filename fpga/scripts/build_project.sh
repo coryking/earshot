@@ -6,13 +6,14 @@ set -euo pipefail
 name="${1:?usage: build_project.sh <project-name>}"
 here="$(cd "$(dirname "$0")/.." && pwd)"
 export ADI_HDL_DIR="${ADI_HDL_DIR:-$HOME/.cache/amateur-radio-fpga/hdl}"
+export FPGA_DIR="$here"
 export ADI_IGNORE_VERSION_CHECK=1          # hdl_2026_r1 targets Vivado 2025.1; we use 2026.1
 out="${FPGA_BUILD:-$HOME/.cache/amateur-radio-fpga/build}/$name"
 mkdir -p "$out"
 rsync -a --delete --exclude '*.runs' --exclude '*.cache' --exclude '*.gen' --exclude '*.srcs' \
   --exclude '*.hw' --exclude '*.ip_user_files' --exclude '*.sdk' --exclude '*.xpr' \
   --exclude '*.log' --exclude '*.jou' --exclude 'reports' "$here/projects/$name/" "$out/"
-for f in "$here"/rtl/*.v "$here"/rtl/*.sv; do [ -e "$f" ] && cp "$f" "$out/"; done
+for f in "$here"/rtl/*.v "$here"/rtl/mem/*.mem; do [ -e "$f" ] && cp "$f" "$out/"; done
 cd "$out"
 rm -rf ./*.runs ./*.cache ./*.gen ./*.srcs ./*.hw ./*.ip_user_files ./*.sdk ./*.xpr .Xil
 vivado -mode batch -nojournal -log vivado.log -source system_project.tcl

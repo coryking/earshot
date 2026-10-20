@@ -174,60 +174,66 @@ def align_snr(test: np.ndarray, ref: np.ndarray, max_lag: int = 40) -> tuple[flo
 
 
 @app.command("straddle")
-def straddle_cmd(seconds: float = 0.25, fixed: bool = True) -> dict:
-    """Real DMR (fixture) placed at offsets across a bin, with near/far interferers."""
+def straddle_cmd(seconds: float = 0.25) -> dict:
+    """Real DMR (fixture) at offsets across a bin, near/far interferers, realistic levels.
+
+    Levels: the strong signal sits at -10 dBFS of the 12-bit ADC (650 LSB rms); the
+    desired DMR is near_far dB below it; white noise of 1.5 LSB rms per component
+    stands in for the receiver noise floor. Each case reports the recovered SNR
+    (vs. the clean fixture after the host filter) for: an ideal float channelizer on
+    the same quantized input, the fixed-point FPGA path (32-bit internal and the
+    16-bit slice), and the ARM C prototype filter. "fpga_loss_db" is float - fixed.
+    """
     cfg = DEFAULT
     d25 = dmr_fixture(seconds, 0.5)
     dwide = upsample_to_fs(d25, cfg)
-    n = len(dwide)
-    t = np.arange(n)
-    rms = np.sqrt(np.mean(np.abs(dwide) ** 2))
-    desired_amp = 20.0                    # ADC units rms; the interferers are 40-60 dB above
-    base_bin = 40                         # +2 MHz
-    ref100 = signal.resample_poly(d25, 4, 1)
-    ref25 = host_filter(ref100)
-    # interferer: a different stretch of the same DMR recording
+    dwide /= np.sqrt(np.mean(np.abs(dwide) ** 2))
     i25 = dmr_fixture(seconds, 3.0)
     iwide = upsample_to_fs(i25, cfg)
-    iwide *= 1 / np.sqrt(np.mean(np.abs(iwide) ** 2))
+    iwide /= np.sqrt(np.mean(np.abs(iwide) ** 2))
+    n = len(dwide)
+    t = np.arange(n)
+    rng = np.random.default_rng(3)
+    noise = 1.5 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    strong = 650.0
+    ref25 = host_filter(signal.resample_poly(d25, 4, 1))
+    base_bin = 40
+    scenarios = [("alone_strong", None, 0.0), ("alone_weak", None, 40.0)]
+    scenarios += [(f"interferer_+{d / 1e3:g}kHz_{p:g}dB", d, p)
+                  for d, p in [(12.5e3, 40), (25e3, 40), (37.5e3, 50), (50e3, 50),
+                               (75e3, 60), (100e3, 60), (150e3, 60)]]
     cases = []
-    scenarios = [("clean", None, 0.0)]
-    scenarios += [(f"adjacent_channel_+{d / 1e3:g}k_+{p:g}dB", d, p)
-                  for d, p in [(12.5e3, 40), (25e3, 40), (50e3, 50), (75e3, 60), (100e3, 60)]]
     for off in [0.0, 6.25e3, 12.5e3, 18.75e3, 25e3]:
         f_d = base_bin * cfg.bin_hz + off
-        k = int(np.floor(f_d / cfg.bin_hz + 0.5))         # nearest bin (25 kHz -> upper bin)
+        k = int(np.floor(f_d / cfg.bin_hz + 0.5))
         resid = f_d - k * cfg.bin_hz
-        for name, d_int, p_db in scenarios:
-            x = desired_amp / rms * dwide * np.exp(2j * np.pi * f_d * t / cfg.fs)
+        for name, d_int, near_far in scenarios:
+            amp = strong * 10 ** (-near_far / 20)
+            x = amp * dwide * np.exp(2j * np.pi * f_d * t / cfg.fs) + noise
             if d_int is not None:
-                x = x + desired_amp * 10 ** (p_db / 20) * iwide * np.exp(
-                    2j * np.pi * (f_d + d_int) * t / cfg.fs)
-            row = {"offset_from_bin_center_hz": resid, "scenario": name}
-            for label, h in [("kaiser_float", None),
-                             ("arm_c_filter_float", c_reference_prototype(cfg.n, cfg.taps))]:
-                y = pfb_float(x, h, cfg)[:, k]
+                x = x + strong * iwide * np.exp(2j * np.pi * (f_d + d_int) * t / cfg.fs)
+            xq = np.rint(x.real) + 1j * np.rint(x.imag)
+            row = {"offset_from_bin_center_hz": resid, "scenario": name,
+                   "desired_rms_adc": amp, "clipped": int(np.sum(np.abs(xq.real) > 2047)
+                                                          + np.sum(np.abs(xq.imag) > 2047))}
+
+            def snr(y):
                 y = y * np.exp(-2j * np.pi * resid * np.arange(len(y)) / cfg.out_rate)
-                row[label + "_snr_db"] = align_snr(host_filter(y), ref25)[0]
-            if fixed:
-                xq = np.rint(x.real) + 1j * np.rint(x.imag)
-                r = pfb_fixed(xq, cfg)
-                y = (r.y_re[:, k] + 1j * r.y_im[:, k]).astype(complex)
-                y *= np.exp(-2j * np.pi * resid * np.arange(len(y)) / cfg.out_rate)
-                row["fixed_point_snr_db"] = align_snr(host_filter(y), ref25)[0]
-                o = (r.out_re[:, k] + 1j * r.out_im[:, k]).astype(complex)
-                o *= np.exp(-2j * np.pi * resid * np.arange(len(o)) / cfg.out_rate)
-                row["fixed_16bit_out_snr_db"] = align_snr(host_filter(o), ref25)[0]
-                row["out_saturated"] = int(r.out_sat[:, k].sum())
+                return align_snr(host_filter(y), ref25)[0]
+
+            row["float_snr_db"] = snr(pfb_float(xq, None, cfg)[:, k])
+            row["arm_c_filter_snr_db"] = snr(pfb_float(xq, c_reference_prototype(cfg.n, cfg.taps), cfg)[:, k])
+            r = pfb_fixed(xq, cfg)
+            row["fixed_snr_db"] = snr((r.y_re[:, k] + 1j * r.y_im[:, k]).astype(complex))
+            row["fixed_16bit_snr_db"] = snr((r.out_re[:, k] + 1j * r.out_im[:, k]).astype(complex))
+            row["fpga_loss_db"] = row["float_snr_db"] - row["fixed_16bit_snr_db"]
+            row["out_saturated"] = int(r.out_sat[:, k].sum())
             cases.append(row)
-            print(row, flush=True)
-    # The input-referred reference: the same DMR with the 12-bit rounding only,
-    # filtered by the host directly at 25.6 Msps would cost hours; instead report the
-    # ceiling set by rounding the desired signal to integer ADC units.
-    out = {"seconds": seconds, "desired_rms_adc": desired_amp,
-           "note": "SNR = recovered vs fixture after the host filter (engine/src/dsp.rs), "
-                   "best lag and complex gain. Desired is ~20 ADC LSB rms, so 12-bit "
-                   "rounding alone limits the fixed-point SNR.",
+            print(json.dumps(row, default=float), flush=True)
+    # host-filter rejection of a lone interferer at +12.5 kHz (no desired signal)
+    out = {"seconds": seconds, "strong_rms_adc": strong, "noise_rms_per_component": 1.5,
+           "note": "SNR = recovered desired vs. the clean fixture after the host filter "
+                   "(engine/src/dsp.rs equivalent), best lag and complex gain.",
            "cases": cases}
     save("straddle", out)
     return out
@@ -334,46 +340,58 @@ def activity_cmd(real_seconds: float = 12.0, mc_blocks: int = 20000) -> dict:
     k = det.frames_per_block
     nu = act.welch_dof(h, cfg.hop, k)
     window_blocks = det.sub_blocks * det.sub_windows
-    # The floor is min over between U*(V-1)+1 and U*V blocks; use the mid-point.
-    draws = det.sub_blocks * det.sub_windows - det.sub_blocks // 2
+    # The floor is the min over the current partial sub-window and V full ones:
+    # between U*V + 1 and U*(V + 1) blocks. The largest D gives the lowest floor and
+    # so the highest false-alarm rate; design for it.
+    draws = det.sub_blocks * (det.sub_windows + 1)
     bias_db = act.expected_min_bias_db(nu, draws)
-    pfa_target = 1e-6
-    thr_true = act.threshold_for_pfa(pfa_target, nu)
-    on_db = thr_true - bias_db       # threshold above the (low-biased) minimum
+    pfa_on, pfa_off = 1e-8, 1e-2
+    on_db = act.threshold_min_floor(pfa_on, nu, draws)
+    off_db = act.threshold_min_floor(pfa_off, nu, draws)
     det = dataclasses.replace(det, bias_q8=0, on_q8=act.db_to_q8(on_db),
-                              off_q8=act.db_to_q8(on_db - 3.0))
-    pd_rows = [{"in_bin_snr_db": s, "pd": act.detection(s, thr_true, nu)}
-               for s in (0, 1, 2, 3, 4, 6)]
-    # Monte Carlo on complex Gaussian bins through the bit-exact detector.
+                              off_q8=act.db_to_q8(off_db))
+    # Detection: signal in-bin SNR s above a floor that sits ~bias below the mean.
+    pd_rows = [{"in_bin_snr_db": s_db,
+                "pd": act.detection(s_db, on_db + bias_db, nu)}
+               for s_db in (-6, -5, -4, -3, -2, -1, 0)]
+    # Monte Carlo of the bit-exact detector on chi-square blocks, at a looser
+    # threshold (Pfa 1e-4) where the predicted rate can be measured.
     rng = np.random.default_rng(7)
     bins = 512
-    sigma_word = 2.0e4               # mean power word (noise ~ 100 rms per component)
-    st = act.initial_state(bins, det)
-    false_opens = 0
-    warm = window_blocks + 1
-    opened_prev = np.zeros(bins, bool)
-    for b in range(mc_blocks + warm):
-        # chi-square block sums with nu dof have the same law as the K-frame sums
-        acc = rng.chisquare(nu, bins) / nu * sigma_word * k
-        st.acc[:] = 0
-        st.frames = k - 1
-        blk, _ = act.step(st, np.rint(acc).astype(np.int64), det)
-        if b >= warm:
-            false_opens += int((blk.active & ~opened_prev).sum())
-        opened_prev = blk.active
-    mc = {"blocks": mc_blocks, "bins": bins,
-          "false_open_rate_per_bin_block": false_opens / (mc_blocks * bins),
-          "false_opens_per_hour_whole_band": false_opens / (mc_blocks * bins) * bins
-          * cfg.out_rate / k * 3600}
+    sigma_word = 2.0e4
+    mc = {}
+    for label, t_db in [("pfa_1e-4", act.threshold_min_floor(1e-4, nu, draws)),
+                        ("operating", on_db)]:
+        mdet = dataclasses.replace(det, on_q8=act.db_to_q8(t_db), off_q8=act.db_to_q8(t_db),
+                                   hang=0)
+        st = act.initial_state(bins, mdet)
+        warm = det.sub_blocks * (det.sub_windows + 1)
+        opens = 0
+        prev = np.zeros(bins, bool)
+        for blk_i in range(mc_blocks + warm):
+            acc = rng.chisquare(nu, bins) / nu * sigma_word * k
+            st.acc[:] = 0
+            st.frames = k - 1
+            blk, _ = act.step(st, np.rint(acc).astype(np.int64), mdet)
+            if blk_i >= warm:
+                opens += int((blk.active & ~prev).sum())
+            prev = blk.active
+        mc[label] = {"threshold_db": t_db,
+                     "predicted_pfa_at_max_window": act.pfa_min_floor(t_db, nu, draws),
+                     "measured_open_rate": opens / (mc_blocks * bins),
+                     "trials": mc_blocks * bins}
+    frame_rate = cfg.out_rate
+    tests_per_hour = bins * frame_rate / k * 3600
     real = activity_real(real_seconds, det, cfg)
     out = {"block_frames": k, "block_ms": k / cfg.out_rate * 1e3,
            "welch_equivalent_dof": nu, "independent_frame_equivalent": nu / 2,
            "min_window_blocks": window_blocks,
            "min_window_s": window_blocks * k / cfg.out_rate,
+           "floor_draws_max": draws,
            "expected_min_bias_db": bias_db,
-           "pfa_target_per_bin_block": pfa_target,
-           "threshold_above_true_floor_db": thr_true,
-           "threshold_above_min_floor_db": on_db, "close_threshold_db": on_db - 3.0,
+           "pfa_on": pfa_on, "pfa_off": pfa_off,
+           "open_threshold_above_floor_db": on_db, "close_threshold_above_floor_db": off_db,
+           "expected_false_opens_per_hour_whole_band": pfa_on * tests_per_hour,
            "on_q8": det.on_q8, "off_q8": det.off_q8, "hang_blocks": det.hang,
            "pd_vs_snr": pd_rows, "monte_carlo": mc, "off_air": real}
     save("activity", out)
