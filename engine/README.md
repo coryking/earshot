@@ -32,12 +32,21 @@ notices are in `licenses/`. Rust wraps the existing C++/C algorithms through a
 small C ABI. The production data path does not invoke Python or decoder
 subprocesses.
 
+Filter specifications, their derivation from the channel plan (ITU-R M.478-5, 47 CFR
+90.209/90.210), the design method, and measured results against synthetic and real IQ are in
+[`DESIGN-DSP.md`](DESIGN-DSP.md).
+
 ## Streaming contract
 
 A physical coarse IQ stream may declare multiple logical `targets` in CONFIG.
 One shared IQ packet fans out to the admitted logical workers; each worker mixes
 and filters its target before FM. Existing one-target stream configurations work
-unchanged. The coarse 100 ksps profile has not yet had fixture or device acceptance.
+unchanged. Channel `rf_active` is per frequency: on a shared slice it needs both
+`slice_rf_active` (the producer's physical activity, same for every target in the slice)
+and `target_rf_active` (measured in-band by the host from the slice spectrum, independent
+of decoder admission); `slice_targets` says how many targets share the slice. Each
+channel also carries `slice_level_db` and `target_level_db`. The coarse 100 ksps profile
+has fixture and synthetic acceptance (see DESIGN-DSP.md) but no device acceptance yet.
 
 The fixed 64-byte little-endian RIQ1 header is specified in
 [`../offload/PROTOCOL.md`](../offload/PROTOCOL.md). Incoming payloads are bounded

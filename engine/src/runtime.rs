@@ -1,6 +1,6 @@
 use crate::{
     codec::Decoder,
-    dsp::ChannelDsp,
+    dsp::{ChannelDsp, ChannelSpec, SliceMeter, TargetBand},
     wire::{DISCONTINUITY, Frame, OVERFLOW, PREROLL, START},
 };
 use anyhow::{Context, Result};
@@ -102,6 +102,8 @@ impl App {
             c["available"] = json!(false);
             c["decoder_admitted"] = json!(false);
             c["rf_active"] = json!(false);
+            c["slice_rf_active"] = json!(false);
+            c["target_rf_active"] = json!(false);
             c["speech_active"] = json!(false);
         }
     }
@@ -126,8 +128,29 @@ fn selected_logical(e: &Engine) -> Option<u64> {
 fn channel_id(frequency: f64, protocol: &str, slot: u8) -> String {
     format!("{frequency:.0}-{protocol}-{slot}")
 }
+/// `rf_active` is what a listener sees for this exact frequency. On a slice shared by
+/// several logical targets it needs both the slice (physical) activity and the
+/// target's own in-band activity; on a one-target stream it is the slice activity.
+fn refresh_rf(c: &mut Value) {
+    let slice = c["slice_rf_active"] == true;
+    let shared = c["slice_targets"].as_u64().unwrap_or(1) > 1;
+    let own = c["target_rf_active"] == true;
+    c["rf_active"] = json!(slice && (!shared || own));
+    c["level_db"] = if shared && c["target_level_db"].is_number() {
+        c["target_level_db"].clone()
+    } else {
+        c["slice_level_db"].clone()
+    };
+}
 fn make_channel(stream: u32, frequency: f64, protocol: &str, slot: u8) -> Value {
-    json!({"id":channel_id(frequency,protocol,slot),"stream_id":stream,"frequency_hz":frequency,"protocol":protocol,"slot":slot,"kind":"unidentified","rf_active":false,"decoded":false,"speech_active":false,"last_heard":null,"last_rf":null,"level_db":null,"audio_seconds":0.,"sequence":0,"in_range":true,"available":false})
+    json!({"id":channel_id(frequency,protocol,slot),"stream_id":stream,"frequency_hz":frequency,"protocol":protocol,"slot":slot,"kind":"unidentified","rf_active":false,"slice_rf_active":false,"slice_level_db":null,"slice_targets":1,"target_rf_active":null,"target_level_db":null,"decoded":false,"speech_active":false,"last_heard":null,"last_rf":null,"level_db":null,"audio_seconds":0.,"sequence":0,"in_range":true,"available":false})
+}
+fn spec_for(protocol: &str) -> ChannelSpec {
+    if protocol == "NXDN48" {
+        ChannelSpec::CHANNEL_6_25
+    } else {
+        ChannelSpec::CHANNEL_12_5
+    }
 }
 fn modes(cfg: &Value) -> Vec<(&'static str, u8)> {
     match cfg["protocol"].as_str() {
@@ -155,7 +178,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
     let (tx, rx) = mpsc::sync_channel::<Work>(4);
     thread::spawn(move || {
         let mut decoders = Vec::new();
-        let mut dsp = None;
+        let mut dsps: Vec<(ChannelSpec, ChannelDsp)> = Vec::new();
         let mut generation = None;
 
         let mut expected_sample = None;
@@ -188,15 +211,24 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                     .iter()
                     .filter_map(|&(p, s)| Decoder::new(p, s).ok().map(|d| (p, s, d)))
                     .collect();
-                dsp = Some(ChannelDsp::new(
-                    cfg["sample_rate_num_hz"]
-                        .as_f64()
-                        .zip(cfg["sample_rate_den"].as_f64())
-                        .filter(|(_, den)| *den > 0.)
-                        .map(|(num, den)| num / den)
-                        .unwrap_or(frame.rate as f64),
-                    frequency - frame.center_hz as f64,
-                ));
+                let input_rate = cfg["sample_rate_num_hz"]
+                    .as_f64()
+                    .zip(cfg["sample_rate_den"].as_f64())
+                    .filter(|(_, den)| *den > 0.)
+                    .map(|(num, den)| num / den)
+                    .unwrap_or(frame.rate as f64);
+                // One channel filter per channel class: NXDN48 (6.25 kHz) must not
+                // share the 12.5 kHz filter or its 6.25 kHz neighbors leak in.
+                dsps.clear();
+                for &(protocol, _) in &modes {
+                    let spec = spec_for(protocol);
+                    if !dsps.iter().any(|(s, _)| *s == spec) {
+                        dsps.push((
+                            spec,
+                            ChannelDsp::new(input_rate, frequency - frame.center_hz as f64, spec),
+                        ));
+                    }
+                }
                 generation = Some(frame.generation);
                 rate = frame.rate;
                 live_samples = 0;
@@ -225,16 +257,26 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                     )
                 })
                 .collect();
-            let pcm = dsp.as_mut().unwrap().push(&iq);
+            let mut outputs: Vec<(ChannelSpec, Vec<i16>)> = Vec::new();
+            for (spec, dsp) in &mut dsps {
+                if decoders.iter().any(|(p, _, _)| spec_for(p) == *spec) {
+                    outputs.push((*spec, dsp.push(&iq)));
+                }
+            }
+            let produced = outputs.first().map_or(0, |(_, pcm)| pcm.len());
             if frame.flags & PREROLL != 0 {
                 live_samples = 0;
                 saw_preroll = true;
             } else {
-                live_samples += pcm.len() as u64;
+                live_samples += produced as u64;
             }
             let mut protocol_evidence = None;
             for (protocol, slot, decoder) in &mut decoders {
-                let (audio, confirmed) = decoder.push(&pcm);
+                let spec = spec_for(protocol);
+                let Some((_, pcm)) = outputs.iter().find(|(s, _)| *s == spec) else {
+                    continue;
+                };
+                let (audio, confirmed) = decoder.push(pcm);
                 let speech = confirmed && !audio.is_empty() && frame.flags & PREROLL == 0;
                 let id = channel_id(frequency, protocol, *slot);
                 let mut e = app.inner.lock().unwrap();
@@ -247,8 +289,18 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                 let physical = e
                     .channels
                     .values()
-                    .find(|c| c["stream_id"] == stream && c["rf_active"] == true)
+                    .find(|c| c["stream_id"] == stream && c["slice_rf_active"] == true)
                     .cloned();
+                let sibling = e
+                    .channels
+                    .values()
+                    .find(|c| {
+                        c["stream_id"] == stream
+                            && c["id"] != id.as_str()
+                            && c["frequency_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
+                    })
+                    .cloned()
+                    .or_else(|| physical.clone());
                 let speech = speech && physical.is_some();
                 if confirmed && !audio.is_empty() && physical.is_some() {
                     protocol_evidence = Some(*protocol);
@@ -256,9 +308,18 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                         .channels
                         .entry(id.clone())
                         .or_insert_with(|| make_channel(stream, frequency, protocol, *slot));
-                    if let Some(physical) = &physical {
-                        for key in ["rf_active", "last_rf", "level_db"] {
-                            entry[key] = physical[key].clone();
+                    if let Some(sibling) = &sibling {
+                        for key in [
+                            "slice_rf_active",
+                            "slice_level_db",
+                            "slice_targets",
+                            "target_rf_active",
+                            "target_level_db",
+                            "rf_active",
+                            "last_rf",
+                            "level_db",
+                        ] {
+                            entry[key] = sibling[key].clone();
                         }
                     }
                     entry["decoded"] = json!(true);
@@ -429,6 +490,32 @@ fn schedule(
     }
     Ok(())
 }
+/// One spectrum meter per physical stream that carries several logical targets.
+/// Targets already measured keep their open/closed state across CONFIG refreshes.
+fn rebuild_meters(configs: &HashMap<u64, Value>, meters: &mut HashMap<u32, SliceMeter>) {
+    let mut grouped: HashMap<u32, Vec<TargetBand>> = HashMap::new();
+    for (&logical, cfg) in configs {
+        let stream = cfg["stream_id"].as_u64().unwrap_or(0) as u32;
+        let spec = spec_for(cfg["protocol"].as_str().unwrap_or("Unknown"));
+        grouped.entry(stream).or_default().push(TargetBand {
+            logical,
+            offset_hz: 0.,
+            bandwidth_hz: spec.band_hz,
+            active: meters
+                .get(&stream)
+                .and_then(|m| m.targets.iter().find(|t| t.logical == logical))
+                .is_some_and(|t| t.active),
+            level_dbfs: f64::NEG_INFINITY,
+        });
+    }
+    meters.clear();
+    for (stream, mut targets) in grouped {
+        if targets.len() > 1 {
+            targets.sort_by_key(|t| t.logical);
+            meters.insert(stream, SliceMeter::new(targets));
+        }
+    }
+}
 pub fn attach_control(stream: &TcpStream, app: &App) -> Result<()> {
     let mut writer = stream.try_clone()?;
     let (tx, rx) = mpsc::sync_channel::<Value>(32);
@@ -466,6 +553,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
     let mut transport_sequences = HashMap::new();
     let mut pending_gaps = HashSet::new();
     let mut iq_seen: HashMap<u32, Instant> = HashMap::new();
+    let mut meters: HashMap<u32, SliceMeter> = HashMap::new();
 
     loop {
         let mut frame = match Frame::read(&mut input) {
@@ -489,6 +577,8 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                         c["decoder_admitted"] = json!(false);
                         c["speech_active"] = json!(false);
                         c["rf_active"] = json!(false);
+            c["slice_rf_active"] = json!(false);
+            c["target_rf_active"] = json!(false);
                     }
                 } else {
                     app.error(format!("RIQ source disconnected: {e}"));
@@ -514,6 +604,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                 transport_sequences.clear();
                 pending_gaps.clear();
                 iq_seen.clear();
+                meters.clear();
             }
             let mut e = app.inner.lock().unwrap();
             e.source = config.clone();
@@ -530,6 +621,8 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     channel["in_range"] = json!(false);
                     channel["available"] = json!(false);
                     channel["rf_active"] = json!(false);
+                    channel["slice_rf_active"] = json!(false);
+                    channel["target_rf_active"] = json!(false);
                     channel["speech_active"] = json!(false);
                 }
             }
@@ -547,6 +640,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     targets.len() <= 64,
                     "physical stream exceeds 64 logical targets"
                 );
+                let target_count = targets.len();
                 for target in targets {
                     let mut cfg = physical.clone();
                     cfg.as_object_mut()
@@ -594,6 +688,8 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                         if channel["frequency_hz"] == frequency {
                             channel["stream_id"] = json!(stream);
                             channel["in_range"] = json!(true);
+                            channel["slice_targets"] = json!(target_count);
+                            refresh_rf(channel);
                         }
                     }
                     configs.insert(frequency.round() as u64, cfg);
@@ -604,6 +700,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                 json!({"type":"source_config","generation":frame.generation,"source":config}),
             );
             schedule(&app, &configs, &mut workers, &iq_seen)?;
+            rebuild_meters(&configs, &mut meters);
             transport_sequences.insert(frame.stream_id, frame.sequence);
             config_generation = Some(frame.generation);
             continue;
@@ -650,6 +747,45 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     .checked_add(frame.payload.len() as u64 / 4)
                     .context("IQ sample counter overflow")?;
                 iq_seen.insert(frame.stream_id, Instant::now());
+                if frame.flags & PREROLL == 0
+                    && let Some(meter) = meters.get_mut(&frame.stream_id)
+                {
+                    let iq: Vec<Complex32> = frame
+                        .payload
+                        .chunks_exact(4)
+                        .map(|b| {
+                            Complex32::new(
+                                i16::from_le_bytes([b[0], b[1]]) as f32,
+                                i16::from_le_bytes([b[2], b[3]]) as f32,
+                            )
+                        })
+                        .collect();
+                    for target in &mut meter.targets {
+                        target.offset_hz = target.logical as f64 - frame.center_hz as f64;
+                    }
+                    let full_scale = 2f64.powi(frame.valid_bits.clamp(1, 16) as i32 - 1);
+                    if meter.measure(&iq, frame.rate as f64, full_scale) {
+                        let mut e = app.inner.lock().unwrap();
+                        for target in &meter.targets {
+                            for c in e.channels.values_mut().filter(|c| {
+                                c["stream_id"] == frame.stream_id
+                                    && c["frequency_hz"].as_f64().map(|v| v.round() as u64)
+                                        == Some(target.logical)
+                            }) {
+                                let before = c["rf_active"].clone();
+                                c["target_rf_active"] = json!(target.active);
+                                c["target_level_db"] = json!(target.level_dbfs);
+                                refresh_rf(c);
+                                if c["rf_active"] == true {
+                                    c["last_rf"] = json!(now());
+                                }
+                                if c["rf_active"] != before {
+                                    let _ = app.events.send(json!({"type":"channel","generation":frame.generation,"channel":c}));
+                                }
+                            }
+                        }
+                    }
+                }
                 let shared = Arc::new(frame);
                 let mut missed = false;
                 for worker in workers.values().filter(|w| w.stream == shared.stream_id) {
@@ -707,15 +843,22 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     .values_mut()
                     .filter(|c| c["stream_id"] == frame.stream_id)
                 {
-                    let changed = c["rf_active"] != activity["rf_active"];
-                    c["rf_active"] = activity["rf_active"].clone();
-                    c["level_db"] = activity["level_db"].clone();
-                    if activity["rf_active"] == true {
+                    let before = c["rf_active"].clone();
+                    c["slice_rf_active"] = activity["rf_active"].clone();
+                    c["slice_level_db"] = activity["level_db"].clone();
+                    if activity["rf_active"] != true {
+                        // No IQ is forwarded while the gate is closed, so the target
+                        // measurement is stale; the next live packet re-measures it.
+                        c["target_rf_active"] = json!(false);
+                        c["target_level_db"] = Value::Null;
+                    }
+                    refresh_rf(c);
+                    if c["rf_active"] == true {
                         c["last_rf"] = json!(now());
                     } else {
                         c["speech_active"] = json!(false);
                     }
-                    if changed {
+                    if c["rf_active"] != before {
                         let _ = app.events.send(
                             json!({"type":"channel","generation":frame.generation,"channel":c}),
                         );
@@ -908,6 +1051,180 @@ mod tests {
         // forwarded RF-active stream, then the quiet forwarded stream; metadata-only
         // streams never take a slot.
         assert_eq!(admit(candidates, 6), vec![30, 20, 10]);
+    }
+
+    /// Replays an IQ fixture through the real ingest and worker path at `speed` times
+    /// real time and reports what the DMR decoder produced.
+    struct PacedFrames {
+        frames: std::vec::IntoIter<(f64, Vec<u8>)>,
+        current: std::io::Cursor<Vec<u8>>,
+        started: Instant,
+        speed: f64,
+    }
+    impl Read for PacedFrames {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            loop {
+                let n = self.current.read(buf)?;
+                if n > 0 {
+                    return Ok(n);
+                }
+                let Some((at, bytes)) = self.frames.next() else {
+                    return Ok(0);
+                };
+                let due = Duration::from_secs_f64(at / self.speed);
+                if let Some(wait) = due.checked_sub(self.started.elapsed()) {
+                    thread::sleep(wait);
+                }
+                self.current = std::io::Cursor::new(bytes);
+            }
+        }
+    }
+    #[test]
+    #[ignore = "set RADIO_DMR_IQ25K to the 25 ksps CI16 fixture"]
+    fn actual_dmr_iq_fixture_decodes_through_channel_filter() {
+        let path = std::env::var("RADIO_DMR_IQ25K").expect("RADIO_DMR_IQ25K");
+        let data = std::fs::read(path).unwrap();
+        let mut frames = vec![];
+        let config = json!({"input_center_hz":454216998,"input_rate_hz":6000000,"input_bandwidth_hz":6000000,"hardware_counter":false,"streams":[{"stream_id":1,"center_hz":454029223,"target_hz":454029223,"rate_hz":25000,"protocol":"Unknown","slot":1}]});
+        let mut b = vec![];
+        frame(4, 1, 0, 0, 0, config.to_string().into_bytes()).write(&mut b).unwrap();
+        frames.push((0., b));
+        let (mut sequence, mut sample) = (1u64, 0u64);
+        for chunk in data.chunks(10000) {
+            let mut b = vec![];
+            let mut f = frame(1, 1, 1, sequence, sample, chunk.to_vec());
+            f.format = 1;
+            f.write(&mut b).unwrap();
+            let at = sample as f64 / 25000.;
+            frames.push((at, b));
+            let mut a = vec![];
+            frame(3, 1, 1, sequence + 1, sample, br#"{"rf_active":true,"level_db":-30.0}"#.to_vec())
+                .write(&mut a)
+                .unwrap();
+            frames.push((at, a));
+            sample += chunk.len() as u64 / 4;
+            sequence += 2;
+        }
+        let app = App::new(8);
+        let input = PacedFrames {
+            frames: frames.into_iter(),
+            current: std::io::Cursor::new(vec![]),
+            started: Instant::now(),
+            speed: 8.,
+        };
+        // Observe the catalog while the source is still connected.
+        let observer = {
+            let app = app.clone();
+            thread::spawn(move || {
+                let mut best = (0., String::new());
+                for _ in 0..400 {
+                    thread::sleep(Duration::from_millis(25));
+                    let e = app.inner.lock().unwrap();
+                    for c in e.channels.values() {
+                        let seconds = c["audio_seconds"].as_f64().unwrap_or(0.);
+                        if seconds > best.0 {
+                            best = (seconds, c["id"].as_str().unwrap_or("").to_string());
+                        }
+                    }
+                }
+                best
+            })
+        };
+        ingest(input, app.clone()).unwrap();
+        let best = observer.join().unwrap();
+        println!("DMR fixture decoded audio: {} s on {}", best.0, best.1);
+        assert!(best.0 > 0.5, "no decoded DMR audio: {best:?}");
+    }
+
+    /// 100 ksps coarse slice centered at `center` carrying a strong FM carrier at
+    /// `carrier` over noise, as interleaved i16 IQ.
+    fn slice_payload(carrier: f64, center: f64, seed: u64) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut gauss = move || {
+            let mut u = || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                ((state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+            };
+            (-2. * u().ln()).sqrt() * (2. * std::f64::consts::PI * u()).cos()
+        };
+        let mut out = Vec::new();
+        for i in 0..10000 {
+            let t = i as f64 / 100000.;
+            let phase = 2. * std::f64::consts::PI * (carrier - center) * t
+                + 2.5 * (2. * std::f64::consts::PI * 1000. * t).sin();
+            let (re, im) = (3000. * phase.cos() + 20. * gauss(), 3000. * phase.sin() + 20. * gauss());
+            out.extend_from_slice(&(re as i16).to_le_bytes());
+            out.extend_from_slice(&(im as i16).to_le_bytes());
+        }
+        out
+    }
+    /// Several logical targets share one physical 100 ksps slice. The slice is RF-active
+    /// because of one carrier; only that target may report RF activity, and the
+    /// physical slice's activity must stay visible separately.
+    #[test]
+    fn shared_slice_reports_target_activity_apart_from_slice_activity() {
+        let center = 454_100_000.;
+        let targets = [454_075_000u64, 454_087_500, 454_100_000, 454_112_500];
+        let config = json!({"input_center_hz":454100000u64,"input_rate_hz":25600000,"input_bandwidth_hz":20000000,
+            "streams":[{"stream_id":7,"center_hz":454100000u64,"rate_hz":100000,"protocol":"DMR","iq_forwarded":true,
+                "targets":targets.iter().map(|t| json!({"target_hz":t,"protocol":"DMR"})).collect::<Vec<_>>()}],
+            "psd":{"unit":"dBFS"}});
+        let mut bytes = Vec::new();
+        let mut cfg = frame(4, 1, 0, 0, 0, config.to_string().into_bytes());
+        cfg.center_hz = 454_100_000;
+        cfg.write(&mut bytes).unwrap();
+        let mut sequence = 1;
+        let mut sample = 0;
+        for packet in 0..4 {
+            let mut act = frame(3, 1, 7, sequence, sample, br#"{"rf_active":true,"level_db":-25.0}"#.to_vec());
+            act.rate = 100000;
+            act.center_hz = 454_100_000;
+            act.write(&mut bytes).unwrap();
+            let mut iq = frame(1, 1, 7, sequence + 1, sample, slice_payload(454_087_500., center, packet));
+            iq.rate = 100000;
+            iq.center_hz = 454_100_000;
+            iq.write(&mut bytes).unwrap();
+            sequence += 2;
+            sample += 10000;
+        }
+        let (release, rx) = mpsc::channel();
+        let input = HeldOpen { data: std::io::Cursor::new(bytes), release: rx };
+        let app = App::new(8);
+        let runner = {
+            let app = app.clone();
+            thread::spawn(move || ingest(input, app))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let snapshot = loop {
+            let snap: HashMap<u64, Value> = {
+                let e = app.inner.lock().unwrap();
+                e.channels
+                    .values()
+                    .filter(|c| c["protocol"] == "DMR" && c["slot"] == 1)
+                    .map(|c| (c["frequency_hz"].as_f64().unwrap() as u64, c.clone()))
+                    .collect()
+            };
+            if snap.get(&454_087_500).is_some_and(|c| c["rf_active"] == true)
+                || Instant::now() > deadline
+            {
+                break snap;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        release.send(()).unwrap();
+        runner.join().unwrap().unwrap();
+        assert_eq!(snapshot.len(), 4);
+        for (frequency, c) in &snapshot {
+            assert_eq!(c["slice_rf_active"], true, "{frequency}: physical slice activity");
+            assert_eq!(c["slice_targets"], 4);
+            assert_eq!(c["rf_active"] == true, *frequency == 454_087_500, "{frequency}: {c}");
+        }
+        let level = snapshot[&454_087_500]["level_db"].as_f64().unwrap();
+        // 3000-amplitude carrier, 16-bit full scale
+        assert!((level - 20. * (3000f64 / 32768.).log10()).abs() < 1., "level {level}");
+        assert_eq!(snapshot[&454_075_000]["slice_level_db"], -25.0);
     }
     #[test]
     fn catalog_survives_retune_without_reusing_channel_identity() {
