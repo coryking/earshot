@@ -130,6 +130,15 @@ A supporting view, as the spec says. Rendered entirely in the browser:
   hover preview and click-to-tune. Picking uses the historical row under the
   pointer and snaps to a nearby peak or known channel, capped at 100 kHz. Shift
   bypasses snapping. Unnamed signals open an editable frequency form.
+- **Time axis:** whole-second ticks on a 1/2/5 scale, positioned from the
+  rows' actual timestamps. Amber marks recent activity; blue marks the held
+  channel, including while the speaker is muted or waiting for voice.
+- **Capture:** the tuning panel shows buffered sample-seconds and the maximum,
+  rolling/paused state, and the physical slice's sampled frequency range.
+  **Download IQ snapshot** saves the current server buffer as SigMF, before
+  host channel filtering and FM demodulation. It is separate from **Save FM
+  audio WAV**, which saves demodulated audio from this browser's rolling buffer.
+  Stop and retune details are available below the capture summary.
 - **Rendering:** WebGL2 texture ring buffer, one row per spectrum line, colormap
   as a 256-entry lookup texture, exponential averaging per bin in the client,
   and a 2D canvas fallback when WebGL is unavailable. The server sends compact
