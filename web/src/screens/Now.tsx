@@ -28,7 +28,7 @@ export interface HomeView {
 /** Only what's drawn: two views with the same signature render the same. */
 function signature(view: HomeView): string {
   const row = (s: Source) =>
-    [s.id, s.name, s.summary, view.talking.has(s.id), s.listenable.ok, s.inRange, heardAgo(s.lastHeardAt, view.now)].join("|");
+    [s.id, s.name, s.encryption, view.talking.has(s.id), s.inRange, heardAgo(s.lastHeardAt, view.now)].join("|");
   const { groups } = view;
   return JSON.stringify([
     groups.talking.map(row),
@@ -76,8 +76,12 @@ export function useHome() {
     );
     m.resort = false;
     const groups = groupSources(sources, talking, order, followed, muted);
-    const marked = [...groups.talking, ...groups.channels.filter((s) => !talking.has(s.id))];
-    return { groups, talking, labels: differentiators(sources), marked, now };
+    const pinned = new Set(groups.talking.map((s) => s.id));
+    const marked = [...groups.talking, ...groups.channels.filter((s) => !pinned.has(s.id))];
+    // Tell apart rows that share a name within what's shown together, so a folded-away
+    // control channel doesn't add a frequency to the voice rows' labels.
+    const labels = new Map([...differentiators(marked), ...differentiators([...groups.other, ...groups.muted])]);
+    return { groups, talking, labels, marked, now };
   };
 
   const [view, setView] = useState<HomeView>(compute);
@@ -171,7 +175,6 @@ export function NowScreen({ showStrip }: { showStrip: boolean }) {
       {showStrip && (
         <div className="px-4 pb-3">
           <Waterfall variant="strip" sources={stripMarks} talking={view.talking} activeSourceId={activeSourceId} />
-          <p className="mt-1 h-4 truncate text-xs text-muted-foreground">Live airwaves. Marks show who's talking.</p>
         </div>
       )}
       <TalkingNow groups={view.groups} labels={view.labels} followed={followed} now={view.now} />

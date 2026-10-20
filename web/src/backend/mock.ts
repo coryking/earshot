@@ -102,10 +102,24 @@ export const MOCK_DEFS: Def[] = SIMS.map((sim) => {
 });
 
 /** Signals the engine has seen that nobody has labelled. */
-const UNLABELLED: { frequency: number; protocol: string; slot: number; rate: number; length: number }[] = [
+const UNLABELLED: { frequency: number; protocol: string; slot: number; rate: number; length: number; label?: string }[] = [
   { frequency: 452_735_400, protocol: "DMR", slot: 1, rate: 9, length: 6 },
   { frequency: 454_347_600, protocol: "Unknown", slot: 1, rate: 20, length: 4 },
+  // One labelled frequency carrying two conversations (DMR slots): same name, two rows.
+  { frequency: 453_418_750, protocol: "DMR", slot: 1, rate: 10, length: 6, label: "Shared business network" },
+  { frequency: 453_418_750, protocol: "DMR", slot: 2, rate: 8, length: 6, label: "Shared business network" },
 ];
+
+/**
+ * What the ARM receiver path really produces: an uncalibrated detector that
+ * flaps on noise across many channels, plus a trunking control channel that
+ * never stops. None of it ever decodes to voice.
+ */
+const NOISE_HZ = [
+  451_806_250, 452_031_250, 452_293_750, 452_468_750, 452_918_750, 453_143_750, 453_606_250, 453_881_250,
+  454_456_250, 454_731_250, 455_006_250, 455_268_750,
+];
+const CONTROL = { frequency: 454_206_250, label: "Shared business network" };
 
 export const MOCK_BLOCKS: WireBlocks = {
   current_id: "downtown",
@@ -182,7 +196,10 @@ export class MockBackend implements Backend {
     this.catalog_ = STARTER_CATALOG.map((e) => structuredClone(e));
     const now = this.now();
     for (const d of MOCK_DEFS) this.addChannel(d.entry.frequency_hz!, d.protocol, d.slot);
-    for (const u of UNLABELLED) this.addChannel(u.frequency, u.protocol, u.slot);
+    for (const u of UNLABELLED) this.addChannel(u.frequency, u.protocol, u.slot, u.label);
+    for (const f of NOISE_HZ) this.addChannel(f, "Unknown", 1);
+    this.addChannel(CONTROL.frequency, "Unknown", 1, CONTROL.label, "control");
+    Object.assign(this.channels.get(`${CONTROL.frequency}-Unknown-1`)!, { rf_active: true, level_db: -70 });
     // The engine keeps an Unknown placeholder beside identified entries.
     this.addChannel(454_029_223, "Unknown", 1);
     this.activity_ = this.buildActivity(now);
@@ -206,9 +223,11 @@ export class MockBackend implements Backend {
     this.audioUrls.forEach((url) => URL.revokeObjectURL(url));
   }
 
-  private addChannel(frequency: number, protocol: string, slot: number) {
+  private addChannel(frequency: number, protocol: string, slot: number, label?: string, labelKind = "voice") {
     const id = `${frequency}-${protocol}-${slot}`;
     this.channels.set(id, {
+      display_name: label ?? null,
+      label_kind: label ? labelKind : null,
       id,
       stream_id: Math.round((frequency - (BLOCK_CENTER - BLOCK_SPAN / 2)) / 50_000) + 1,
       frequency_hz: frequency,
@@ -324,6 +343,14 @@ export class MockBackend implements Backend {
       const id = `${u.frequency}-${u.protocol}-${u.slot}`;
       if (!this.live.has(id) && this.rand() < (u.rate / 3600) * (dt / 1000) * 3)
         this.startCall(id, now, u.length * (0.5 + this.rand()), false);
+    }
+    // Detector noise: each noise channel flips on or off now and then, never with speech.
+    for (const f of NOISE_HZ) {
+      const id = `${f}-Unknown-1`;
+      const c = this.channels.get(id);
+      if (!c || this.rand() > 0.12 * (dt / 200)) continue;
+      const on = !c.rf_active;
+      this.update(id, { rf_active: on, level_db: on ? -88 - this.rand() * 10 : -118, last_rf: on ? now / 1000 : c.last_rf });
     }
   }
 
@@ -444,7 +471,8 @@ export class MockBackend implements Backend {
       last_samples_at: this.now() / 1000,
       continuity: "demo",
       decoder_capacity: 8,
-      source: { input_center_hz: block.center_hz, input_bandwidth_hz: block.span_hz, demo: true },
+      // The demo stands in for a calibrated detector, so encrypted carriers count as calls.
+      source: { input_center_hz: block.center_hz, input_bandwidth_hz: block.span_hz, activity_calibrated: true, demo: true },
     };
   }
 

@@ -170,15 +170,15 @@ export function Waterfall({ variant, sources, talking, activeSourceId, onListen,
       role="img"
       aria-label={
         empty
-          ? "Live airwaves view: no spectrum data from the radio yet."
-          : `Live airwaves view, ${formatMHz(low ?? 0, 1)} to ${formatMHz((low ?? 0) + (meta.spanHz ?? 0), 1)} MHz. Use the list to choose a channel.`
+          ? "Live airwaves: no data yet"
+          : `Live airwaves, ${formatMHz(low ?? 0, 1)} to ${formatMHz((low ?? 0) + (meta.spanHz ?? 0), 1)} MHz`
       }
       data-waterfall={variant}
     >
       <canvas ref={canvas} className="absolute inset-0 h-full w-full" aria-hidden />
       {empty && (
         <p className="absolute inset-0 grid place-items-center px-4 text-center text-xs text-[#93a1b8]">
-          No airwaves picture from the radio yet
+          No signal picture yet
         </p>
       )}
       {stale && (

@@ -3,7 +3,7 @@ import { navigate, openSheet, paletteStore, useRoute, type Route } from "@/app/u
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { usePrefs } from "@/state/prefs";
-import { useBackend, useBlocks, useHealth } from "@/state/radio";
+import { useBackend, useHealth } from "@/state/radio";
 
 const dot = {
   listening: "bg-ok",
@@ -17,10 +17,9 @@ function wordFor(health: ReturnType<typeof useHealth>): string {
   return health.state === "offline" && health.reconnecting ? "Reconnecting" : healthWord[health.state];
 }
 
-/** Status dot + block name (both tappable) and the alerts bell. Desktop adds tabs and the palette. */
+/** Status dot (tap for status) and the alerts bell. Desktop adds tabs and the palette. The area name is the Now title. */
 export function Header({ wide }: { wide: boolean }) {
   const health = useHealth();
-  const { current } = useBlocks();
   const { alertFollowed, alertBusy } = usePrefs();
   const backend = useBackend();
   const alerts = alertFollowed || alertBusy;
@@ -34,14 +33,6 @@ export function Header({ wide }: { wide: boolean }) {
       >
         <span className={cn("size-2.5 rounded-full", dot[health.state])} aria-hidden />
         <span className="text-sm whitespace-nowrap text-muted-foreground">{wordFor(health)}</span>
-      </button>
-      <button
-        type="button"
-        onClick={() => openSheet({ type: "block" })}
-        className="min-h-11 min-w-0 truncate rounded-lg px-2 text-left text-sm font-semibold text-heading"
-        aria-label={`Listening area: ${current?.name ?? "unknown"}. Change area`}
-      >
-        {current?.name ?? "Home radio"}
       </button>
       {backend.mode === "demo" && (
         <span className="ml-1 shrink-0 rounded-full border border-signal/50 px-2 py-0.5 text-xs text-signal">Demo</span>

@@ -47,7 +47,7 @@ export function useAlerts() {
       if (now - (lastAlert.current.get(id) ?? 0) < COOLDOWN_MS) continue;
       lastAlert.current.set(id, now);
       const name = sources.find((s) => s.id === id)?.name ?? "A channel you follow";
-      notify(`${name} is busy`, `${recent.length} calls in the last 10 minutes.`, `busy-${id}`);
+      notify(`${name} is busy`, `${recent.length} calls in 10 min`, `busy-${id}`);
     }
   }, [calls, followed, alertFollowed, sources, openedAt]);
 
@@ -59,6 +59,6 @@ export function useAlerts() {
     const now = Date.now();
     if (now - (lastAlert.current.get("area") ?? 0) < COOLDOWN_MS) return;
     lastAlert.current.set("area", now);
-    notify("Busier than usual", "Radio traffic around you has picked up.", "busy");
+    notify("Busier than usual", "", "busy");
   }, [activity, alertBusy]);
 }

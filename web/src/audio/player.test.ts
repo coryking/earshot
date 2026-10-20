@@ -23,8 +23,11 @@ function source(id: string, channel = `${id}-DMR-1`): Source {
     channelIds: [channel],
     talking: true,
     signal: true,
+    control: false,
+    heardVoice: true,
     levelDb: null,
     lastHeardAt: null,
+    lastSignalAt: null,
     inRange: true,
     listenable: { ok: true },
   };
@@ -117,7 +120,7 @@ describe("Player live listening", () => {
     const player = new Player(f.backend);
     await player.listen(source("a"));
     expect(player.state.get()).toMatchObject({ phase: "error" });
-    expect(player.state.get().error).toMatch(/can't decode/);
+    expect(player.state.get().error).toMatch(/Can't play this kind/);
     await player.stop();
     expect(f.monitor).toHaveBeenCalledTimes(1);
   });

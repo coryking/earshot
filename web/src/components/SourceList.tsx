@@ -38,16 +38,18 @@ const SourceRow = memo(function SourceRow({ source, variant, talking, label, fol
   const playing = usePlayerSelect((s) => s.kind === "live" && s.sourceId === source.id);
   const isPrivate = source.encryption === "encrypted";
   const right = talking ? (
-    <span className="flex shrink-0 items-center gap-2 text-xs font-semibold text-lamp">
+    <span className="flex shrink-0 items-center gap-2 text-lamp">
       {isPrivate ? <Lock className="size-3.5" aria-hidden /> : <LevelMeter active />}
-      <span>{isPrivate ? "Private call" : "Talking"}</span>
+      <span className="sr-only">{isPrivate ? "Private call" : "Talking"}</span>
     </span>
   ) : variant === "row" ? (
-    <span className="tabular shrink-0 text-xs text-muted-foreground">
+    <span className="tabular flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+      {isPrivate && <Lock className="size-3" aria-label="Private" />}
       {source.inRange ? (heardAgo(source.lastHeardAt, now) ?? "") : "Out of range"}
     </span>
   ) : null;
-  const second = playing ? "Listening on this device" : [label, source.summary].filter(Boolean).join(" · ");
+  // Names say what a source is; the second line only tells apart rows that share a name.
+  const second = playing ? "Listening" : (label ?? null);
   // Cards sit inside their own list item (the presence wrapper); rows are list items themselves.
   const Root = variant === "card" ? "div" : "li";
 
@@ -86,7 +88,7 @@ const SourceRow = memo(function SourceRow({ source, variant, talking, label, fol
           </span>
           {right}
         </span>
-        <span className="tabular truncate text-sm text-muted-foreground">{second}</span>
+        {second && <span className="tabular truncate text-sm text-muted-foreground">{second}</span>}
         {variant === "row" && <CallLane calls={calls ?? []} now={now} talking={talking} className="mt-1.5" />}
       </button>
       <button
@@ -143,9 +145,8 @@ export const TalkingNow = memo(function TalkingNow({
       </h2>
       <div className="min-h-[4.25rem]">
         {groups.talking.length === 0 && !shown.length ? (
-          <p className="calm-fade flex min-h-[4.25rem] flex-col justify-center rounded-xl border border-dashed border-border px-4 text-sm text-muted-foreground">
-            <span className="text-foreground">Nobody's talking right now.</span>
-            <span className="truncate">Tap a channel below to wait for its next call.</span>
+          <p className="calm-fade flex min-h-[4.25rem] items-center rounded-xl border border-dashed border-border px-4 text-sm text-muted-foreground">
+            Nobody
           </p>
         ) : (
           <ul aria-label="Talking now" className="flex flex-col">
@@ -169,9 +170,7 @@ export const TalkingNow = memo(function TalkingNow({
         )}
       </div>
       {groups.moreTalking > 0 && (
-        <p className="h-5 truncate text-xs text-muted-foreground">
-          {groups.moreTalking} more talking, marked in the list below.
-        </p>
+        <p className="tabular h-5 text-xs text-muted-foreground">+{groups.moreTalking} more</p>
       )}
     </section>
   );
@@ -204,7 +203,7 @@ export const SourceList = memo(function SourceList({ groups, talking, labels, ca
         </ul>
       ) : (
         <p className="px-4 pb-4 text-sm text-muted-foreground" data-source-list>
-          No voices heard yet. Channels show up here the first time the radio hears someone talk on them.
+          None yet
         </p>
       )}
       {groups.other.length > 0 && (
@@ -212,7 +211,6 @@ export const SourceList = memo(function SourceList({ groups, talking, labels, ca
           title={`Other activity (${groups.other.length})`}
           open={showOther}
           onToggle={() => setShowOther((v) => !v)}
-          note="Signals the radio picks up but hasn't heard a voice on: data, system control channels, or noise. Tap one to listen in case someone talks."
         >
           <ul aria-label="Other activity" className="divide-y divide-border/40" data-source-list>
             {groups.other.map((s) => row(s, "quiet"))}
@@ -234,13 +232,11 @@ function Folded({
   title,
   open,
   onToggle,
-  note,
   children,
 }: {
   title: string;
   open: boolean;
   onToggle(): void;
-  note?: string;
   children: ReactNode;
 }) {
   return (
@@ -254,12 +250,7 @@ function Folded({
         <ChevronDown className={cn("size-4 transition-transform motion-reduce:transition-none", !open && "-rotate-90")} aria-hidden />
         {title}
       </button>
-      {open && (
-        <>
-          {note && <p className="px-4 pb-2 text-xs text-muted-foreground">{note}</p>}
-          {children}
-        </>
-      )}
+      {open && children}
     </div>
   );
 }

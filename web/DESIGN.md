@@ -12,10 +12,10 @@ secondary detail or in the operator view.
 
 | Rank | Action | Where | Gesture |
 | --- | --- | --- | --- |
-| 1 | See what's happening now | **Now** tab (home). A plain sentence at the top ("Two channels talking. Busier than usual for a Tuesday evening."), the live strip, then the source list: talking now first, then recently heard, then quiet. | Open the app. Pull to refresh is unnecessary because the list is live. |
-| 2 | Tap to listen | Any row in the Now list, any trace in the live strip, any call in Catch up. The **player bar** docks above the tab bar with stop, mute and volume. | One tap on a row listens. Tapping the playing row again stops. The player bar's stop button is in thumb reach. Volume lives in the expanded player sheet (swipe the bar up). |
+| 1 | See what's happening now | **Now** tab (home). Titled by the listening area, then the live strip, a small **Talking now** area (at most three), and the channel list in a stable order. | Open the app. Pull to refresh is unnecessary because the list is live. |
+| 2 | Tap to listen | Any row or Talking now card, any call in Catch up, a marked trace in the desktop waterfall. The **player bar** docks above the tab bar with stop, mute and volume. | One tap on a row listens. Tapping the playing row again stops. The player bar's stop button is in thumb reach. Volume lives in the expanded player sheet (swipe the bar up). |
 | 3 | Catch up on what I missed | **Catch up** tab: recent calls newest first, grouped by "Just now / Earlier this hour / Today", each with a play button and duration. | Tap a call to play it. Playback continues down the list (autoplay next) like a podcast queue, so a listener can catch up hands-free. |
-| 4 | Follow or mute a source | Star and mute in the source sheet and the expanded player. Followed sources pin to the top of Now, like pinned chats; muted ones sink into a collapsed "Muted" group and never alert. Naming a source keeps its follow or mute. | Long-press a row (or tap its ⋯) to open the source sheet. |
+| 4 | Follow or mute a source | Star and mute in the source sheet and the expanded player. Followed sources pin to the top of Now, like pinned chats; muted ones sink into a collapsed "Muted" group and never alert. Naming a source keeps its follow or mute. | Tap the row's ⓘ button to open the source sheet. The row itself only ever listens. |
 | 5 | Get alerted | Bell in the header opens the alerts sheet: "A channel I follow gets busy" (three or more calls within ten minutes) and "It's much busier than normal" (the area moves into busier-than-usual). Only activity since the page opened counts, with a 30-minute cooldown. In-page notifications today; closed-app push needs the engine. | Toggle switches. The bell turns amber when alerts are on. |
 | 6 | Change block | Tap the block name in the header ("Downtown business radio"). A sheet explains that the radio hears one stretch of the airwaves at a time, lists the blocks in plain terms, and asks for confirmation. | Deliberately two taps plus a confirm. Never a swipe. |
 | 7 | Is it working? / What is this? | The status dot next to the block name ("Listening", "Paused", "Not connected"); tap it for a plain explanation. Each source sheet has "What is this?": probable user, kind of traffic, and, for encrypted sources, why you can't hear them. | Tap. |
@@ -32,18 +32,19 @@ is reachable with the right thumb.
 
 ```
 ┌──────────────────────────────┐
-│ ● Downtown business radio  🔔│  header: status dot, block name (tap = block sheet), alerts
-│                              │
-│ Two channels talking.        │  the sentence: what's happening, busy vs normal
-│ Busier than usual tonight.   │
-│ ▁▂▅▇▅▂▁▁▁▂▃▁▁▁▁▆█▆▁▁▁▁▁▁▂▁ │  live strip (waterfall, ~56 px), tap a trace = listen
+│ ● Listening                🔔│  header: status (tap = status sheet), alerts
+│ Downtown business radio ⌄    │  title: the area (tap = block sheet); never changes with data
+│ Busier than usual            │  one fixed line, only once there's a baseline
+│ ▁▂▅▇▅▂▁▁▁▂▃▁▁▁▁▆█▆▁▁▁▁▁▁▂▁ │  live strip: labels on who's talking / playing; not a control
+│ Talking now                  │
+│ ┌ Front desk        ▮▮▮  ⓘ ┐ │  at most three cards, in the order they started
 ├──────────────────────────────┤
-│ ★ Front desk          ▮▮▮▯  │  talking now: level meter, followed star
-│   Business dispatch, digital │
-│   Warehouse crew      2 min  │  recently heard: relative time, 30-min activity lane
-│   ▁▁▂▁▁▁▁▁▃▂▁▁▁▁▁▁▁▁▁▁▁▁▁▂  │
-│   454.300 MHz        quiet   │  unnamed: shows its number until labeled
-│   …                          │
+│ Channels                     │
+│ ★ Front desk          ▮▮▮ ⓘ │  followed first, then last voice heard; frozen while shown
+│   Warehouse crew  2 min ago ⓘ│  30-min call lane under each row
+│   Day Wireless   1 min ago  ⓘ│  same name twice: second line says "Line 1" / "Line 2"
+│ › Other activity (28)        │  RF without decoded voice, control channels: folded
+├──────────────────────────────┤
 ├──────────────────────────────┤
 │ ▶ Front desk    ■  🔇        │  player bar: stop and mute in thumb reach
 │  Now   Catch up   Radio      │  tab bar
@@ -55,9 +56,18 @@ is reachable with the right thumb.
   thumb already is. They close by swiping down or tapping outside.
 - **Bottom-anchored primary actions.** The player bar and tab bar are fixed to
   the bottom, above the home indicator (`env(safe-area-inset-bottom)`).
-- **Dense, not cluttered.** Each row has exactly three facts: name, what it is
-  (one line), and when it was last heard or a live level meter. The 30-minute
-  activity lane under each row is the only chart.
+- **Few words.** Rows carry a name, when a voice was last heard (in minutes),
+  or the level meter, and the 30-minute call lane. A second line appears only
+  to tell apart rows that share a name. No helper sentences or narration;
+  explanations live behind ⓘ and stay short there too.
+- **Calm.** "Talking" means decoded voice (DMR/NXDN voice with sync, FM held
+  above the squelch), never RF energy, held 5 s past the last evidence. An
+  encrypted source counts by carrier only after 2 s on a calibrated detector
+  (not the ARM path). Control channels never talk. The view samples the engine
+  once a second and re-renders only when something visible changed. The list
+  order is frozen while shown and re-ranks on open, on follow or mute, and on
+  returning after 30 s away. New rows join the end. Talking now cards fold in
+  and out; `prefers-reduced-motion` turns that off. Logic: `src/domain/calm.ts`.
 - **Progressive disclosure.** Frequencies, slots and protocols are in the
   source sheet's "Details" section, collapsed by default.
 
@@ -96,13 +106,14 @@ Keyboard shortcuts (shown with `?`):
 A supporting view, as the spec says. Rendered entirely in the browser:
 
 - **Phone portrait:** a thin live strip (~56 px, about 20 seconds of history)
-  under the sentence. It proves the block is alive. Each catalog source has a
-  thin tick at its position; when a source is talking, its tick glows. Tapping
-  the strip listens to the nearest source within a hit radius; tapping a trace
-  with no source opens "Unnamed signal" with what we know and why it can't be
-  played yet (when that's the case).
+  under the title. It proves the block is alive and is a picture, not a
+  control: channels sit a few pixels apart, and on this receiver most bright
+  lines are data, control channels or noise that can't be heard, so "tap a
+  bright line" led people to nothing. Instead, the trace of each source
+  talking now gets an amber guide line and name label, and the playing source a
+  blue one, tying the strip to the list, which is the way in.
 - **Landscape and desktop:** the full view, a few minutes of history, with
-  hover readout, source markers and the same tap-to-listen.
+  hover readout, source markers and click-to-listen on a marked trace.
 - **Rendering:** WebGL2 texture ring buffer, one row per spectrum line, colormap
   as a 256-entry lookup texture, exponential averaging per bin in the client,
   and a 2D canvas fallback when WebGL is unavailable. The server sends compact
@@ -120,8 +131,8 @@ A supporting view, as the spec says. Rendered entirely in the browser:
 | `protocol: DMR / NXDN48` | "digital voice" (detail sheet: "DMR, slot 2") |
 | `protocol: Unknown` | "not identified yet" |
 | analog FM (catalog, later engine) | "voice" |
-| `speech_active` | "Talking now" plus a level meter |
-| `rf_active` without speech | "Signal, no voice" (data or a carrier) |
+| `speech_active` (held 5 s) | a Talking now card plus a level meter |
+| `rf_active` without decoded voice, or `label_kind: control` | folded into "Other activity (N)" |
 | encrypted (catalog/trunking) | "Private: encrypted, can't be heard" with an explanation in "What is this?" |
 | `/api/status` state `receiving` | "Listening" (green), `stopped` "Paused", `error` or disconnected "Not connected" (with the error in plain words and the raw message under Details) |
 | center / bandwidth | a block name: "Downtown business radio (454 MHz)" |
@@ -157,8 +168,8 @@ A supporting view, as the spec says. Rendered entirely in the browser:
   comparison against a baseline band, and the desktop Catch up timeline with
   calls laid out per source over time.
 - **Podcast apps (Overcast):** Catch up as a queue with play-through.
-- **Weather apps:** the plain sentence at the top that summarises the state
-  before showing data.
+- **Slack:** a stable channel list where activity bolds a row instead of
+  moving it.
 
 ## Visual identity
 
@@ -178,8 +189,8 @@ the green-on-black of SDR software.
 - **Motion:** only the live level meter and the waterfall move by themselves.
   Sheets animate in response to touch. `prefers-reduced-motion` freezes the
   meter to a static lamp.
-- **The one bold thing:** the sentence at the top of Now, set large, which
-  reads as the answer to "what's going on around me?"
+- **The one bold thing:** the amber Talking now cards: the only warm colour on
+  the screen, answering "who's talking?" at a glance.
 
 ## Data model
 
@@ -252,7 +263,8 @@ Three home screens were built on the real stack against the demo backend and
 screenshotted at 390 × 844 (`output/frontend-v2/proto-{a,b,c}.png` on
 wigglebutt, Git-ignored):
 
-- **A, sentence + channel list (chosen).** The plain sentence answers "what's
+- **A, sentence + channel list (chosen; the sentence was later dropped for a
+  stable area title, because a changing headline reflowed the page).** The plain sentence answers "what's
   going on?" before any data; the list reads like a chat app's channels, scales
   from zero to dozens of sources, and one tap on a row listens.
 - **B, swimlanes.** One 30-minute lane per source with the live edge on the

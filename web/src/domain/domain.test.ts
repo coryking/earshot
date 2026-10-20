@@ -5,7 +5,7 @@ import { healthOf, numberName, rankSources, toSources } from "./adapt";
 import { STARTER_CATALOG } from "./starter";
 import { prefs, prefsStore } from "@/state/prefs";
 import type { Activity } from "./model";
-import { busyness, headline } from "./summary";
+import { busyLine, busyness } from "./summary";
 
 function channel(id: string, patch: Partial<EngineChannel> = {}): EngineChannel {
   const [freq, protocol, slot] = id.split("-");
@@ -62,14 +62,40 @@ describe("toSources", () => {
     expect(sources.map((s) => s.id)).toEqual(["ch-454029223-2"]);
     expect(sources[0].channelIds).toEqual(["454029223-DMR-2"]);
     expect(sources[0].talking).toBe(true);
-    expect(sources[0].summary).toBe("Unknown business radio");
+    expect(sources[0].summary).toBe("Unknown");
   });
 
-  it("keeps an Unknown channel on its own, as not listenable", () => {
-    const [s] = toSources([channel("454347600-Unknown-1", { protocol: "Unknown", rf_active: true })], null);
-    expect(s.summary).toBe("Unidentified signal");
-    expect(s.listenable.ok).toBe(false);
+  it("keeps an Unknown channel on its own: listenable, but RF alone is never talking", () => {
+    const [s] = toSources(
+      [channel("454347600-Unknown-1", { protocol: "Unknown", rf_active: true, decoded: false, last_rf: 100 })],
+      null,
+    );
+    expect(s.summary).toBe("Unidentified");
+    expect(s.listenable.ok).toBe(true);
     expect(s.signal).toBe(true);
+    expect(s.talking).toBe(false);
+    expect(s.heardVoice).toBe(false);
+    // Last heard means voice, not RF.
+    expect(s.lastHeardAt).toBeNull();
+    expect(s.lastSignalAt).toBe(100_000);
+  });
+
+  it("names unlabelled channels from the engine's labels, and never lets a control channel talk", () => {
+    const [control] = toSources(
+      [
+        channel("454206250-Unknown-1", {
+          protocol: "Unknown",
+          display_name: "Day Wireless (business trunked)",
+          label_kind: "control",
+          speech_active: true,
+          rf_active: true,
+        }),
+      ],
+      null,
+    );
+    expect(control).toMatchObject({ name: "Day Wireless (business trunked)", named: true, control: true, talking: false });
+    expect(control.heardVoice).toBe(false);
+    expect(control.listenable.ok).toBe(false);
   });
 
   it("applies catalog labels and treats an encrypted carrier as a private call", () => {
@@ -79,7 +105,9 @@ describe("toSources", () => {
     );
     expect(s.name).toBe("Private business radio");
     expect(s.summary).toBe("Private (encrypted)");
-    expect(s.talking).toBe(true);
+    // A carrier alone isn't evidence here; domain/calm.ts counts it only when sustained and calibrated.
+    expect(s.talking).toBe(false);
+    expect(s.signal).toBe(true);
     expect(s.listenable).toMatchObject({ ok: false });
   });
 
@@ -91,7 +119,7 @@ describe("toSources", () => {
     expect(s.listenable.ok).toBe(false);
   });
 
-  it("ranks followed first (pinned), then talking, then listenable", () => {
+  it("ranks followed first (pinned), then last voice heard, ignoring live talking and RF", () => {
     const sources = toSources(
       [
         channel("451000000-Unknown-1", { protocol: "Unknown", last_rf: 200 }),
@@ -102,7 +130,8 @@ describe("toSources", () => {
       null,
     );
     const ranked = rankSources(sources, new Set(["ch-454000000-1"])).map((s) => s.id);
-    expect(ranked).toEqual(["ch-454000000-1", "ch-453000000-1", "ch-452000000-1", "ch-451000000"]);
+    // 453 is talking and 451 has fresh RF, but neither moves a row: only voice heard, then frequency.
+    expect(ranked).toEqual(["ch-454000000-1", "ch-452000000-1", "ch-451000000", "ch-453000000-1"]);
   });
 });
 
@@ -137,7 +166,8 @@ describe("catalog joins", () => {
     const label = entry({ id: "label-ch-454347600", frequency_hz: 454_347_600, name: "Mystery" });
     const before = toSources([channel("454347600-Unknown-1", { protocol: "Unknown" })], [label]);
     expect(before[0].name).toBe("Mystery");
-    expect(before[0].listenable.ok).toBe(false);
+    // Unidentified is still listenable: the engine pins it and plays any voice it identifies.
+    expect(before[0].listenable.ok).toBe(true);
     const after = toSources(
       [channel("454347600-Unknown-1", { protocol: "Unknown" }), channel("454347600-DMR-1")],
       [label],
@@ -160,26 +190,13 @@ describe("catalog joins", () => {
   });
 });
 
-describe("headline", () => {
+describe("busy line", () => {
   const now = new Date("2026-10-19T19:30:00").getTime();
   const listening = { state: "listening" as const, detail: "" };
 
-  it("names a single talker and admits when it doesn't know normal yet", () => {
-    const sources = toSources([channel("452685504-DMR-1", { speech_active: true })], null);
-    expect(headline(sources, null, listening, now)).toEqual({
-      lead: "452.686 MHz, line 1 is talking.",
-      context: "Still learning what normal sounds like here.",
-    });
-  });
-
-  it("says when it was last quiet", () => {
-    const sources = toSources([channel("452685504-DMR-1", { last_heard: (now - 120_000) / 1000 })], null);
-    expect(headline(sources, null, listening, now).lead).toBe("Quiet right now. 452.686 MHz, line 1 was last, 2 min ago.");
-  });
-
-  it("reports an offline radio plainly", () => {
-    const health = healthOf(undefined, false);
-    expect(headline([], null, health, now).lead).toBe("The radio isn't connected.");
+  it("shows nothing until there's a baseline, and nothing while offline", () => {
+    expect(busyLine(null, listening, now)).toBeNull();
+    expect(busyLine(null, healthOf(undefined, false), now)).toBeNull();
   });
 
   it("compares the last 15 minutes against the baseline", () => {
@@ -193,7 +210,7 @@ describe("headline", () => {
       baseline: new Array(12).fill(30),
     };
     expect(busyness(activity, now).level).toBe("busier");
-    expect(headline([], activity, listening, now).context).toBe("Busier than usual for a Monday evening.");
+    expect(busyLine(activity, listening, now)).toBe("Busier than usual");
     expect(busyness({ ...activity, block: new Array(12).fill(5) }, now).level).toBe("quieter");
   });
 });
@@ -215,34 +232,31 @@ describe("health and preferences", () => {
     const down = (link: object, receiver: object | null = null) =>
       ({ ...base, state: "error", mode: "disconnected", error: "RIQ source disconnected", link: { mode: "tcp", state: "reconnecting", ...link }, receiver }) as unknown as Parameters<typeof healthOf>[0];
     const short = healthOf(down({ offline_s: 20 }), true);
-    expect(short).toMatchObject({ state: "offline", reconnecting: true, lead: "Receiver offline, reconnecting." });
-    expect(short.detail).toMatch(/usually comes back by itself/);
-    expect(headline([], null, short, Date.now()).lead).toBe("Receiver offline, reconnecting.");
+    expect(short).toMatchObject({ state: "offline", reconnecting: true });
+    expect(short.detail).toBe("Usually back within a minute.");
 
     // The supervisor's reason is passed on in plain words.
     const busy = healthOf(down({ offline_s: 30 }, { state: "waiting", reason: "lock-held", fresh: true }), true);
-    expect(busy.detail).toBe("The receiver is being used for a test and comes back when that's done.");
+    expect(busy.detail).toBe("In use for a test.");
     const lost = healthOf(down({ offline_s: 30 }, { state: "waiting", reason: "unreachable", fresh: true }), true);
     expect(lost.detail).toMatch(/isn't answering/);
     const dead = healthOf(down({ offline_s: 30 }, { state: "running", fresh: false }), true);
-    expect(dead.detail).toMatch(/isn't running, so nothing will restart it/);
+    expect(dead.detail).toMatch(/supervisor isn't running/);
 
     // After ten minutes it is no longer a blip: say how long, and that old activity is on screen.
     const long = healthOf(down({ offline_s: 1500 }, { state: "waiting", reason: "wrong-image", fresh: true }), true);
-    expect(long.detail).toContain("offline for 25 min");
-    expect(long.detail).toContain("what it heard earlier");
-    expect(long.detail).toMatch(/different software/);
-    expect(healthOf(down({ offline_s: 7200 }), true).detail).toContain("offline for 2 h");
+    expect(long.detail).toBe("Offline for 25 min. Running test software.");
+    expect(healthOf(down({ offline_s: 7200 }), true).detail).toContain("Offline for 2 h");
 
     // A borrow or a clean stop writes its status once; its age must not read as "supervisor dead".
     const borrowed = healthOf(down({ offline_s: 30 }, { state: "borrowed", fresh: false }), true);
-    expect(borrowed.detail).toBe("The receiver is being used for a test and comes back when that's done.");
-    expect(healthOf(down({ offline_s: 30 }, { state: "stopped", fresh: false }), true).detail).toMatch(/switched off for maintenance/);
+    expect(borrowed.detail).toBe("In use for a test.");
+    expect(healthOf(down({ offline_s: 30 }, { state: "stopped", fresh: false }), true).detail).toBe("Switched off.");
     // No status from the supervisor at all is not "switched off".
     expect(healthOf(down({ offline_s: 30 }, { state: "unknown", fresh: false }), true).detail).toMatch(/isn't running/);
     // TCP is up but the first CONFIG has not arrived: still reconnecting, not the old "lost its feed" text.
     const connecting = { ...down({ offline_s: 1 }), link: { mode: "tcp", state: "connected" } } as unknown as Parameters<typeof healthOf>[0];
-    expect(healthOf(connecting, true)).toMatchObject({ reconnecting: true, lead: "Receiver offline, reconnecting." });
+    expect(healthOf(connecting, true)).toMatchObject({ reconnecting: true });
     // The raw diagnostic is the current link error, not a stale engine error.
     const rawErr = healthOf(down({ offline_s: 30, last_error: "cannot reach the receiver at x: timed out" }), true);
     expect(rawErr).toMatchObject({ raw: "cannot reach the receiver at x: timed out" });

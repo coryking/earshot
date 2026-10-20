@@ -88,8 +88,6 @@ export type Health =
       state: "offline";
       detail: string;
       raw: string | null;
-      /** The headline when offline; the engine is retrying by itself. */
-      lead?: string;
       /** The receiver is expected back without anyone doing anything. */
       reconnecting?: boolean;
     };

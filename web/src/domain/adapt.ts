@@ -29,20 +29,20 @@ const modeWords: Record<Mode, string> = {
   dmr: "Digital voice",
   nxdn: "Digital voice",
   p25: "Digital voice",
-  unknown: "Not identified yet",
+  unknown: "Unidentified",
 };
 
 /** What an unlabelled source is, as far as anyone can tell. */
 const unlabelledWords: Record<Mode, string> = {
-  fm: "Unknown business radio",
-  dmr: "Unknown business radio",
-  nxdn: "Unknown business radio",
-  p25: "Unknown radio system",
-  unknown: "Unidentified signal",
+  fm: "Unknown",
+  dmr: "Unknown",
+  nxdn: "Unknown",
+  p25: "Unknown",
+  unknown: "Unidentified",
 };
 
 export const PRIVATE_SUMMARY = "Private (encrypted)";
-export const CONTROL_SUMMARY = "Data that runs a radio system, no voices";
+export const CONTROL_SUMMARY = "Data, no voice";
 
 /** A name for something nobody has labelled: its number, like an unknown caller. */
 export function numberName(frequencyHz: number, slot: number | null, mode: Mode) {
@@ -67,17 +67,17 @@ function listenableFor(
   options: SourceOptions,
 ): Listenable {
   if (encryption === "encrypted")
-    return { ok: false, reason: "Private: these calls are encrypted, so nobody outside the group can hear them." };
+    return { ok: false, reason: "Encrypted. Can't be heard." };
   if (control)
-    return { ok: false, reason: "This channel carries data that runs a radio system, not voices, so there's nothing to hear." };
-  if (!channel) return { ok: false, reason: "The radio isn't picking this up right now." };
+    return { ok: false, reason: "Data only. No voices." };
+  if (!channel) return { ok: false, reason: "Not on the air right now." };
   if (channel.in_range === false)
-    return { ok: false, reason: "Outside the part of the airwaves the radio is listening to." };
+    return { ok: false, reason: "Out of range." };
   const mode = modeOf(channel.protocol);
   // An unidentified channel can still be listened to: the engine keeps it pinned and plays
   // whatever voice it identifies there.
   if (mode === "fm" && !options.fmAudio)
-    return { ok: false, reason: "Plain voice channels can't be played yet; the radio only plays digital voice so far." };
+    return { ok: false, reason: "Analog voice can't play yet." };
   return { ok: true };
 }
 
@@ -258,26 +258,26 @@ function receiverReason(receiver: EngineStatus["receiver"]): string | null {
   if (!receiver) return null;
   // A borrowed or cleanly stopped supervisor writes its status once and goes quiet: the age of
   // that file says nothing about whether it is alive.
-  if (receiver.state === "borrowed") return "The receiver is being used for a test and comes back when that's done.";
-  if (receiver.state === "stopped") return "The receiver has been switched off for maintenance.";
+  if (receiver.state === "borrowed") return "In use for a test.";
+  if (receiver.state === "stopped") return "Switched off.";
   if (receiver.fresh === false)
-    return "The program that keeps the receiver running isn't running, so nothing will restart it until it is.";
+    return "Receiver supervisor isn't running.";
   switch (receiver.state) {
     case "starting":
     case "running":
-      return "The receiver is starting up.";
+      return "Starting up.";
     case "waiting":
       switch (receiver.reason) {
         case "lock-held":
-          return "The receiver is being used for a test and comes back when that's done.";
+          return "In use for a test.";
         case "wrong-image":
-          return "The receiver is running different software for a test. It comes back when that's finished.";
+          return "Running test software.";
         case "unreachable":
-          return "The receiver box isn't answering. Check that it's powered and plugged in.";
+          return "Receiver box isn't answering.";
         case "producer-failed":
-          return "The receiver's software stopped and is restarting.";
+          return "Restarting.";
         case "radio-state":
-          return "The receiver is in an unexpected state, so it's waiting.";
+          return "Waiting on the receiver.";
       }
   }
   return null;
@@ -295,7 +295,7 @@ const LONG_OUTAGE_S = 600;
 
 export function healthOf(status: EngineStatus | undefined, connected: boolean): Health {
   if (!status)
-    return { state: "offline", detail: "Can't reach the radio. Check that the receiver box is on.", raw: null };
+    return { state: "offline", detail: "Can't reach the radio.", raw: null };
   const link = status.link;
   // "connected" is only the TCP link: until the first CONFIG arrives the engine is still not receiving.
   if (link?.mode === "tcp" && (link.state !== "connected" || status.state !== "receiving")) {
@@ -303,11 +303,10 @@ export function healthOf(status: EngineStatus | undefined, connected: boolean): 
     const away = link.offline_s ?? 0;
     const detail =
       away >= LONG_OUTAGE_S
-        ? `The receiver has been offline for ${duration(away)}. Nothing new is coming in; you're seeing what it heard earlier.${reason ? ` ${reason}` : ""}`
-        : (reason ?? "It usually comes back by itself within a minute.");
+        ? `Offline for ${duration(away)}.${reason ? ` ${reason}` : ""}`
+        : (reason ?? "Usually back within a minute.");
     return {
       state: "offline",
-      lead: "Receiver offline, reconnecting.",
       reconnecting: true,
       detail,
       raw: link.last_error ?? status.error ?? null,
@@ -315,13 +314,13 @@ export function healthOf(status: EngineStatus | undefined, connected: boolean): 
   }
   if (status.state === "receiving" && status.mode === "live")
     return connected
-      ? { state: "listening", detail: "The radio is on and listening." }
-      : { state: "offline", detail: "Lost touch with the radio. Reconnecting.", raw: null };
+      ? { state: "listening", detail: "Receiving." }
+      : { state: "offline", detail: "Reconnecting.", raw: null };
   if (status.state === "error")
     return {
       state: "offline",
-      detail: "The radio lost its feed. It usually reconnects by itself within a minute; if it doesn't, Cory may need to restart it.",
+      detail: "Lost the receiver feed. Usually back within a minute.",
       raw: status.error ?? null,
     };
-  return { state: "paused", detail: "The radio is paused. Nothing new will come in until it's started again." };
+  return { state: "paused", detail: "Paused." };
 }
