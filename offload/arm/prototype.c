@@ -46,9 +46,12 @@ int main(int argc,char **argv){
        if(pfb_push(&p,block)){if(gating&&gate_push(&gate,p.fft)){error=1;break;}if(output&&fwrite(p.fft,sizeof(iqf),p.n,output)!=p.n){perror("write");error=1;break;}}
        total+=p.hop;
     }
-    if(gating&&gate_flush(&gate))error=1;double elapsed=now()-start;
+    if(gating&&gate_flush(&gate))error=1;
+    double elapsed=now()-start;
     if(output&&fflush(output)){perror("flush");error=1;}
     FILE *stats=output==stdout?stderr:stdout;
     fprintf(stats,"{\"input_samples\":%"PRIu64",\"input_rate_hz\":%"PRIu64",\"bins\":%u,\"taps\":%u,\"hop\":%u,\"output_frames\":%"PRIu64",\"output_channel_rate_hz\":%.9g,\"wall_seconds\":%.6f,\"samples_per_second\":%.9g,\"realtime_ratio\":%.6f,\"gate_enabled\":%s,\"gated_samples\":%"PRIu64",\"radio_opened\":false,\"continuity_verified\":false}\n",total,rate,p.n,p.taps,p.hop,p.frames,(double)rate/p.hop,elapsed,total/elapsed,total/elapsed/rate,gating?"true":"false",gated_samples);
-    if(input&&input!=stdin)fclose(input);if(output&&output!=stdout)fclose(output);free(block);gate_destroy(&gate);pfb_destroy(&p);return error;
+    if(input&&input!=stdin)fclose(input);
+    if(output&&output!=stdout)fclose(output);
+    free(block);gate_destroy(&gate);pfb_destroy(&p);return error;
 }

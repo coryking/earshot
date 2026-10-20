@@ -66,7 +66,8 @@ static int send_pair(source *s,const void *header,size_t header_size,const void 
 }
 static long long bin_center(source *s,unsigned bin){int signed_bin=bin<BINS/2?(int)bin:(int)bin-BINS;return s->current.center+llround((double)signed_bin*s->current.rate/BINS);}
 static int message(source *s,unsigned type,unsigned flags,unsigned stream,uint64_t first,unsigned format,unsigned bits,const void *payload,unsigned bytes){
- if(stream>BINS||bytes>1048576)return -1;unsigned char h[64]={0};memcpy(h,"RIQ1",4);put16(h+4,1);put16(h+6,64);put16(h+8,type);put16(h+10,flags);put64(h+12,s->generation);put32(h+20,stream);put64(h+24,s->sequences[stream]++);put64(h+32,first);put32(h+40,(unsigned)llround((double)s->current.rate/(BINS/2)));put64(h+44,stream?bin_center(s,stream-1):s->current.center);put32(h+52,bytes);put16(h+56,format);put16(h+58,bits);
+ if(stream>BINS||bytes>1048576)return -1;
+ unsigned char h[64]={0};memcpy(h,"RIQ1",4);put16(h+4,1);put16(h+6,64);put16(h+8,type);put16(h+10,flags);put64(h+12,s->generation);put32(h+20,stream);put64(h+24,s->sequences[stream]++);put64(h+32,first);put32(h+40,(unsigned)llround((double)s->current.rate/(BINS/2)));put64(h+44,stream?bin_center(s,stream-1):s->current.center);put32(h+52,bytes);put16(h+56,format);put16(h+58,bits);
  return send_pair(s,h,sizeof(h),payload,bytes);
 }
 static int emit_iq(void *opaque,unsigned bin,uint64_t first,unsigned count,unsigned flags,const iqs16 *iq){source *s=opaque;if(!(s->forward_mask&(1ULL<<bin))&&!s->gate.channels[bin].pinned)return 0;s->iq_samples+=count;return message(s,1,flags,bin+1,first,1,16,iq,count*sizeof(*iq));}
@@ -120,11 +121,13 @@ int main(int argc,char **argv){
  changed=1;s.fir_changed=1;if(ad9361_set_bb_rate(s.phy,rate)<0){fprintf(stderr,"ADI low-rate FIR setup failed\n");goto done;}
  s.current=s.original;s.current.rate=rate;s.current.bandwidth=bandwidth;s.current.center=center;changed=1;if(write_controls(&s,&s.current)){fprintf(stderr,"RX configuration/readback failed\n");goto done;}
  const struct iio_data_format *format=iio_channel_get_data_format(s.i);if(format->length!=16||!format->is_signed||format->is_be||format->repeat>1||format->bits>16||format->bits+format->shift>16)goto done;s.bits=format->bits;s.shift=format->shift;s.fullscale=(float)(1u<<(s.bits+s.shift-1));
- if(pfb_init(&s.channelizer,BINS,8)||gate_init(&s.gate,BINS,(unsigned)(0.2*rate/(BINS/2)),(unsigned)(0.5*rate/(BINS/2)),8,32768/s.fullscale,emit_iq,&s))goto done;if(pin)s.gate.channels[pin-1].pinned=1;
+ if(pfb_init(&s.channelizer,BINS,8)||gate_init(&s.gate,BINS,(unsigned)(0.2*rate/(BINS/2)),(unsigned)(0.5*rate/(BINS/2)),8,32768/s.fullscale,emit_iq,&s))goto done;
+ if(pin)s.gate.channels[pin-1].pinned=1;
  iio_channel_enable(s.i);iio_channel_enable(s.q);if(iio_device_set_kernel_buffers_count(s.rx,4)<0)goto done;s.buffer=iio_device_create_buffer(s.rx,BLOCK_SAMPLES,false);if(!s.buffer){perror("RX buffer");goto done;}if(iio_buffer_step(s.buffer)!=4||(char*)iio_buffer_first(s.buffer,s.q)-(char*)iio_buffer_first(s.buffer,s.i)!=2)goto done;
  s.running=1;s.started=now();if(config(&s,NULL,1,NULL))goto done;double next_discovery=0;
  while(!interrupted&&s.running&&(!seconds||now()-s.started<seconds)){
-   if(command(&s))goto done;if(!s.running)break;
+   if(command(&s))goto done;
+   if(!s.running)break;
    ssize_t bytes=iio_buffer_refill(s.buffer);if(bytes<0){fprintf(stderr,"RX refill failed:%zd\n",bytes);goto done;}
    double processing=now();int16_t *raw=iio_buffer_first(s.buffer,s.i);unsigned samples=bytes/4;if(bytes%4||samples%(BINS/2))goto done;
    for(unsigned j=0;j<samples;j+=BINS/2)if(pfb_push(&s.channelizer,raw+2*j)&&gate_push(&s.gate,s.channelizer.fft))goto done;
@@ -135,6 +138,7 @@ int main(int argc,char **argv){
  done:
  if(s.running&&!result&&gate_flush(&s.gate))result=1;
  if(changed&&restore(&s)){fprintf(stderr,"FAILED restoring original RX controls\n");result=1;}
- if(s.context)iio_context_destroy(s.context);pfb_destroy(&s.channelizer);gate_destroy(&s.gate);if(s.client>=0)close(s.client);if(s.listener>=0)close(s.listener);
+ if(s.context)iio_context_destroy(s.context);
+ pfb_destroy(&s.channelizer);gate_destroy(&s.gate);if(s.client>=0)close(s.client);if(s.listener>=0)close(s.listener);
  printf("{\"status\":\"%s\",\"input_samples\":%"PRIu64",\"iq_samples_sent\":%"PRIu64",\"wire_bytes\":%"PRIu64",\"processing_seconds\":%.6f,\"capture_wall_seconds\":%.6f,\"sample_seconds\":%.6f,\"throughput_ratio\":%.6f,\"late_buffers\":%u,\"hardware_continuity_verified\":false,\"original_controls_restored\":%s}\n",result?"error":"stopped",s.input_samples,s.iq_samples,s.sent_bytes,s.processing_seconds,s.started?s.capture_ended-s.started:0,(double)s.input_samples/rate,(s.started&&s.capture_ended>s.started)?((double)s.input_samples/rate)/(s.capture_ended-s.started):0,s.late_buffers,changed&&!s.restore_failed?"true":"false");return result;
 }
