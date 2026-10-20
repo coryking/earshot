@@ -16,11 +16,18 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::broadcast;
-async fn status(State(app): State<App>) -> Json<Value> {
+/// The browser validates this payload strictly (web/src/lib/radio.ts), so every numeric
+/// field must be a number even before the first CONFIG or sample arrives.
+fn status_json(app: &App) -> Value {
     let e = app.inner.lock().unwrap();
-    Json(
-        json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":e.source["input_center_hz"],"rate_hz":e.source["input_rate_hz"],"bandwidth_hz":e.source["input_bandwidth_hz"],"generation":e.generation,"channels":e.channels.values().collect::<Vec<_>>(),"received_seconds":null,"source_position_s":e.source["source_position_s"],"decode_latency_s":null,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":e.source["queue_depth"],"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"source":e.source}),
-    )
+    let number = |v: &Value| json!(v.as_f64().unwrap_or(0.));
+    let position = number(&e.source["source_position_s"]);
+    // Host ingress age of the latest delivered audio; 0 until audio flows.
+    let latency = e.listener["ingress_age_ms"].as_f64().unwrap_or(0.) / 1000.;
+    json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":number(&e.source["input_center_hz"]),"rate_hz":number(&e.source["input_rate_hz"]),"bandwidth_hz":number(&e.source["input_bandwidth_hz"]),"generation":e.generation,"channels":e.channels.values().collect::<Vec<_>>(),"received_seconds":position,"source_position_s":position,"decode_latency_s":latency,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":number(&e.source["queue_depth"]),"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"source":e.source})
+}
+async fn status(State(app): State<App>) -> Json<Value> {
+    Json(status_json(&app))
 }
 #[derive(Deserialize)]
 struct Monitor {
@@ -292,6 +299,32 @@ pub fn router(app: App, web_dir: Option<PathBuf>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Mirrors the required numeric fields of statusSchema in web/src/lib/radio.ts.
+    #[test]
+    fn status_satisfies_the_browser_schema_before_and_after_a_source_connects() {
+        let required = [
+            "center_hz",
+            "rate_hz",
+            "bandwidth_hz",
+            "generation",
+            "received_seconds",
+            "source_position_s",
+            "decode_latency_s",
+            "dropped_batches",
+            "processed_batches",
+            "queue_depth",
+        ];
+        let app = App::new(3);
+        for phase in 0..2 {
+            let status = status_json(&app);
+            for key in required {
+                assert!(status[key].is_number(), "phase {phase}: {key} = {}", status[key]);
+            }
+            assert!(status["channels"].is_array() && status["continuity"].is_string());
+            let mut e = app.inner.lock().unwrap();
+            e.source = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,"queue_depth":0});
+        }
+    }
     #[tokio::test]
     async fn missing_source_controls_never_report_applied() {
         let app = App::new(3);
