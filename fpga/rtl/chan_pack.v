@@ -108,6 +108,14 @@ module chan_pack #(
   reg  [8:0]  rb;
   reg  [31:0] even_word;
 
+  // A soft reset (RUN = 0) waits for the record being written to finish, so the
+  // output streams never carry a truncated record (the history ring's fixed
+  // record size depends on it). New frames are not admitted meanwhile.
+  // The request is latched so a RUN=0 pulse shorter than a record still resets.
+  reg  rst_req = 1'b0;
+  wire rst_now = (rst | rst_req) & ~busy;
+  always @(posedge clk) rst_req <= rst_now ? 1'b0 : (rst_req | rst);
+
   wire start = ~busy & ~rst & ~rst_req & (pend | fd_valid);
   wire [47:0] start_frame = pend ? pend_frame : fd_frame;
   wire        start_sat   = pend ? pend_sat : fd_sat;
@@ -118,13 +126,7 @@ module chan_pack #(
   assign sel_query = rb;
   wire sel_bit = mask_bit | (auto_forward & active_bit);
 
-  // A soft reset (RUN = 0) waits for the record being written to finish, so the
-  // output streams never carry a truncated record (the history ring's fixed
-  // record size depends on it). New frames are not admitted meanwhile.
-  // The request is latched so a RUN=0 pulse shorter than a record still resets.
-  reg  rst_req = 1'b0;
-  wire rst_now = (rst | rst_req) & ~busy;
-  always @(posedge clk) rst_req <= rst_now ? 1'b0 : (rst_req | rst);
+
 
   always @(posedge clk) begin
     if (rst_now) begin

@@ -150,51 +150,112 @@ Every run also reads back the reset defaults and the configuration registers.
 Where nothing is dropped, it checks that every frame produced exactly one record
 per stream.
 
-## Hardware: what is ready, what was not run
+## Live bring-up (for the agent doing it)
 
-Nothing has been loaded onto or flashed to the Pluto from this work. Read-only
-probes, done under `/tmp/pluto-radio.lock`, established:
-- the FPGA manager is present;
-- device-tree overlays are not available;
-- the driver bindings for the PL devices;
-- U-Boot's load addresses;
-- the CMA placement.
+One path: check the bitstream with a runtime load, flash it, then run
+`pluto-fpga-source` under a plain restart loop. Once it runs, it is the only
+producer. The stock ARM producer and the supervisor's image detection and
+profiles are retired, not extended.
 
-Prepared artifacts are in `~/.cache/amateur-radio-fpga/release/pluto_chan-<sha>/`,
-with a `SHA256SUMS` file:
+**State at hand-off.**
+- Nothing from this work has been loaded or flashed. The Pluto runs stock ADI
+  v0.37.
+- **Wait for home-it-services#258 before any of this.** A Pluto reboot currently
+  drops its network link (the ESXi vSwitchPluto uplink), and a Codex session is
+  fixing that. Both the runtime load's fail-safe and the flash end in a reboot.
+- The release bundle, with `SHA256SUMS`, is listed under "Release" below:
+  `system_top.bit` / `.xsa`, `system_top.bit.bin` (for fpga_manager), `pluto.frm`
+  (flash image), `chanctl`, `pluto-fpga-source`.
 
-| File | Purpose |
-| --- | --- |
-| `system_top.bit` / `.xsa` | bitstream / hardware handoff |
-| `system_top.bit.bin` | for `/sys/class/fpga_manager` (bootgen `-process_bitstream bin`) |
-| `pluto.frm` | ADI's public v0.37 image (the unit's version) with this bitstream and a no-map 64 MiB DMA carve-out at 0x04000000; kernel and ramdisk byte-identical (`sw/make_frm.py`) |
-| `chanctl` | static ARMv7 tool: `info`, `start`, `stop`, `psd`, `level`, `active`, `set-det`, `det-reset`, `snap`, `dma` |
-| `pluto-fpga-source` | static ARMv7 RIQ1 producer (`sw/pluto_fpga_source.c`), needs the flashed image's carve-out. It serves TCP 9010 like the ARM producer: CONFIG with 512 streams (stream = bin + 1, 100 ksps, `hardware_counter: true`), IQ for selected/pinned bins, PSD and activity from the FPGA, and `get_config`/`pin`/`stop` controls, with RX controls restored on stop. Start: `/tmp/pluto-fpga-source --center 460000000 --gain 40 --forward-streams 1` |
+**Rules.** RX only. Use radio-borrow (`offload/radio-borrow` on main) for any
+Pluto access while the stock live receiver is still running: it stops live,
+restores the radio, runs your command and resumes live. Device-write commands
+were denied by this session's permission classifier ("Remote Shell Writes");
+check that you have permission before starting.
 
-**Staged plan.** Not executed: the session's permission classifier denied the
-runtime load as "Remote Shell Writes". Running it needs a permission rule, or
-someone with device-write permission. A read-only check at 04:15 Pluto time found
-the device on stock v0.37 with nothing from this work on it.
-1. `sw/pluto_runtime_load.sh load system_top.bit.bin chanctl`. This checks the
-   hash, then runs the unbind → fpga_manager → state check → rebind sequence
-   detached on the device. It reboots to stock if programming fails, and
-   restores and reads back the receive settings.
-2. Under the lock (or the live service's borrow command, once it exists), set RX
-   to 25.6 Msps, 20 MHz, LO 460 MHz, manual gain. Then:
-   - `chanctl start --hist --sel --bins …`;
-   - check FRAMES advances at 100,000/s at 25.6 Msps, with ADC_LOSSES and
-     PACK_OVERRUNS at 0;
-   - `chanctl snap` ×3, then `model/live_check.py snap` must report 0
-     mismatches. That is a bit-exact hardware vs model check on live signals.
-   - `chanctl psd` against a contemporaneous IIO capture, through
-     `live_check.py psd`.
-3. `sw/pluto_runtime_load.sh restore` reboots to the stock image and re-applies
-   the saved settings.
-4. Only after 1–3 pass: boot-test `pluto.frm` from RAM (DFU-RAM `ramboot`) and
-   check the kernel log for the reserved region and the initrd. Then flash per
-   ADI's documented update path, with the recovery plan in `offload/RECOVERY.md`
-   ready. The DMA streams (`chanctl dma`) need the carve-out, so they can only be
-   exercised after this stage.
+### 1. Runtime load and check (non-persistent)
+
+```sh
+B=~/.cache/amateur-radio-fpga/release/pluto_chan-<sha>
+offload/radio-borrow fpga/sw/pluto_runtime_load.sh load $B/system_top.bit.bin $B/chanctl
+```
+
+`pluto_runtime_load.sh` saves the RX settings, copies the `.bin` to
+`/lib/firmware` (sha256 checked), then runs a detached swap script on the Pluto.
+That script kills any producer, unbinds the PL drivers, programs through
+`/sys/class/fpga_manager/fpga0`, rebinds and touches `/tmp/pl_is_chan`. If the
+state isn't `operating` it reboots the Pluto to stock. The RX settings are then
+re-applied and read back. Log: `~/.cache/amateur-radio-fpga/pluto-session/session.log`.
+
+Check, inside one `radio-borrow --lock` session, with RX set by hand (25.6 Msps,
+20 MHz, LO 460 MHz, `gain_control_mode=manual`, gain 40):
+- `/tmp/chanctl start --sel --bins 1`, then `/tmp/chanctl info` twice 1 s apart:
+  FRAMES advances about 100,000/s; `adc_losses`, `pack_overruns`, `fft_events` stay 0.
+- `/tmp/chanctl snap /tmp/s.bin`, copy it back, then
+  `PYTHONPATH=. uv run python -m fpga.model.live_check snap s.bin --out-shift 7`.
+  It **must report 0 mismatches** (hardware vs model, bit-exact, live input), with
+  `input_peak_adc` ≤ 2048.
+- `/tmp/chanctl psd`: occupied bins in 450–470 MHz stand out (bin k at LO + k·50 kHz,
+  k ≥ 256 negative). Then `/tmp/chanctl stop`.
+
+The DMA streams need the flashed carve-out, so they aren't tested here.
+`fpga/sw/pluto_runtime_load.sh restore` reboots to stock.
+
+### 2. Flash
+
+`pluto.frm` in the bundle is ADI's v0.37 release image with the FPGA swapped and a
+no-map `reserved-memory/chan_dma@4000000` (64 MiB at 0x04000000) added to every DT
+(`fpga/sw/make_frm.py`; kernel and ramdisk byte-identical). Flash it with the stock
+updater (checked in the v0.37 ramdisk):
+
+```sh
+scp -O pluto.frm root@192.168.10.10:/tmp/pluto.frm
+ssh root@192.168.10.10 'update_frm.sh /tmp/pluto.frm && reboot'
+```
+
+`update_frm.sh` checks the md5 trailer and FIT magic, writes `/dev/mtdblock3`
+(firmware only, never boot or env) and sets `fit_size`; it doesn't reboot on its
+own. After the reboot, check `/proc/iomem`: System RAM excludes
+0x04000000–0x07FFFFFF. Record the hashes on issue #1. Recovery if it doesn't
+boot: USB DFU from the Mac, `offload/RECOVERY.md`.
+
+### 3. Run the producer
+
+Stop the stock live receiver first, so nothing else opens the radio. Then run
+the producer from the host in a restart loop. The loop re-copies the binary each
+time, since `/tmp` on the Pluto doesn't survive a reboot:
+
+```sh
+B=~/.cache/amateur-radio-fpga/release/pluto_chan-<sha>
+while :; do
+  scp -O $B/pluto-fpga-source root@192.168.10.10:/tmp/ &&
+  ssh root@192.168.10.10 'chmod +x /tmp/pluto-fpga-source &&
+    exec /tmp/pluto-fpga-source --center 460000000 --gain 40 --forward-streams 1'
+  sleep 5
+done
+```
+
+`pluto-fpga-source` accepts the flashed image by its DT carve-out node. It:
+- listens on TCP 9010 (`pluto-fpga-source waiting on TCP:9010; radio unopened`);
+- opens RX when a client connects, saving and restoring the RX settings;
+- serves RIQ1 with 512 streams (stream = bin + 1, 100 ksps, centre LO + k·50 kHz,
+  `hardware_counter: true`);
+- sends IQ for forwarded or pinned bins, PSD every 100 ms, and activity for
+  active, forwarded or pinned bins (all bins every 2 s);
+- accepts `get_config`, `pin` and `stop`.
+
+**Unverified or risky** (none of this has run on hardware):
+- hdl_2026_r1 IP against the v0.37 kernel 5.10 drivers: cf_axi_dds probes a core
+  with DDS and TX IQ correction off, and axi_ad9361 has TDD off. A probe failure
+  aborts the runtime load before `PL_SWAP_DONE`; run restore.
+- During the swap the AD9363 RESETB/ENABLE/TXNRX pins pass through the PL and
+  float. Nothing transmits by design (TX LO off, DDS scale 0), but the loader
+  doesn't explicitly hold TX quiet.
+- The PL rebind can renumber IIO devices under iiod. Network libiio clients may
+  need an iiod restart; sysfs is unaffected.
+- `pluto-fpga-source` has never run. Its record parser is checked against the
+  format spec, not against an RTL sel-stream dump.
+- The detector thresholds assume manual gain; under AGC every bin reads active.
 
 ## Reproduce
 
