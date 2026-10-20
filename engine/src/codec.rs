@@ -70,8 +70,9 @@ struct AmbeHook {
 /// speech (three real DMR recordings: 10.9, 9.7 and 8.7 dB), so 1/7 * 10^(10/20) keeps either
 /// synthesizer at the level DSDcc's 8 kHz path and the post-processing expect.
 const AMBE_TO_MBELIB_FLOAT: f32 = 0.45;
-/// mbelib's concealment threshold: more corrected bit errors than this marks the frame bad,
-/// and the decoder repeats (then mutes) as the radio does, via its frame-flag input.
+/// More corrected bit errors than this marks a frame bad (mbelib's threshold; an engine choice,
+/// not checked against how the radio's baseband sets the flag). The native decoder then
+/// conceals it with the firmware's own repeat/mute logic via its frame-flag input.
 const BAD_FRAME_ERRORS: c_int = 3;
 unsafe extern "C" fn ambe_hook(context: *mut c_void, stream: c_int, bits: *const c_char, _errs: c_int, errs2: c_int, pcm: *mut f32) {
     // SAFETY: `context` is the AmbeHook boxed by the owning `Decoder`, which outlives its DSDcc
@@ -121,7 +122,6 @@ pub struct Decoder {
     tail: String,
     time: f64,
     confirmed: bool,
-    vocoder: Vocoder,
     /// Native decoder state the DSDcc hook points at (None with mbelib). `Drop` frees the DSDcc
     /// instance before this field is dropped.
     _ambe: Option<Box<AmbeHook>>,
@@ -149,7 +149,6 @@ impl Decoder {
         let ptr = unsafe { radio_codec_new(if protocol == "DMR" { 1 } else { 2 }, 1, hook, context) };
         anyhow::ensure!(!ptr.is_null(), "cannot initialize DSDcc");
         Ok(Self {
-            vocoder: options.vocoder,
             _ambe: ambe,
             post: [VoicePost::new(options.voice.clone()), VoicePost::new(options.voice.clone())],
             idle: [0.; 2],
@@ -246,14 +245,63 @@ impl Decoder {
         }
     }
 }
-impl Decoder {
-    /// The voice synthesizer this instance runs.
-    pub fn vocoder(&self) -> Vocoder {
-        self.vocoder
-    }
-}
 impl Drop for Decoder {
     fn drop(&mut self) {
         unsafe { radio_codec_free(self.ptr) }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ambe;
+
+    fn call(hook: &mut AmbeHook, stream: c_int, bits: Option<&[u8; 49]>, errs2: c_int) -> [f32; 160] {
+        let mut pcm = [1.0f32; 160];
+        let ctx = (hook as *mut AmbeHook).cast::<c_void>();
+        let bits = bits.map_or(std::ptr::null(), |b| b.as_ptr().cast::<c_char>());
+        unsafe { ambe_hook(ctx, stream, bits, 0, errs2, pcm.as_mut_ptr()) };
+        pcm
+    }
+
+    /// The DSDcc hook feeds each TDMA stream its own native decoder, scales to mbelib's float
+    /// level, marks frames over the error threshold bad, and resets a stream on a new call.
+    #[test]
+    fn ambe_hook_routes_streams_flags_and_resets() {
+        let mut hook = AmbeHook { slots: [ambe::Decoder::new(), ambe::Decoder::new()] };
+        let mut reference = ambe::Decoder::new();
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut frame = || {
+            let mut b = [0u8; 49];
+            for v in &mut b {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                *v = (x & 1) as u8;
+            }
+            b
+        };
+        let scaled = |pcm: [i16; 160]| pcm.map(|v| v as f32 * AMBE_TO_MBELIB_FLOAT);
+        for i in 0..20 {
+            let f = frame();
+            let errs2 = if i % 7 == 3 { BAD_FRAME_ERRORS + 1 } else { 0 };
+            let flags = if errs2 > BAD_FRAME_ERRORS { ambe::FLAG_BAD_FRAME } else { 0 };
+            // Stream 2 decodes into slot 2 only; stream 1 keeps its own state.
+            assert_eq!(call(&mut hook, 2, Some(&f), errs2), scaled(reference.decode_flags(&f, flags)));
+            call(&mut hook, 1, Some(&frame()), 0);
+        }
+        // A reset (null bits) starts stream 2 over from the firmware's initial state.
+        call(&mut hook, 2, None, 0);
+        let f = frame();
+        assert_eq!(call(&mut hook, 2, Some(&f), 0), scaled(ambe::Decoder::new().decode(&f)));
+    }
+
+    #[test]
+    fn both_vocoders_build_and_drop() {
+        for vocoder in [Vocoder::Ambe, Vocoder::Mbelib] {
+            let options = DecoderOptions { vocoder, ..DecoderOptions::default() };
+            let mut d = Decoder::with_options("DMR", &options).unwrap();
+            let out = d.push(&[0i16; 4800]);
+            assert!(out.slot1.is_empty() && out.slot2.is_empty());
+        }
     }
 }

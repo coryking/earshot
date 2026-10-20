@@ -5,7 +5,7 @@ Update the status column as routines land. Addresses are firmware (flash at 0x08
 
 ## Inputs and tooling
 
-- Firmware and RAM snapshot: `scripts/fetch-md380.sh` (voice-decoder branch) puts them in
+- Firmware and RAM snapshot: `scripts/fetch-md380.sh` puts them in
   `engine/.native-md380/firmware/` (Git-ignored; SHA-256 pinned: image c0351f25…, RAM d4039818…).
 - Decompilation: REA (rea-agents 6.5.0) MCP server over Ghidra 12.1.4 (JDK 21), raw-binary ARM,
   entry 0x0800C000. Exported pseudo-C and assembly of all 83 decoder routines were kept outside

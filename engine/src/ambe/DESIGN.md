@@ -13,7 +13,8 @@ no ARM code at run time, and the engine does not need the firmware to build or r
 
 How it was made:
 - The firmware image and RAM snapshot come from `scripts/fetch-md380.sh` (SHA-256 pinned,
-  Git-ignored, never committed).
+  downloaded into the Git-ignored `.native-md380/`, never committed). Only the oracle and the
+  table generator read them.
 - REA (reverse-engineer-anything) drove Ghidra 12.1.4 over the raw image to decompile and
   disassemble the 83 routines reachable from `ambe_decode_wav` (0x08051248). Entry points and
   buffer addresses come from md380tools' D002.032 symbol file and md380-emu.
@@ -54,4 +55,4 @@ fixed 2 KB block.
   stack images before and after) into the port and compare every output.
 - End to end: `tests/ambe.rs` decodes the frame corpora in `tests/data/ambe` and compares the
   output with the firmware's (hash per corpus; full sample comparison when the oracle outputs
-  are present), plus an RSS check over 50k frames.
+  are present), plus a short RSS check (20k frames).

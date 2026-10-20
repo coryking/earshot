@@ -10,6 +10,7 @@ use std::path::Path;
 /// (corpus, FNV-1a 64 of the firmware's s16le output)
 const EXPECTED: &[(&str, u64)] = &[
     ("fixture", 0x8181ed6d2c94c0db),
+    ("fixture-concealed", 0x2e393bf158a76491),
     ("random", 0x71b073ae1fbc834c),
     ("edge", 0x7ea4e2ddf3ee3d3c),
     ("harvard-0010", 0x207c0042cbd145af),
@@ -58,8 +59,12 @@ fn bytes(pcm: &[i16]) -> Vec<u8> {
     pcm.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
+/// The tests run on parallel threads; the RSS check must not see the other test's buffers.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn matches_firmware_on_every_corpus() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut failures = Vec::new();
     for &(name, want) in EXPECTED {
@@ -88,6 +93,7 @@ fn matches_firmware_on_every_corpus() {
 /// Decoding must not grow memory: run a long stream and check RSS stays flat.
 #[test]
 fn rss_flat_over_a_long_stream() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     fn rss_kb() -> Option<u64> {
         let s = std::fs::read_to_string("/proc/self/status").ok()?;
         s.lines().find(|l| l.starts_with("VmRSS:"))?.split_whitespace().nth(1)?.parse().ok()

@@ -1,6 +1,6 @@
 //! Firmware call recordings for per-routine tests (test builds only).
 //!
-//! `scripts/ambe-capture.py` runs the firmware decoder offline under an emulator and records
+//! `scripts/ambe_oracle.py capture` runs the firmware decoder offline under an emulator and records
 //! calls of one routine: argument registers, stack arguments, return registers, and the decoder
 //! state plus live stack before and after the call. Recordings live in
 //! `.native-md380/vectors/<address>.rec` (Git-ignored, derived from the firmware); the tests

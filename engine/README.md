@@ -43,7 +43,11 @@ Mac, it can use the existing `/tmp/cory-radio-dsdcc-20261019` headers and the
 project's `.tools/lib` bundle. `bootstrap-codecs.sh` creates a local ignored
 `.native` installation instead. DSDcc is pinned to
 `f27b32d2df131ae3a376fe72d3fb880ae1f9ede1`; mbelib is pinned to
-`9a04ed5c78176a9965f3d43f7aa1b1f5330e771f`. DSDcc is GPLv3 and mbelib is ISC;
+`9a04ed5c78176a9965f3d43f7aa1b1f5330e771f`. `bootstrap-codecs.sh` applies
+`patches/dsdcc-ambe-vocoder-hook.patch` to DSDcc, which lets the engine's own AMBE+2 decoder
+(`src/ambe`, a native port of the MD-380 firmware decoder; see `src/ambe/DESIGN.md`) replace
+mbelib's voice synthesis for DMR and NXDN; a DSDcc tree given through `DSDCC_INCLUDE_DIR` must
+carry the same patch. `--vocoder mbelib` falls back to mbelib. DSDcc is GPLv3 and mbelib is ISC;
 notices are in `licenses/`. Rust wraps the existing C++/C algorithms through a
 small C ABI. The production data path does not invoke Python or decoder
 subprocesses.
