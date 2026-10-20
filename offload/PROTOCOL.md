@@ -67,6 +67,13 @@ Configuration is sent before samples, again for a new generation, and contains:
 - `streams`: objects with `stream_id`, `center_hz`, `target_hz`, `rate_hz` or exact
   `sample_rate_num_hz`/`sample_rate_den`, `protocol` (`DMR`, `NXDN48`, `Unknown`),
   and optional selected `slot` (`1` or `2`).
+- Forwarding mask, per stream: `iq_forwarded` (boolean, the source is delivering IQ for this
+  stream) and `pinned` (boolean, a host pin forces forwarding). The host spends its bounded codec
+  budget only on streams that are `iq_forwarded` or `pinned` (or that it recently received IQ
+  for) and never on metadata-only streams. Omitting `iq_forwarded` means "forwards every stream
+  it declares"; a present non-boolean value is malformed and treated as not forwarded. The flags
+  apply to every logical target of a coarse stream. Activity JSON may also carry `forwarded`;
+  the host does not use it.
 - A coarse physical stream can instead declare `targets: [{target_hz, protocol,
   slot?, channel_id?}]`. `channel_id` is an optional stable string; the host can
   derive `stream_id:target_hz:slot` when absent. IQ is transmitted once and fans

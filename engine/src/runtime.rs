@@ -145,6 +145,32 @@ fn refresh_rf(c: &mut Value) {
 fn make_channel(stream: u32, frequency: f64, protocol: &str, slot: u8) -> Value {
     json!({"id":channel_id(frequency,protocol,slot),"stream_id":stream,"frequency_hz":frequency,"protocol":protocol,"slot":slot,"kind":"unidentified","rf_active":false,"slice_rf_active":false,"slice_level_db":null,"slice_targets":1,"target_rf_active":null,"target_level_db":null,"decoded":false,"speech_active":false,"last_heard":null,"last_rf":null,"level_db":null,"audio_seconds":0.,"sequence":0,"in_range":true,"available":false})
 }
+/// Whether a logical target's channel lies inside its physical slice. Without a declared
+/// slice rate and center there is nothing to check.
+fn fits_slice(cfg: &Value, frequency: f64) -> bool {
+    let rate = cfg["sample_rate_num_hz"]
+        .as_f64()
+        .zip(cfg["sample_rate_den"].as_f64())
+        .map(|(n, d)| n / d)
+        .or_else(|| cfg["rate_hz"].as_f64());
+    let band = spec_for(cfg["protocol"].as_str().unwrap_or("Unknown")).band_hz;
+    match (rate, cfg["center_hz"].as_f64()) {
+        (Some(rate), Some(center)) => (frequency - center).abs() + band / 2. <= rate / 2.,
+        _ => true,
+    }
+}
+/// RIQ1 interleaved signed16 I/Q payload to complex samples.
+fn iq_from_payload(payload: &[u8]) -> Vec<Complex32> {
+    payload
+        .chunks_exact(4)
+        .map(|b| {
+            Complex32::new(
+                i16::from_le_bytes([b[0], b[1]]) as f32,
+                i16::from_le_bytes([b[2], b[3]]) as f32,
+            )
+        })
+        .collect()
+}
 fn spec_for(protocol: &str) -> ChannelSpec {
     if protocol == "NXDN48" {
         ChannelSpec::CHANNEL_6_25
@@ -248,15 +274,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
             }
 
             expected_sample = Some(first_sample + payload.len() as u64 / 4);
-            let iq: Vec<_> = payload
-                .chunks_exact(4)
-                .map(|b| {
-                    Complex32::new(
-                        i16::from_le_bytes([b[0], b[1]]) as f32,
-                        i16::from_le_bytes([b[2], b[3]]) as f32,
-                    )
-                })
-                .collect();
+            let iq = iq_from_payload(payload);
             let mut outputs: Vec<(ChannelSpec, Vec<i16>)> = Vec::new();
             for (spec, dsp) in &mut dsps {
                 if decoders.iter().any(|(p, _, _)| spec_for(p) == *spec) {
@@ -299,8 +317,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                             && c["id"] != id.as_str()
                             && c["frequency_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
                     })
-                    .cloned()
-                    .or_else(|| physical.clone());
+                    .cloned();
                 let speech = speech && physical.is_some();
                 if confirmed && !audio.is_empty() && physical.is_some() {
                     protocol_evidence = Some(*protocol);
@@ -376,18 +393,22 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
 struct Candidate {
     logical: u64,
     selected: bool,
+    /// The pin request for the selected target is recent enough that its IQ may still be
+    /// on the way; after that an unforwarded selection stops holding codec budget.
+    pin_pending: bool,
     /// The source is actually delivering IQ for this target's physical stream.
     forwarded: bool,
     rf_active: bool,
     cost: usize,
 }
 /// Pick the logical targets that get codec instances. The pinned listener comes
-/// first (its IQ is requested even if the confirming CONFIG is still in flight),
+/// first while its pin is recent (its IQ is requested even if the confirming CONFIG is
+/// still in flight),
 /// then streams with forwarded IQ (RF-active before quiet), then lower frequency.
 /// A stream whose IQ the source does not forward can never be decoded, so it
 /// never takes budget, however RF-active its metadata looks.
 fn admit(mut candidates: Vec<Candidate>, budget: usize) -> Vec<u64> {
-    candidates.retain(|c| c.selected || c.forwarded);
+    candidates.retain(|c| c.forwarded || (c.selected && c.pin_pending));
     candidates.sort_by_key(|c| (!c.selected, !c.forwarded, !c.rf_active, c.logical));
     let mut remaining = budget;
     let mut admitted = Vec::new();
@@ -399,6 +420,8 @@ fn admit(mut candidates: Vec<Candidate>, budget: usize) -> Vec<u64> {
     }
     admitted
 }
+/// How long a fresh selection may hold budget before the source forwards its IQ.
+const PIN_GRACE: Duration = Duration::from_secs(5);
 /// Streams that delivered IQ this recently count as forwarded even when the
 /// source's CONFIG does not say (older producers, or a pin acknowledged later).
 const IQ_RECENT: Duration = Duration::from_secs(2);
@@ -410,6 +433,7 @@ fn schedule(
 ) -> Result<()> {
     let e = app.inner.lock().unwrap();
     let selected = selected_logical(&e);
+    let pin_pending = e.selected_at.elapsed() < PIN_GRACE;
     let mut effective = configs.clone();
     for (&stream, cfg) in &mut effective {
         if cfg["protocol"].as_str().unwrap_or("Unknown") == "Unknown"
@@ -432,13 +456,20 @@ fn schedule(
             let physical = cfg["stream_id"].as_u64().unwrap_or(0) as u32;
             // CONFIG's `iq_forwarded`/`pinned` is the source forwarding mask; a source
             // that does not publish it is assumed to forward everything it declares.
-            let declared = cfg["iq_forwarded"].as_bool().unwrap_or(true) || cfg["pinned"] == true;
+            // Absent means "forwards everything it declares"; a present non-boolean
+            // value is malformed and fails closed.
+            let declared = match &cfg["iq_forwarded"] {
+                Value::Null => true,
+                Value::Bool(b) => *b,
+                _ => false,
+            } || cfg["pinned"] == true;
             let received = iq_seen
                 .get(&physical)
                 .is_some_and(|t| t.elapsed() < IQ_RECENT);
             Candidate {
                 logical,
                 selected: Some(logical) == selected,
+                pin_pending,
                 forwarded: declared || received,
                 rf_active: e.channels.values().any(|c| {
                     c["frequency_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
@@ -640,7 +671,18 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     targets.len() <= 64,
                     "physical stream exceeds 64 logical targets"
                 );
-                let target_count = targets.len();
+                // Targets on the same frequency (DMR slots 1 and 2) are one logical target,
+                // and targets the slice cannot contain are not counted.
+                let target_count = targets
+                    .iter()
+                    .filter_map(|t| {
+                        let mut cfg = physical.clone();
+                        cfg.as_object_mut()?.extend(t.as_object()?.clone());
+                        let frequency = cfg["target_hz"].as_f64().or_else(|| cfg["center_hz"].as_f64())?;
+                        fits_slice(&cfg, frequency).then_some(frequency.round() as u64)
+                    })
+                    .collect::<HashSet<_>>()
+                    .len();
                 for target in targets {
                     let mut cfg = physical.clone();
                     cfg.as_object_mut()
@@ -675,6 +717,13 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                             den > 0. && (16000.0..=192000.0).contains(&(num / den)),
                             "invalid rational IQ sample rate"
                         );
+                    }
+                    // A target the slice cannot contain would alias in the mixer and decode
+                    // some other signal under this frequency; refuse it.
+                    if !fits_slice(&cfg, frequency) {
+                        let skipped = e.source["out_of_slice_targets"].as_u64().unwrap_or(0);
+                        e.source["out_of_slice_targets"] = json!(skipped + 1);
+                        continue;
                     }
                     let slot = cfg["slot"].as_u64().unwrap_or(1) as u8;
                     let id = channel_id(frequency, protocol, slot);
@@ -750,16 +799,10 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                 if frame.flags & PREROLL == 0
                     && let Some(meter) = meters.get_mut(&frame.stream_id)
                 {
-                    let iq: Vec<Complex32> = frame
-                        .payload
-                        .chunks_exact(4)
-                        .map(|b| {
-                            Complex32::new(
-                                i16::from_le_bytes([b[0], b[1]]) as f32,
-                                i16::from_le_bytes([b[2], b[3]]) as f32,
-                            )
-                        })
-                        .collect();
+                    if frame.flags & (START | DISCONTINUITY | OVERFLOW) != 0 {
+                        meter.reset_window();
+                    }
+                    let iq = iq_from_payload(&frame.payload);
                     for target in &mut meter.targets {
                         target.offset_hz = target.logical as f64 - frame.center_hz as f64;
                     }
@@ -837,6 +880,18 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
             }
             3 => {
                 let activity: Value = serde_json::from_slice(&frame.payload)?;
+                // The browser validates these strictly; never pass wire values through raw.
+                let slice_active = activity["rf_active"].as_bool().unwrap_or(false);
+                let slice_level = activity["level_db"]
+                    .as_f64()
+                    .filter(|v| v.is_finite())
+                    .map_or(Value::Null, |v| json!(v));
+                if !slice_active && let Some(meter) = meters.get_mut(&frame.stream_id) {
+                    // A closed gate ends the burst; the next one opens from the open threshold.
+                    for target in &mut meter.targets {
+                        target.active = false;
+                    }
+                }
                 let mut e = app.inner.lock().unwrap();
                 for c in e
                     .channels
@@ -844,9 +899,9 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     .filter(|c| c["stream_id"] == frame.stream_id)
                 {
                     let before = c["rf_active"].clone();
-                    c["slice_rf_active"] = activity["rf_active"].clone();
-                    c["slice_level_db"] = activity["level_db"].clone();
-                    if activity["rf_active"] != true {
+                    c["slice_rf_active"] = json!(slice_active);
+                    c["slice_level_db"] = slice_level.clone();
+                    if !slice_active {
                         // No IQ is forwarded while the gate is closed, so the target
                         // measurement is stale; the next live packet re-measures it.
                         c["target_rf_active"] = json!(false);
@@ -1030,17 +1085,72 @@ mod tests {
         assert_eq!(metadata_only, 4);
     }
     #[test]
+    fn metadata_only_streams_take_no_budget_even_when_budget_is_spare() {
+        let c = |logical, forwarded| Candidate { logical, selected: false, pin_pending: false, forwarded, rf_active: true, cost: 2 };
+        assert_eq!(admit(vec![c(1, false), c(2, false), c(3, true)], 20), vec![3]);
+    }
+    #[test]
+    fn an_unforwarded_selection_holds_budget_only_while_its_pin_is_pending() {
+        let c = |pin_pending| vec![
+            Candidate { logical: 1, selected: true, pin_pending, forwarded: false, rf_active: false, cost: 3 },
+            Candidate { logical: 50, selected: false, pin_pending: false, forwarded: true, rf_active: false, cost: 3 },
+        ];
+        assert_eq!(admit(c(true), 3), vec![1]);
+        assert_eq!(admit(c(false), 3), vec![50]);
+    }
+    /// `pinned` overrides `iq_forwarded: false`, an absent flag means forwarded, and a
+    /// malformed flag fails closed.
+    #[test]
+    fn forwarding_flags_pinned_absent_and_malformed() {
+        let streams = json!([
+            {"stream_id":1,"center_hz":454000000u64,"protocol":"Unknown","iq_forwarded":false,"pinned":true},
+            {"stream_id":2,"center_hz":454025000u64,"protocol":"Unknown","iq_forwarded":"yes"},
+            {"stream_id":3,"center_hz":454050000u64,"protocol":"Unknown"},
+            {"stream_id":4,"center_hz":454075000u64,"protocol":"Unknown","iq_forwarded":false},
+        ]);
+        let config = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,"streams":streams,"psd":{"unit":"dBFS"}});
+        let mut bytes = Vec::new();
+        frame(4, 1, 0, 0, 0, config.to_string().into_bytes()).write(&mut bytes).unwrap();
+        let (release, rx) = mpsc::channel();
+        let app = App::new(6); // two unknown streams
+        let runner = {
+            let app = app.clone();
+            let input = HeldOpen { data: std::io::Cursor::new(bytes), release: rx };
+            thread::spawn(move || ingest(input, app))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let admitted = loop {
+            let mut admitted: Vec<u64> = app
+                .inner
+                .lock()
+                .unwrap()
+                .channels
+                .values()
+                .filter(|c| c["decoder_admitted"] == true)
+                .map(|c| c["stream_id"].as_u64().unwrap())
+                .collect();
+            admitted.sort();
+            if admitted.len() == 2 || Instant::now() > deadline {
+                break admitted;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        release.send(()).unwrap();
+        runner.join().unwrap().unwrap();
+        assert_eq!(admitted, vec![1, 3]);
+    }
+    #[test]
     fn rf_active_metadata_only_streams_do_not_starve_forwarded_stream() {
         let candidates = vec![
-            Candidate { logical: 1, selected: false, forwarded: false, rf_active: true, cost: 3 },
-            Candidate { logical: 2, selected: false, forwarded: false, rf_active: true, cost: 3 },
-            Candidate { logical: 50, selected: false, forwarded: true, rf_active: false, cost: 3 },
+            Candidate { logical: 1, selected: false, pin_pending: false, forwarded: false, rf_active: true, cost: 3 },
+            Candidate { logical: 2, selected: false, pin_pending: false, forwarded: false, rf_active: true, cost: 3 },
+            Candidate { logical: 50, selected: false, pin_pending: false, forwarded: true, rf_active: false, cost: 3 },
         ];
         assert_eq!(admit(candidates, 3), vec![50]);
     }
     #[test]
     fn selected_stream_wins_then_forwarded_then_rf_active() {
-        let c = |logical, selected, forwarded, rf_active| Candidate { logical, selected, forwarded, rf_active, cost: 2 };
+        let c = |logical, selected, forwarded, rf_active| Candidate { logical, selected, pin_pending: true, forwarded, rf_active, cost: 2 };
         let candidates = vec![
             c(10, false, true, false),
             c(20, false, true, true),
@@ -1169,7 +1279,11 @@ mod tests {
         let targets = [454_075_000u64, 454_087_500, 454_100_000, 454_112_500];
         let config = json!({"input_center_hz":454100000u64,"input_rate_hz":25600000,"input_bandwidth_hz":20000000,
             "streams":[{"stream_id":7,"center_hz":454100000u64,"rate_hz":100000,"protocol":"DMR","iq_forwarded":true,
-                "targets":targets.iter().map(|t| json!({"target_hz":t,"protocol":"DMR"})).collect::<Vec<_>>()}],
+                "targets":targets.iter().map(|t| json!({"target_hz":t,"protocol":"DMR"}))
+                    // DMR slot 2 of the carrier's channel (same frequency) and one target the
+                    // slice cannot contain.
+                    .chain([json!({"target_hz":454_087_500u64,"protocol":"DMR","slot":2}), json!({"target_hz":454_300_000u64,"protocol":"DMR"})])
+                    .collect::<Vec<_>>()}],
             "psd":{"unit":"dBFS"}});
         let mut bytes = Vec::new();
         let mut cfg = frame(4, 1, 0, 0, 0, config.to_string().into_bytes());
@@ -1213,9 +1327,19 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(10));
         };
+        let (out_of_slice, slot2_active) = {
+            let e = app.inner.lock().unwrap();
+            (
+                e.source["out_of_slice_targets"].as_u64().unwrap_or(0),
+                e.channels.get("454087500-DMR-2").map(|c| c["rf_active"] == true),
+            )
+        };
         release.send(()).unwrap();
         runner.join().unwrap().unwrap();
-        assert_eq!(snapshot.len(), 4);
+        assert_eq!(slot2_active, Some(true), "slot 2 of the active carrier shares its activity");
+        assert_eq!(snapshot.len(), 4, "the out-of-slice target must not enter the catalog");
+        assert!(!snapshot.contains_key(&454_300_000));
+        assert_eq!(out_of_slice, 1);
         for (frequency, c) in &snapshot {
             assert_eq!(c["slice_rf_active"], true, "{frequency}: physical slice activity");
             assert_eq!(c["slice_targets"], 4);

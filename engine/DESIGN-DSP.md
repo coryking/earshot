@@ -119,3 +119,11 @@ reports 10 dB above noise as the common benchmark and finds about 5 dB workable.
 about 115 bins x 9 windows averaged the in-band noise fluctuates by roughly 0.15 dB, so
 false alarms from noise alone are negligible (300 noise-only packets, none). The
 hysteresis is tested by walking a carrier through 6.5, 12, 6.5 and 2 dB above noise.
+
+Limits, from review: the noise reference is the median bin, so it fails when more than half
+of the 100 ksps slice is occupied (tested to hold with 5 of 7 flat 9 kHz emissions, and to
+collapse at 6 or 7); a lower quantile would extend that. Packets shorter than 1024 samples
+are accumulated across calls (the ARM gate emits at most 256), and the partial window is
+dropped on START, discontinuity or overflow. The 8/5 dB thresholds are choices, not
+standard values. Only 12.5 and 6.25 kHz raster channels are specified; an emitter between
+rasters (for example 6.2 kHz off a 12.5 kHz channel center) falls in the transition band.

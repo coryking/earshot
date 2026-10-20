@@ -33,6 +33,33 @@ The vendored jsmn header is MIT licensed, from
 https://github.com/zserge/jsmn/blob/master/jsmn.h; its license is retained in the
 header. ADI libiio/libad9361 are dynamically linked from the existing device.
 
+### Linux cross-build (no clang, used on wigglebutt)
+
+`build-gcc.sh` builds with an ARM GNU gcc against ADI's published v0.37 sysroot. Both downloads
+live under `~/.cache/amateur-radio-arm/` (the sysroot is the `sysroot-v0.37.tar.gz` asset of
+analogdevicesinc/plutosdr-fw release v0.37; the compiler is ARM's
+`arm-gnu-toolchain-13.3.rel1-x86_64-arm-none-linux-gnueabihf`):
+
+```sh
+PATH=~/.cache/amateur-radio-arm/tc/arm-gnu-toolchain-13.3.rel1-x86_64-arm-none-linux-gnueabihf/bin:$PATH \
+  offload/arm/build-gcc.sh ~/.cache/amateur-radio-arm/sysroot/staging ~/.cache/amateur-radio-arm/build
+```
+
+## Live sessions (hold the shared lock)
+
+Every session that configures, captures or streams holds `/tmp/pluto-radio.lock` (the helpers
+in `offload/radio_lock.py` take it; release it between runs). They check the Pluto's firmware
+first, because the image can change between sessions. The default SSH password is ADI's factory
+default; set `PLUTO_SSH_PASSWORD` if it was changed.
+
+```sh
+# bounded acceptance: producer -> private engine -> WebSocket path, acknowledged STOP, readbacks
+uv run python offload/live_acceptance.py --binary ~/.cache/amateur-radio-arm/build/pluto-channel-source \
+  --out output/live-acceptance --seconds 120
+# listening session on the service's own URL (stops the fixture service, restores it afterwards)
+uv run python offload/live_session.py --binary ~/.cache/amateur-radio-arm/build/pluto-channel-source --minutes 60
+```
+
 ## Run only with an exclusive receiver lease
 
 Copy the ARM binary to `/tmp/pluto-channel-source` through the authorized device

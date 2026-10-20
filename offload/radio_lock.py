@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import signal
 import time
 from collections.abc import Iterator
 
@@ -32,3 +33,13 @@ def radio_lock(timeout_s: float = 3600.0) -> Iterator[None]:
             yield
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def raise_on_termination() -> None:
+    """Turn SIGTERM/SIGHUP into SystemExit so `finally` blocks restore the radio first."""
+
+    def handler(signum: int, _frame: object) -> None:
+        raise SystemExit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, handler)

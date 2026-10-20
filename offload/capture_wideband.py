@@ -6,8 +6,12 @@ A *stream* capture refills one buffer repeatedly; stock Pluto DMA has no sample
 counter, so continuity across refills is not proven (the sidecar records the
 wall time of every refill so a stall is visible).
 
-RX only. The original sample rate, bandwidth, LO, gain mode, both FIR enables and
-the TX baseband rate are restored and read back on every exit path.
+RX only, and the session holds /tmp/pluto-radio.lock. The original sample rate, bandwidth,
+LO and gain mode are written back on every exit path (each write attempted independently,
+SIGTERM/SIGHUP included), then rate, bandwidth, LO, gain mode, both FIR enables and the TX
+baseband clock/LO are read back and compared. The FIR enables and TX clock are verified, not
+written: the driver keeps the TX clock tied to the RX rate. A mismatch triggers one
+corrective restore through iio_attr and a second readback.
 
     uv run python offload/capture_wideband.py --uri ip:192.168.10.10 \
         --out output/wideband-iq --buffers 12 --stream-seconds 8
@@ -18,7 +22,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -27,42 +30,11 @@ import numpy as np
 
 from radio_tools.pluto import PlutoReceiver
 
+sys.path.insert(0, str(Path(__file__).parent))
+from pluto_readback import iio_attr, mismatches, restore_receiver, snapshot
+from radio_lock import radio_lock, raise_on_termination
+
 LO_HZ = 454_216_998
-
-
-def iio_attr(uri: str, *args: str) -> str:
-    out = subprocess.run(
-        ["iio_attr", "-u", uri, *args], check=True, capture_output=True, text=True, timeout=30
-    ).stdout.strip()
-    return out.splitlines()[-1].strip()
-
-
-def snapshot(uri: str) -> dict[str, str]:
-    rx = ("-i", "-c", "ad9361-phy", "voltage0")
-    tx = ("-o", "-c", "ad9361-phy", "voltage0")
-    return {
-        "rx_sampling_frequency": iio_attr(uri, *rx, "sampling_frequency"),
-        "rx_rf_bandwidth": iio_attr(uri, *rx, "rf_bandwidth"),
-        "rx_gain_control_mode": iio_attr(uri, *rx, "gain_control_mode"),
-        "rx_hardwaregain": iio_attr(uri, *rx, "hardwaregain"),
-        "rx_filter_fir_en": iio_attr(uri, *rx, "filter_fir_en"),
-        "rx_lo": iio_attr(uri, "-o", "-c", "ad9361-phy", "altvoltage0", "frequency"),
-        "tx_sampling_frequency": iio_attr(uri, *tx, "sampling_frequency"),
-        "tx_filter_fir_en": iio_attr(uri, *tx, "filter_fir_en"),
-        "tx_lo": iio_attr(uri, "-o", "-c", "ad9361-phy", "altvoltage1", "frequency"),
-    }
-
-
-RESTORED_KEYS = (
-    "rx_sampling_frequency",
-    "rx_rf_bandwidth",
-    "rx_gain_control_mode",
-    "rx_filter_fir_en",
-    "rx_lo",
-    "tx_sampling_frequency",
-    "tx_filter_fir_en",
-    "tx_lo",
-)
 
 
 def sigmf_meta(
@@ -120,9 +92,15 @@ def main() -> int:
     ap.add_argument("--stream-rate", type=int, default=0, help="0 disables the long capture")
     ap.add_argument("--stream-seconds", type=float, default=8)
     ap.add_argument("--stream-buffer-samples", type=int, default=262_144)
+    ap.add_argument("--lock-timeout", type=float, default=3600)
     args = ap.parse_args()
-    args.out.mkdir(parents=True, exist_ok=True)
+    raise_on_termination()
+    with radio_lock(args.lock_timeout):
+        return session(args)
 
+
+def session(args: argparse.Namespace) -> int:
+    args.out.mkdir(parents=True, exist_ok=True)
     original = snapshot(args.uri)
     print("original:", json.dumps(original), flush=True)
     rx = PlutoReceiver(args.uri)
@@ -135,14 +113,10 @@ def main() -> int:
         rx.write("rf_bandwidth", str(min(args.bandwidth, max(rate, 200_000))))
         rx.write("frequency", str(args.center))
 
-    def applied() -> dict:
-        s = snapshot(args.uri)
-        return {k: s[k] for k in s}
-
     try:
         rx.open()
         set_rx(args.rate)
-        ap_ = applied()
+        ap_ = snapshot(args.uri)
         manifest["applied_wide"] = ap_
         print("applied:", json.dumps(ap_), flush=True)
         rate = int(ap_["rx_sampling_frequency"])
@@ -187,7 +161,7 @@ def main() -> int:
             )
         if args.stream_rate:
             set_rx(args.stream_rate)
-            sp = applied()
+            sp = snapshot(args.uri)
             srate = int(sp["rx_sampling_frequency"])
             target = int(srate * args.stream_seconds)
             started = dt.datetime.now(dt.UTC).isoformat()
@@ -245,22 +219,32 @@ def main() -> int:
             rx.stop()
         except BaseException as exc:  # noqa: BLE001
             errors.append(exc)
-        # Restore through libiio, in dependency order (rate first), then read back everything.
-        try:
-            rx.write("sampling_frequency", original["rx_sampling_frequency"])
-            rx.write("rf_bandwidth", original["rx_rf_bandwidth"])
-            rx.write("frequency", original["rx_lo"])
-            rx.write("gain_control_mode", original["rx_gain_control_mode"])
-        except BaseException as exc:  # noqa: BLE001
-            errors.append(exc)
+        # Restore through libiio in dependency order (rate first). Each write is attempted
+        # on its own, so one failure cannot leave the later controls unrestored.
+        for key, value in (
+            ("sampling_frequency", original["rx_sampling_frequency"]),
+            ("rf_bandwidth", original["rx_rf_bandwidth"]),
+            ("frequency", original["rx_lo"]),
+            ("gain_control_mode", original["rx_gain_control_mode"]),
+        ):
+            try:
+                rx.write(key, value)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
         try:
             rx.close()
         except BaseException as exc:  # noqa: BLE001
             errors.append(exc)
         try:
             after = snapshot(args.uri)
+            bad = mismatches(original, after)
+            if bad:
+                # One corrective pass through iio_attr, then read everything back again.
+                fix_errors = restore_receiver(args.uri, original)
+                manifest["corrective_restore_errors"] = fix_errors
+                after = snapshot(args.uri)
+                bad = mismatches(original, after)
             manifest["restored"] = after
-            bad = {k: (original[k], after[k]) for k in RESTORED_KEYS if original[k] != after[k]}
             manifest["restoration_mismatch"] = bad
             print("restored:", json.dumps(after), flush=True)
             print("restoration mismatch:", json.dumps(bad), flush=True)

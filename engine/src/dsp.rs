@@ -275,6 +275,9 @@ pub struct TargetBand {
 pub struct SliceMeter {
     window: Vec<f32>,
     window_power: f32,
+    /// Samples of an incomplete window, carried to the next packet so producers that
+    /// emit short blocks (the ARM gate sends at most 256 samples) are still measured.
+    pending: Vec<Complex32>,
     pub targets: Vec<TargetBand>,
 }
 impl SliceMeter {
@@ -292,19 +295,28 @@ impl SliceMeter {
         Self {
             window,
             window_power,
+            pending: Vec::new(),
             targets,
         }
     }
+    /// Drop the carried partial window (new burst, gap or discontinuity).
+    pub fn reset_window(&mut self) {
+        self.pending.clear();
+    }
     /// Update every target from one live IQ packet. `full_scale` is the amplitude of a
-    /// full-scale sample. Returns false when the packet is too short to measure.
+    /// full-scale sample. Returns false until enough samples have accumulated for one
+    /// FFT window (the remainder of a packet is kept for the next call).
     pub fn measure(&mut self, iq: &[Complex32], rate: f64, full_scale: f64) -> bool {
-        let windows = iq.len() / Self::FFT;
+        self.pending.extend_from_slice(iq);
+        let windows = self.pending.len() / Self::FFT;
         if windows == 0 {
             return false;
         }
+        let iq = std::mem::take(&mut self.pending);
+        self.pending = iq[windows * Self::FFT..].to_vec();
         let mut power = vec![0f64; Self::FFT];
         let mut buffer = vec![Complex32::new(0., 0.); Self::FFT];
-        for chunk in iq.chunks_exact(Self::FFT) {
+        for chunk in iq[..windows * Self::FFT].chunks_exact(Self::FFT) {
             for ((b, x), w) in buffer.iter_mut().zip(chunk).zip(&self.window) {
                 *b = *x * *w;
             }
@@ -418,7 +430,7 @@ mod tests {
     #[test]
     fn channel_filter_meets_channel_plan_specification() {
         for spec in [ChannelSpec::CHANNEL_12_5, ChannelSpec::CHANNEL_6_25] {
-            for rate in [25000., 50000., 100000., 192000.] {
+            for rate in [16000., 25000., 50000., 100000., 192000.] {
                 let mut ripple: f64 = 0.;
                 let mut f = 0.;
                 while f <= spec.pass_hz {
@@ -463,6 +475,44 @@ mod tests {
             println!("target {target} neighbor {neighbor}: wanted/residual {margin:.1} dB with interferer +60 dB");
             assert!(margin >= 10., "selectivity short: {margin} dB");
         }
+    }
+    /// NXDN48 has 6.25 kHz neighbors; the narrow class must hold 60 dB there at 100 ksps.
+    #[test]
+    fn narrow_class_rejects_a_6_25_khz_neighbor() {
+        let rate = 100000.;
+        let n = 100000;
+        for neighbor in [-6250., 6250.] {
+            let spec = ChannelSpec::CHANNEL_6_25;
+            let mut a = ChannelDsp::new(rate, 0., spec);
+            let mut b = ChannelDsp::new(rate, 0., spec);
+            let w = a.filter(&fm(n, rate, 0., 10., 700., 1050.));
+            let i = b.filter(&fm(n, rate, neighbor, 10000., 500., 1050.));
+            let margin = db(power(&w[w.len() / 2..]) / power(&i[i.len() / 2..]));
+            println!("narrow neighbor {neighbor}: wanted/residual {margin:.1} dB at +60 dB");
+            assert!(margin >= 0., "narrow class selectivity short: {margin} dB");
+        }
+        // The 12.5 kHz class cannot do this: its stopband starts at 6.875 kHz.
+        let mut wide = ChannelDsp::new(rate, 0., ChannelSpec::CHANNEL_12_5);
+        let leak = wide.filter(&fm(n, rate, 6250., 10000., 500., 1050.));
+        assert!(power(&leak[leak.len() / 2..]) > 1e5, "wide filter unexpectedly rejects 6.25 kHz");
+    }
+    /// The ARM gate emits blocks of at most 256 samples; the meter must still work on them.
+    #[test]
+    fn slice_meter_accumulates_short_packets() {
+        let rate = 100000.;
+        let mut meter = SliceMeter::new(vec![band(-25000., 11250.), band(12500., 11250.)]);
+        let mut iq = noise(20480, 100., 11);
+        for (s, c) in iq.iter_mut().zip(fm(20480, rate, 12500., 3000., 1000., 2500.)) {
+            *s += c;
+        }
+        let measured: Vec<bool> = iq.chunks(256).map(|p| meter.measure(p, rate, 32768.)).collect();
+        assert!(!measured[0] && measured.iter().filter(|m| **m).count() >= 15);
+        assert_eq!(
+            meter.targets.iter().map(|t| t.active).collect::<Vec<_>>(),
+            vec![false, true]
+        );
+        meter.reset_window();
+        assert!(!meter.measure(&iq[..256], rate, 32768.), "reset must drop the carried window");
     }
     /// Several logical targets share one physical 100 ksps slice; each worker must
     /// recover its own FM message and reject the others (including the adjacent one).

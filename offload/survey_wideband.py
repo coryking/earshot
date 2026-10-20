@@ -65,21 +65,20 @@ def concatenate(files: list[Path], wav_path: Path, rate: int) -> int:
 
 def main() -> int:
     root, output = Path(sys.argv[1]), Path(sys.argv[2])
-    groups: dict[int, list[Path]] = defaultdict(list)
-    meta: dict[int, dict] = {}
+    groups: dict[tuple[int, int], list[Path]] = defaultdict(list)
+    gains: dict[tuple[int, int], list[str]] = defaultdict(list)
     for sidecar in sorted(root.glob("*/*.sigmf-meta")):
         info = json.loads(sidecar.read_text())
         g = info["global"]
-        if g["radio:capture_kind"] != "single_buffer":
+        if g.get("radio:capture_kind") != "single_buffer" or g.get("core:datatype") != "ci16_le":
             continue
-        center = int(info["captures"][0]["core:frequency"])
-        groups[center].append(sidecar.with_suffix(".sigmf-data"))
-        meta[center] = g
+        key = (int(info["captures"][0]["core:frequency"]), int(g["core:sample_rate"]))
+        groups[key].append(sidecar.with_suffix(".sigmf-data"))
+        gains[key].append(g.get("radio:hardwaregain_after", "unknown"))
     inventory: list[dict] = []
     pilots: list[float] = []
     summary: list[dict] = []
-    for center, files in sorted(groups.items()):
-        rate = int(meta[center]["core:sample_rate"])
+    for (center, rate), files in sorted(groups.items()):
         with tempfile.TemporaryDirectory() as tmp:
             wav_path = Path(tmp) / f"baseband_{center}Hz_survey.wav"
             samples = concatenate(files, wav_path, rate)
@@ -107,7 +106,7 @@ def main() -> int:
                 "candidates_total": result.candidates_total,
                 "candidates_usable": len(usable),
                 "near_full_scale_fraction": result.sampled_near_full_scale_fraction,
-                "rf_gain_db_by_buffer": meta[center]["radio:applied"]["rx_hardwaregain"],
+                "rf_gain_db_by_buffer": gains[(center, rate)],
             }
         )
         for c in usable:

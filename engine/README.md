@@ -125,15 +125,27 @@ producer, measured RF/USB continuity, and a live browser check. The ARM prototyp
 has a lower input-rate ceiling than the planned FPGA producer; the host reports
 that advertised capacity rather than treating every requested width as applied.
 
-## Checkpoint, 2026-10-19
+## Live acceptance and status
 
-The embedded codec and 25 ksps IQ-to-WebSocket fixture paths passed. The actual
-on-Pluto producer has not been connected to this host: integration was stopped
-for the session transfer before acquisition began. Native servers are stopped.
+`offload/live_acceptance.py` runs the bounded Pluto to engine to browser-path acceptance
+under the shared `/tmp/pluto-radio.lock` (see offload/arm/README.md for the cross-build and
+the exact command). It checks the Pluto's reported firmware first, then records spectrum
+rows, WebSocket events and audio, freshness, gaps, pinning, and the acknowledged STOP with
+receiver readbacks. Pass criteria are the delivered path and restoration; audio and RF
+activity are reported, since the air may be quiet.
 
-Decoder admission now honors the source forwarding mask (see Streaming contract).
+Endpoint notes: `/api/status` always reports numeric `received_seconds`,
+`source_position_s`, `decode_latency_s`, `center_hz`, `rate_hz` and `bandwidth_hz`, because
+the browser validates them strictly (`decode_latency_s` is the ingress age of audio that
+flowed in the last 5 s, else 0). `/api/spectrum` `low_db`/`high_db` are display hints: fixed
+-125 to -65 for unit `dBFS/Hz`, otherwise fitted to the newest 30 rows (5th percentile - 2 dB
+to 99.9th percentile + 2 dB, at least 30 dB apart). On a slice shared by several targets,
+per-target `rf_active` needs forwarded IQ; with none, `slice_rf_active` is true while each
+target's `rf_active` stays false. Targets the slice cannot contain are refused and counted
+in `source.out_of_slice_targets`; targets on the same frequency (DMR slots) count once in
+`slice_targets`.
 
-Remaining acceptance: multi-target 100 ksps adjacent-channel rejection and live
-producer-to-host binary audio; source stop ACK and actual RF/FIR/clock restoration
-with the host connected; sustained idle/noise behavior; frontend capability and
-waterfall checks. ARM throughput and the FPGA build remain producer work.
+Remaining acceptance: sustained idle/noise behavior over hours; frontend capability checks
+for the new channel fields (`slice_*`, `target_*`); device acceptance of a multi-target
+100 ksps slice, which waits for the FPGA producer. The ARM producer at 800 ksps runs at about
+0.87x real time (late buffers), so its IQ has gaps; hardware continuity is unproven.

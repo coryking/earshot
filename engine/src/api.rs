@@ -16,14 +16,28 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::broadcast;
+fn now_s() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
+}
 /// The browser validates this payload strictly (web/src/lib/radio.ts), so every numeric
 /// field must be a number even before the first CONFIG or sample arrives.
 fn status_json(app: &App) -> Value {
     let e = app.inner.lock().unwrap();
     let number = |v: &Value| json!(v.as_f64().unwrap_or(0.));
     let position = number(&e.source["source_position_s"]);
-    // Host ingress age of the latest delivered audio; 0 until audio flows.
-    let latency = e.listener["ingress_age_ms"].as_f64().unwrap_or(0.) / 1000.;
+    // Host ingress age of the latest delivered audio while audio is flowing (the last
+    // chunk was under 5 s ago); otherwise 0, not a stale number.
+    let flowing = e.listener["last_audio_at"]
+        .as_f64()
+        .is_some_and(|t| now_s() - t < 5.);
+    let latency = if flowing {
+        e.listener["ingress_age_ms"].as_f64().unwrap_or(0.) / 1000.
+    } else {
+        0.
+    };
     json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":number(&e.source["input_center_hz"]),"rate_hz":number(&e.source["input_rate_hz"]),"bandwidth_hz":number(&e.source["input_bandwidth_hz"]),"generation":e.generation,"channels":e.channels.values().collect::<Vec<_>>(),"received_seconds":position,"source_position_s":position,"decode_latency_s":latency,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":number(&e.source["queue_depth"]),"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"source":e.source})
 }
 async fn status(State(app): State<App>) -> Json<Value> {
@@ -101,7 +115,8 @@ struct After {
 /// the documented fixed scale; integrated per-bin dBFS has no fixed floor, so the range
 /// follows the retained rows (5th percentile to 99.9th percentile with a minimum span).
 fn display_range(unit: &str, rows: &std::collections::VecDeque<(u64, f64, Vec<f32>)>) -> (f64, f64) {
-    let mut values: Vec<f32> = rows.iter().flat_map(|r| r.2.iter().copied()).collect();
+    // Only the newest rows: bounded work under the engine lock, and the scale tracks now.
+    let mut values: Vec<f32> = rows.iter().rev().take(30).flat_map(|r| r.2.iter().copied()).collect();
     if unit == "dBFS/Hz" || values.len() < 16 {
         return (-125., -65.);
     }
