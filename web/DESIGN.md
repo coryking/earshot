@@ -13,15 +13,15 @@ secondary detail or in the operator view.
 | Rank | Action | Where | Gesture |
 | --- | --- | --- | --- |
 | 1 | See what's happening now | **Now** tab (home). Titled by the listening area, then the live strip, a small **Talking now** area (at most three, "+N" beside its heading for more), and the channel list in a stable order. | Open the app. Pull to refresh is unnecessary because the list is live. |
-| 2 | Tap to listen | Any row or Talking now card, any call in Catch up, a marked trace in the desktop waterfall. The **player bar** docks above the tab bar with stop, mute and volume. | One tap on a row listens. Tapping the playing row again stops. The player bar's stop button is in thumb reach. Volume lives in the expanded player sheet (swipe the bar up). |
+| 2 | Tap to listen | Any row or Talking now card, any call in Catch up, a marked trace in the desktop waterfall. The **player bar** docks above the tab bar with stop, mute and volume. | One tap on a row listens. Tapping the selected row again keeps it selected; Stop ends playback. The player bar's stop button is in thumb reach. Volume lives in the expanded player sheet (swipe the bar up). |
 | 3 | Catch up on what I missed | **Catch up** tab: recent calls newest first, grouped by "Just now / Earlier this hour / Today", each with a play button and duration. | Tap a call to play it. Playback continues down the list (autoplay next) like a podcast queue, so a listener can catch up hands-free. |
 | 4 | Follow or mute a source | Star and mute in the source sheet and the expanded player. Followed sources pin to the top of Now, like pinned chats; muted ones sink into a collapsed "Muted" group and never alert. Naming a source keeps its follow or mute. | Tap the row's ⓘ button to open the source sheet. The row itself only ever listens. |
 | 5 | Get alerted | Bell in the header opens the alerts sheet: "A channel I follow gets busy" (three or more calls within ten minutes) and "It's much busier than normal" (the area moves into busier-than-usual). Only activity since the page opened counts, with a 30-minute cooldown. In-page notifications today; closed-app push needs the engine. | Toggle switches. The bell turns amber when alerts are on. |
 | 6 | Change block | Tap the area name at the top ("Downtown business radio"). A sheet lists the blocks in plain terms and asks for confirmation. With only one block (today's live engine) the name is plain text, with no chevron and no sheet. | Deliberately two taps plus a confirm. Never a swipe. |
-| 7 | Is it working? / What is this? | The status dot next to the block name ("Listening", "Paused", "Not connected"); tap it for a plain explanation. Each source sheet has "What is this?": probable user, kind of traffic, and, for encrypted sources, why you can't hear them. | Tap. |
+| 7 | Is it working? / What is this? | The status dot next to the block name ("Receiving", "Paused", "Not connected"); tap it for a plain explanation. Each source sheet has "What is this?": probable user, kind of traffic, and, for encrypted sources, why you can't hear them. | Tap. |
 
-Listeners never tune, set gain or bandwidth, or pick decoders. Those live in the
-**operator view** (`#/operator`), reached from the Radio tab's "Operator tools"
+Now includes frequency entry and the selected channel’s live status. Gain,
+bandwidth and decoder controls live in the **operator view** (`#/operator`), reached from the Radio tab's "Operator tools"
 row and the command palette. It is not hidden for security (the tailnet is the
 boundary); it's out of the way so a listener doesn't wander into it.
 
@@ -32,7 +32,7 @@ is reachable with the right thumb.
 
 ```
 ┌──────────────────────────────┐
-│ ● Listening                🔔│  header: status (tap = status sheet), alerts
+│ ● Receiving                🔔│  header: status (tap = status sheet), alerts
 │ Downtown business radio ⌄    │  title: the area (tap = block sheet); never changes with data
 │ Busier than usual            │  fixed-height line, reserved once there's a baseline
 │ ▁▂▅▇▅▂▁▁▁▂▃▁▁▁▁▆█▆▁▁▁▁▁▁▂▁ │  live strip: labels on who's talking / playing; not a control
@@ -42,7 +42,7 @@ is reachable with the right thumb.
 │ Channels                     │
 │ ★ Front desk          ▮▮▮ ⓘ │  followed first, then last voice heard; frozen while shown
 │   Warehouse crew  2 min ago ⓘ│  30-min call lane under each row
-│   Day Wireless   1 min ago  ⓘ│  same name twice: second line says "Line 1" / "Line 2"
+│   Day Wireless   1 min ago  ⓘ│  each row shows frequency, mode and DMR slot
 │ › Other activity (28)        │  no decoded voice: strongest signal first, with bars
 ├──────────────────────────────┤
 ├──────────────────────────────┤
@@ -57,9 +57,9 @@ is reachable with the right thumb.
 - **Bottom-anchored primary actions.** The player bar and tab bar are fixed to
   the bottom, above the home indicator (`env(safe-area-inset-bottom)`).
 - **Few words.** Rows carry a name, when a voice was last heard (in minutes),
-  or the level meter, and the 30-minute call lane. A second line appears only
-  to tell apart rows that share a name. No helper sentences or narration;
-  explanations live behind ⓘ and stay short there too. Rows in Other
+  or the level meter, and the 30-minute call lane. Every channel identity shows
+  its frequency, mode and DMR slot below the name. The selected row also shows
+  whether audio is starting, waiting, playing or muted. Rows in Other
   activity show signal bars, relative to the strongest in the group; they are
   listenable like any row (analog FM through the engine's pin path).
 - **Calm.** "Talking" means decoded voice (DMR/NXDN voice with sync, FM held
@@ -76,8 +76,8 @@ is reachable with the right thumb.
   are no voice channels yet. The leaving Talking now card stays mounted while
   it folds. Talking now cards fold in
   and out; `prefers-reduced-motion` turns that off. Logic: `src/domain/calm.ts`.
-- **Progressive disclosure.** Frequencies, slots and protocols are in the
-  source sheet's "Details" section, collapsed by default.
+- **Channel identity.** `ChannelIdentity` renders the name, frequency, mode and
+  slot in lists, sheets, players, recordings and waterfall labels.
 
 ## Desktop and landscape
 
@@ -86,10 +86,10 @@ phone landscape) the layout becomes two resizable panes:
 
 ```
 ┌──────────────────────┬───────────────────────────────────────────────┐
-│ ● Downtown business  │  full waterfall (resizable height)            │
+│ ● Downtown business  │  selected channel + frequency entry          │
 │ Two channels talking │  source markers along the top edge            │
 │ ─────────────────────│───────────────────────────────────────────────│
-│ source list          │  Catch up timeline (calls by source over time)│
+│ source list          │  waterfall history                           │
 │                      │                                               │
 ├──────────────────────┴───────────────────────────────────────────────┤
 │ player bar                                                           │
@@ -102,7 +102,7 @@ Keyboard shortcuts (shown with `?`):
 | --- | --- |
 | `⌘K` / `Ctrl+K` / `/` | Command palette: jump to a source, follow, change block, open operator view |
 | `j` / `k` or ↓ / ↑ | Move through the source list |
-| `Enter` or `Space` | Listen to the focused source; again to stop |
+| `Enter` or `Space` | Tune to the focused source; stays selected |
 | `Esc` | Stop listening (or close the open sheet) |
 | `m` | Mute or unmute |
 | `f` | Follow or unfollow the focused source |
@@ -121,7 +121,9 @@ A supporting view, as the spec says. Rendered entirely in the browser:
   talking now gets an amber guide line and name label, and the playing source a
   blue one, tying the strip to the list, which is the way in.
 - **Landscape and desktop:** the full view, a few minutes of history, with
-  hover readout, source markers and click-to-listen on a marked trace.
+  hover preview and click-to-tune. Picking uses the historical row under the
+  pointer and snaps to a nearby peak or known channel, capped at 100 kHz. Shift
+  bypasses snapping. Unnamed signals open an editable frequency form.
 - **Rendering:** WebGL2 texture ring buffer, one row per spectrum line, colormap
   as a 256-entry lookup texture, exponential averaging per bin in the client,
   and a 2D canvas fallback when WebGL is unavailable. The server sends compact
@@ -135,14 +137,14 @@ A supporting view, as the spec says. Rendered entirely in the browser:
 | Engine says | Listener sees |
 | --- | --- |
 | channel `454029223-DMR-2` with a catalog label | the label: "Front desk" |
-| channel with no label | its number, the way a phone shows an unknown caller: "454.029 MHz", plus "line 2" when one frequency carries two conversations (DMR slots) |
-| `protocol: DMR / NXDN48` | "digital voice" (detail sheet: "DMR, slot 2") |
+| channel with no label | its number, the way a phone shows an unknown caller: "454.029 MHz", with mode and DMR slot below the name |
+| `protocol: DMR / NXDN48` | frequency plus mode and slot, e.g. "DMR · Slot 2" |
 | `protocol: Unknown` | "not identified yet" |
 | analog FM (catalog, later engine) | "voice" |
 | `speech_active` (held 5 s) | a Talking now card plus a level meter |
 | `rf_active` without decoded voice, or `label_kind: control` (the engine's label kind only, never free text) | folded into "Other activity (N)", still playable unless it is a control channel |
 | encrypted (catalog/trunking) | "Private: encrypted, can't be heard" with an explanation in "What is this?" |
-| `/api/status` state `receiving` | "Listening" (green), `stopped` "Paused", `error` or disconnected "Not connected" (with the error in plain words and the raw message under Details) |
+| `/api/status` state `receiving` | "Receiving" (green), `stopped` "Paused", `error` or disconnected "Not connected" (with the error in plain words and the raw message under Details) |
 | center / bandwidth | a block name: "Downtown business radio (454 MHz)" |
 | talkgroup (trunking, next) | the talkgroup label, grouped under its system: "Metro buses" in "King County Metro" |
 

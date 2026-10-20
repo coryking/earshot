@@ -1,6 +1,7 @@
 import { Loader2, Square, Volume2, VolumeX, X } from "lucide-react";
 import { usePlayer } from "@/app/player-context";
 import { openSheet } from "@/app/ui";
+import { ChannelIdentity } from "@/components/ChannelIdentity";
 import { LevelMeter } from "@/components/bits";
 import { Button } from "@/components/ui/button";
 import type { PlayerState } from "@/audio/player";
@@ -15,13 +16,14 @@ function clock(seconds: number) {
 export function playerLine(state: PlayerState, takenName: string | null): string {
   if (state.kind === "call")
     return state.phase === "error" ? (state.error ?? "") : `Recorded · ${clock(state.position)} / ${clock(state.duration)}`;
+  if ((state.phase === "playing" || state.phase === "waiting") && (state.muted || state.volume === 0)) return "Muted · unmute to hear audio";
   switch (state.phase) {
     case "starting":
-      return "Connecting…";
+      return "Tuning…";
     case "waiting":
-      return "Live · quiet";
+      return "Tuned · waiting for audio";
     case "playing":
-      return "Live · talking";
+      return "Playing live audio";
     case "reconnecting":
       return "Reconnecting…";
     case "taken":
@@ -57,7 +59,7 @@ export function PlayerBar() {
             <LevelMeter active={state.phase === "playing"} className="shrink-0" />
           )}
           <span className="min-w-0 flex-1">
-            <span className="block truncate font-semibold text-heading">{state.sourceName}</span>
+            <ChannelIdentity name={state.sourceName} frequencyHz={state.frequencyHz} mode={state.mode} slot={state.slot} className="text-heading" />
             <span aria-live="polite" className={state.phase === "error" ? "block text-sm text-destructive" : "block truncate text-sm text-muted-foreground"}>
               {line}
             </span>

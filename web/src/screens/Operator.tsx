@@ -18,7 +18,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { formatMHz, toSources } from "@/domain/adapt";
+import { formatMHz } from "@/domain/adapt";
 import type { Need } from "@/backend/types";
 import { relativeTime } from "@/domain/summary";
 import { keys, useBackend, useCatalog, useStatus, useSupports } from "@/state/radio";
@@ -81,9 +81,7 @@ export function OperatorScreen() {
   const tune = useMutation({
     mutationFn: async () => {
       if (!backend.tune || tuneHz === null) throw new Error("Frequency tuning unavailable");
-      const channel = await backend.tune(tuneHz);
-      const source = toSources([channel], null, { fmAudio: true })[0];
-      await player.listen(source, { toggle: false });
+      await player.listenFrequency(tuneHz);
     },
     onSuccess: () => { void client.invalidateQueries({ queryKey: keys.status }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : "Tuning failed"),

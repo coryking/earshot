@@ -1,3 +1,4 @@
+import { LiveSelection } from "@/components/Tuning";
 import { ChevronDown } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePlayerInstance, usePlayerSelect } from "@/app/player-context";
@@ -43,7 +44,7 @@ export interface HomeView {
 /** Only what's drawn: two views with the same signature render the same. */
 function signature(view: HomeView): string {
   const row = (s: Source) =>
-    [s.id, s.name, s.encryption, view.talking.has(s.id), s.inRange, heardAgo(s.lastHeardAt, view.now), view.bars.get(s.id) ?? ""].join("|");
+    [s.id, s.name, s.frequencyHz, s.mode, s.slot, s.encryption, view.talking.has(s.id), s.inRange, heardAgo(s.lastHeardAt, view.now), view.bars.get(s.id) ?? ""].join("|");
   const { groups } = view;
   return JSON.stringify([
     groups.talking.map(row),
@@ -247,6 +248,7 @@ export function NowScreen({ showStrip }: { showStrip: boolean }) {
   return (
     <div>
       <AreaTitle busy={busy} reserve={hasBaseline} />
+      {showStrip && <div className="px-4 pb-3"><LiveSelection /></div>}
       {showStrip && (
         <div className="px-4 pb-3">
           <Waterfall variant="strip" sources={stripMarks} talking={view.talking} activeSourceId={activeSourceId} />

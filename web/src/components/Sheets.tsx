@@ -1,3 +1,5 @@
+import { ChannelIdentity } from "@/components/ChannelIdentity";
+import { TuneForm } from "@/components/Tuning";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { BellRing, ChevronRight, Lock, Pause, Play, Star, VolumeX } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -27,7 +29,7 @@ function Sheet({
   children,
 }: {
   open: boolean;
-  title: string;
+  title: ReactNode;
   description?: ReactNode;
   children: ReactNode;
 }) {
@@ -171,12 +173,12 @@ function SourceSheet({ id }: { id: string | null }) {
   const isFollowed = followed.includes(source.id);
   const isMuted = muted.includes(source.id);
   return (
-    <Sheet open={!!id} title={source.name} description={source.summary}>
+    <Sheet open={!!id} title={<ChannelIdentity {...source} />} description={source.summary}>
       <div className="flex flex-wrap gap-2">
-        {source.listenable.ok ? (
-          <Button size="lg" className="h-12 gap-2" onClick={() => void player.listen(source)}>
+        {source.listenable.ok || source.listenable.reason === "Out of range" ? (
+          <Button size="lg" className="h-12 gap-2" onClick={() => playing ? void player.stop() : void player.listen(source)}>
             {playing ? <Pause className="size-4" /> : <Play className="size-4 fill-current" />}
-            {playing ? "Stop listening" : "Listen"}
+            {playing ? "Stop audio" : "Tune and listen"}
           </Button>
         ) : (
           <p className="w-full rounded-lg bg-secondary p-3 text-sm text-secondary-foreground">
@@ -231,7 +233,7 @@ function SourceSheet({ id }: { id: string | null }) {
         </CollapsibleTrigger>
         <CollapsibleContent>
           <dl className="tabular grid grid-cols-2 gap-x-4 text-sm">
-            {source.frequencyHz !== null && <Fact label="Frequency">{formatMHz(source.frequencyHz, 4)} MHz</Fact>}
+            {source.frequencyHz !== null && <Fact label="Frequency">{formatMHz(source.frequencyHz, 5)} MHz</Fact>}
             <Fact label="Kind">{modeNames[source.mode]}</Fact>
             {source.slot !== null && source.mode === "dmr" && <Fact label="Timeslot">{source.slot}</Fact>}
             {source.system && <Fact label="System">{source.system.name}</Fact>}
@@ -287,7 +289,7 @@ export function CallItem({
         </span>
       )}
       <span className="min-w-0 flex-1">
-        {!compact && <span className="block truncate font-medium text-heading">{name}</span>}
+        <ChannelIdentity name={compact ? null : name} frequencyHz={call.frequencyHz} mode={call.mode} slot={call.slot} />
         <span className="tabular block text-sm text-muted-foreground">
           {when}
           {seconds !== null && ` · ${seconds} s`}
@@ -397,7 +399,7 @@ function StatusSheet({ open }: { open: boolean }) {
   const title =
     health.state === "offline" && health.reconnecting
       ? "Reconnecting"
-      : { listening: "Working", paused: "Paused", offline: "Not connected" }[health.state];
+      : { listening: "Receiving", paused: "Paused", offline: "Not connected" }[health.state];
   return (
     <Sheet open={open} title={title} description={health.detail.replace(/\.$/, "") === title ? undefined : health.detail}>
       <dl className="divide-y divide-border/60">
@@ -436,7 +438,7 @@ function PlayerSheet({ open }: { open: boolean }) {
   const source = sources.find((s) => s.id === state.sourceId) ?? null;
   const taken = state.takenBy ? (sources.find((s) => s.channelIds.includes(state.takenBy!))?.name ?? null) : null;
   return (
-    <Sheet open={open && state.kind !== "idle"} title={state.sourceName ?? "Player"} description={source?.summary}>
+    <Sheet open={open && state.kind !== "idle"} title={<ChannelIdentity name={state.sourceName} frequencyHz={state.frequencyHz} mode={state.mode} slot={state.slot} />} description={source?.summary}>
       <div className="flex items-center gap-4 rounded-2xl bg-secondary/60 p-4">
         <LevelMeter active={state.phase === "playing"} className="h-8 [&>span]:w-1.5" />
         <p aria-live="polite" className="text-heading">
@@ -487,10 +489,13 @@ function UnnamedSheet({ frequencyHz }: { frequencyHz: number | null }) {
   return (
     <Sheet
       open={frequencyHz !== null}
-      title={frequencyHz ? `${formatMHz(frequencyHz)} MHz` : "Signal"}
+      title={<ChannelIdentity name="Tune signal" frequencyHz={frequencyHz} />}
       description="Unidentified"
     >
-      {null}
+      {frequencyHz !== null && <>
+        <p className="mb-4 text-sm text-muted-foreground">Tune this frequency, or adjust it to the channel you want. A signal may carry voice or data.</p>
+        <TuneForm key={frequencyHz} initialHz={frequencyHz} onTune={() => sheetStore.set(null)} />
+      </>}
     </Sheet>
   );
 }

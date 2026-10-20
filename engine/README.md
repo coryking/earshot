@@ -350,7 +350,11 @@ channel entry. Frequencies here are calibrated true Hz. The engine converts once
 back into the producer's reading frame, picks the nearest advertised slice that
 contains the whole channel, and uses the existing fine mixer and listener pins.
 Select the returned id with `/api/monitor` (the browser's **Operator tools → Listen
-at MHz** does both). Stop listening with the player stop button; **Stop receiver**
+at MHz**, **Now → Tune**, and channel rows do both). An optional `channel_id`
+reattaches an existing catalog entry to that frequency and returns its identity,
+preserving the protocol and DMR slot. A missing id returns 404; an unreachable
+frequency returns 422 without changing the saved entry.
+Stop listening with the player stop button; **Stop receiver**
 also asks the producer to stop RX. Fine targets are retained for active listeners
 and the latest pending tune, then released on stop or replacement. Catalog entries
 and operator edits retain their existing persistence behavior; selecting a prior
@@ -358,8 +362,8 @@ catalog entry restores its fine tuning. A source generation change remaps active
 slices. Targets outside the RF filter bandwidth are refused even when the PSD
 covers a wider span.
 
-The Operator Listen form starts or keeps listening at the requested frequency;
-channel rows retain their tap-again-to-stop behavior. A producer that advertises
+The Listen and Tune forms and channel rows keep the selected channel armed;
+Stop ends playback. A producer that advertises
 `configure_supported: false` disables the browser's receive-window form; change
 its startup settings instead. Operator receiver stop ends the current receive
 session and stops this browser's player. A supervisor may start RX again, so this

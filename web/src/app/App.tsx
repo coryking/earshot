@@ -8,6 +8,7 @@ import { PlayerBar } from "@/components/PlayerBar";
 import { SheetHost } from "@/components/Sheets";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Toaster } from "@/components/ui/sonner";
+import { LiveSelection } from "@/components/Tuning";
 import { Waterfall } from "@/components/Waterfall";
 import { CatchUpScreen } from "@/screens/CatchUp";
 import { NowScreen, useHome } from "@/screens/Now";
@@ -16,7 +17,7 @@ import { useBlocks } from "@/state/radio";
 
 const OperatorScreen = lazy(() => import("@/screens/Operator").then((m) => ({ default: m.OperatorScreen })));
 
-/** Desktop and landscape: list on the left; full waterfall over the call timeline on the right. */
+/** Live channel selection and spectrum; recordings belong to Catch up. */
 function WideNow() {
   const { view } = useHome();
   const player = usePlayerInstance();
@@ -30,24 +31,19 @@ function WideNow() {
       </ResizablePanel>
       <ResizableHandle withHandle />
       <ResizablePanel defaultSize="62%" minSize="30%" className="min-h-0">
-        <ResizablePanelGroup orientation="vertical">
-          <ResizablePanel defaultSize="50%" minSize="20%" className="p-3">
-            <Waterfall
-              variant="full"
-              sources={view.marked}
-              talking={view.talking}
-              activeSourceId={activeSourceId}
-              onListen={(s) => void player.listen(s)}
-              onUnnamed={(frequencyHz) => openSheet({ type: "unnamed", frequencyHz })}
-            />
-          </ResizablePanel>
-          <ResizableHandle withHandle />
-          <ResizablePanel defaultSize="50%" minSize="20%" className="min-h-0">
-            <div className="h-full overflow-y-auto">
-              <CatchUpScreen timeline embedded />
-            </div>
-          </ResizablePanel>
-        </ResizablePanelGroup>
+        <div className="flex h-full min-h-0 flex-col gap-3 p-3">
+          <LiveSelection />
+          <p className="text-sm text-muted-foreground">Click a signal to tune. Nearby channels snap into place; hold Shift for an exact frequency.</p>
+          <Waterfall
+            variant="full"
+            sources={view.all}
+            talking={view.talking}
+            activeSourceId={activeSourceId}
+            onListen={(s) => void player.listen(s)}
+            onUnnamed={(frequencyHz) => openSheet({ type: "unnamed", frequencyHz })}
+            className="flex-1"
+          />
+        </div>
       </ResizablePanel>
     </ResizablePanelGroup>
   );

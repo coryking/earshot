@@ -120,8 +120,12 @@ async fn tune(State(app): State<App>, Json(request): Json<Value>) -> ApiResult {
     if !e.active {
         return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, "Receiver is disconnected or stopped"));
     }
+    let requested = request["channel_id"].as_str();
+    if requested.is_some_and(|id| !e.channels.contains_key(id)) {
+        return Err(api_error(StatusCode::NOT_FOUND, "Channel is no longer in the catalog"));
+    }
     let cfg = crate::runtime::target_slice(&e.source, reading as f64)
-        .ok_or_else(|| api_error(StatusCode::UNPROCESSABLE_ENTITY, "Frequency is outside the receive window or no slice contains its channel"))?;
+        .ok_or_else(|| api_error(StatusCode::UNPROCESSABLE_ENTITY, "This frequency is outside the receiver's current tuning range"))?;
     let display = app.display_frequency(reading as f64).0;
     e.host_targets.retain(|old| app.display_frequency(*old as f64).0 != display);
     e.host_targets.insert(reading);
@@ -144,7 +148,16 @@ async fn tune(State(app): State<App>, Json(request): Json<Value>) -> ApiResult {
         }
     }
     retain_host_targets(&mut e, Some(reading));
-    let channel = e.channels[&id].clone();
+    // A saved channel has no live logical_hz after restart. Reattach the selected
+    // catalog identity to its frequency while preserving its protocol and DMR slot.
+    let selected_id = requested.unwrap_or(&id).to_string();
+    if let Some(selected) = e.channels.get_mut(&selected_id) {
+        selected["logical_hz"] = json!(reading);
+        selected["reading_hz"] = json!(reading);
+        selected["stream_id"] = json!(stream);
+        selected["in_range"] = json!(true);
+    }
+    let channel = e.channels[&selected_id].clone();
     drop(e);
     let _ = app.events.send(json!({"type":"channel","channel":channel}));
     Ok(Json(channel))
@@ -1201,6 +1214,34 @@ mod fpga_tests {
         let _ = stop(State(app.clone())).await.unwrap();
         assert!(app.engine().host_targets.is_empty(), "receiver stop clears a pending tune too");
         assert!(app.engine().listener["channel_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn tuning_a_saved_channel_restores_its_frequency_and_keeps_the_requested_dmr_slot() {
+        let app = App::configured(AppConfig { ppm: 23.3, ..AppConfig::new(8) });
+        let id = "452656250-DMR-2";
+        {
+            let mut e = app.engine();
+            e.active = true;
+            e.source = json!({"input_center_hz":460016998,"input_bandwidth_hz":20000000,
+                "streams":[{"stream_id":366,"center_hz":452666998,"sample_rate_num_hz":25600000,"sample_rate_den":256}]});
+            // The id predates the measured carrier and survives a service restart.
+            e.channels.insert(id.into(), json!({"id":id,"frequency_hz":452675000,
+                "protocol":"DMR","slot":2,"in_range":false,"logical_hz":null,"stream_id":0}));
+        }
+        let Json(channel) = tune(State(app.clone()), Json(json!({"frequency_hz":452675000,"channel_id":id}))).await.unwrap();
+        assert_eq!(channel["id"], id);
+        assert_eq!(channel["slot"], 2);
+        assert_eq!(channel["logical_hz"], 452685547);
+        assert_eq!(channel["stream_id"], 366);
+        assert_eq!(channel["in_range"], true);
+        monitor(State(app.clone()), Json(Monitor { channel_id: Some(id.into()) })).await.unwrap();
+        assert!(app.engine().host_targets.contains(&452685547));
+        let error = tune(State(app.clone()), Json(json!({"frequency_hz":471000000,"channel_id":id}))).await.unwrap_err();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(app.engine().channels[id]["logical_hz"], 452685547);
+        let error = tune(State(app), Json(json!({"frequency_hz":452675000,"channel_id":"missing"}))).await.unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

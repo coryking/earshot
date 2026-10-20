@@ -1,7 +1,9 @@
 import { ChevronDown, Info, Lock, Star } from "lucide-react";
 import { memo, useEffect, useRef, useState, type ReactNode } from "react";
+import { playerLine } from "@/components/PlayerBar";
 import { usePlayerSelect } from "@/app/player-context";
 import { openSheet } from "@/app/ui";
+import { ChannelIdentity } from "@/components/ChannelIdentity";
 import { CallLane, LevelMeter } from "@/components/bits";
 import { heardAgo, MAX_BARS, type CalmGroups } from "@/domain/calm";
 import type { Call, Source } from "@/domain/model";
@@ -52,10 +54,10 @@ function Bars({ level }: { level: number }) {
 
 /**
  * One source. The whole main area is a single button that listens (tapping the
- * playing source again stops it); "About" is a separate, clearly bounded button
+ * selected source again keeps it selected); "About" is a separate, clearly bounded button
  * on the right. There is no long-press or tap-for-info on the main target.
  */
-const SourceRow = memo(function SourceRow({ source, variant, talking, label, followed, calls, bars, now, onListen }: RowProps) {
+const SourceRow = memo(function SourceRow({ source, variant, talking, followed, calls, bars, now, onListen }: RowProps) {
   const playing = usePlayerSelect((s) => s.kind === "live" && s.sourceId === source.id);
   const isPrivate = source.encryption === "encrypted";
   const right = talking ? (
@@ -66,13 +68,14 @@ const SourceRow = memo(function SourceRow({ source, variant, talking, label, fol
   ) : variant === "row" ? (
     <span className="tabular flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
       {isPrivate && <Lock className="size-3" aria-label="Private" />}
-      {source.inRange ? (heardAgo(source.lastHeardAt, now) ?? "") : "Out of range"}
+      {source.inRange ? (heardAgo(source.lastHeardAt, now) ?? "") : "Not tuned"}
     </span>
   ) : variant === "quiet" && bars !== undefined && source.inRange ? (
     <Bars level={bars} />
   ) : null;
-  // Names say what a source is; the second line only tells apart rows that share a name.
-  const second = playing ? "Listening" : (label ?? null);
+  // Keep the channel identity stable while its playback status changes below it.
+  const playback = usePlayerSelect((s) => s.kind === "live" && s.sourceId === source.id ? playerLine(s, null) : null);
+  const second = playback ?? (source.inRange ? null : "Select to tune");
   // Cards sit inside their own list item (the presence wrapper); rows are list items themselves.
   const Root = variant === "card" ? "div" : "li";
 
@@ -96,7 +99,7 @@ const SourceRow = memo(function SourceRow({ source, variant, talking, label, fol
         )}
         onClick={() => onListen(source.id)}
       >
-        <span className="sr-only">{playing ? "Stop listening to" : "Listen to"}</span>{" "}
+        <span className="sr-only">{"Tune to"}</span>{" "}
         <span className="flex min-w-0 items-center gap-2">
           {followed && <Star className="size-3.5 shrink-0 fill-lamp text-lamp" aria-label="Following" />}
           <span
@@ -107,7 +110,7 @@ const SourceRow = memo(function SourceRow({ source, variant, talking, label, fol
               !source.named && "tabular",
             )}
           >
-            {source.name}
+            <ChannelIdentity {...source} />
           </span>
           {right}
         </span>
@@ -116,7 +119,7 @@ const SourceRow = memo(function SourceRow({ source, variant, talking, label, fol
       </button>
       <button
         type="button"
-        className="my-2 grid w-12 shrink-0 place-items-center border-l border-border/70 text-muted-foreground hover:text-heading focus-visible:-outline-offset-2"
+        className="my-2 grid min-h-11 w-12 shrink-0 place-items-center border-l border-border/70 text-muted-foreground hover:text-heading focus-visible:-outline-offset-2"
         onClick={() => openSheet({ type: "source", id: source.id })}
         aria-label={`About ${source.name}`}
         data-about
@@ -269,6 +272,7 @@ export const SourceList = memo(function SourceList({
       <h2 id="channels-title" className="flex h-8 items-center px-4 text-sm font-semibold text-muted-foreground">
         Channels
       </h2>
+      <p className="px-4 pb-2 text-xs text-muted-foreground">Select a channel to tune and hear live audio. Use Stop to finish.</p>
       {groups.channels.length ? (
         <ul aria-label="Channels" className="divide-y divide-border/60" data-source-list>
           {groups.channels.map((s) => row(s, "row"))}

@@ -11,7 +11,7 @@ const dot = {
   offline: "bg-destructive",
 } as const;
 
-const healthWord = { listening: "Listening", paused: "Paused", offline: "Not connected" } as const;
+const healthWord = { listening: "Receiving", paused: "Paused", offline: "Not connected" } as const;
 
 function wordFor(health: ReturnType<typeof useHealth>): string {
   return health.state === "offline" && health.reconnecting ? "Reconnecting" : healthWord[health.state];

@@ -26,7 +26,7 @@ it("keeps repeated Listen armed, disables unsupported window changes, and stops 
   await waitFor(() => expect(monitor).toHaveBeenCalledWith(channel.id));
   await waitFor(() => expect(screen.getByRole("button", { name: "Listen" })).toBeEnabled());
   await user.click(screen.getByRole("button", { name: "Listen" }));
-  await waitFor(() => expect(backend.tune).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(backend.tune).toHaveBeenCalledTimes(1));
   expect(monitor).not.toHaveBeenCalledWith(null);
   await user.click(screen.getByRole("button", { name: "Stop receiver…" }));
   expect(await screen.findByText(/A supervisor may start receiving again automatically/)).toBeVisible();

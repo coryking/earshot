@@ -3,7 +3,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { EngineChannel, EngineEvent, EngineStatus } from "@/api/engine";
-import type { WireCall, WireCatalogEntry } from "@/api/needs";
+import { callSchema, type WireCall, type WireCatalogEntry } from "@/api/needs";
 import type { Backend } from "@/backend/types";
 import type { SpectrumBatch } from "@/domain/model";
 import { prefsStore } from "@/state/prefs";
@@ -96,6 +96,19 @@ function wrapper(backend: Backend) {
 const flushBatch = () => act(() => new Promise((r) => setTimeout(r, 80)));
 
 describe("live-mode fallbacks", () => {
+  it("preserves recorded channel identity and fills legacy calls from their channel", async () => {
+    const engine = liveEngine(status([channel("454029223-DMR-2")]));
+    const legacy = callSchema.parse({ id: "legacy", source_id: "old-label", channel_id: "454029223-DMR-2",
+      started_at: 1, ended_at: 2 });
+    vi.mocked(engine.backend.calls).mockResolvedValue([legacy, { ...legacy, id: "recorded",
+      frequency_hz: 452675000, protocol: "DMR", slot: 1 }]);
+    const { result } = renderHook(() => useCalls(), { wrapper: wrapper(engine.backend) });
+    await waitFor(() => expect(result.current.calls[0]).toMatchObject({
+      frequencyHz: 454029223, mode: "dmr", slot: 2,
+    }));
+    expect(result.current.calls[1]).toMatchObject({ frequencyHz: 452675000, mode: "dmr", slot: 1 });
+  });
+
   it("builds a session call log, without audio, from speech transitions", async () => {
     const engine = liveEngine(status([channel("454029223-DMR-2")]));
     const { result } = renderHook(() => useCalls(), { wrapper: wrapper(engine.backend) });

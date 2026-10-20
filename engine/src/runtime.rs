@@ -728,9 +728,9 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                     .filter(|w| {
                         *w == id
                             || e.channels.get(w).is_some_and(|c| {
-                                c["protocol"] == "Unknown"
-                                    && c["logical_hz"].as_f64().map(|v| v.round() as u64)
-                                        == Some(logical)
+                                c["logical_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
+                                    && (c["protocol"] == "Unknown"
+                                        || (c["protocol"] == protocol && c["slot"] == slot))
                             })
                     })
                     .collect();
@@ -1859,6 +1859,24 @@ mod tests {
         runner.join().unwrap().unwrap();
         (fm, audio_ids, digital, calls)
     }
+    #[test]
+    fn a_retuned_catalog_identity_gets_live_audio_only_for_its_protocol_and_slot() {
+        let app = App::new(8);
+        let alias = "453999000-FM-1";
+        {
+            let mut e = app.engine();
+            e.channels.insert(alias.into(), json!({"id":alias,"frequency_hz":454000000,
+                "logical_hz":454000000,"stream_id":1,"protocol":"FM","slot":1,"in_range":true}));
+            e.channels.insert("other-slot".into(), json!({"id":"other-slot","frequency_hz":454000000,
+                "logical_hz":454000000,"stream_id":1,"protocol":"FM","slot":2,"in_range":true}));
+            e.selected = Some(alias.into());
+            e.listeners.insert(1, "other-slot".into());
+        }
+        let (_, audio_ids, _, _) = fm_session_in(app, true, false, true);
+        assert!(!audio_ids.is_empty(), "a saved id must follow its restored frequency");
+        assert!(audio_ids.iter().all(|id| id == alias), "must not cross slots: {audio_ids:?}");
+    }
+
     #[test]
     fn uncalibrated_activity_uses_the_exact_target_for_display_and_audio() {
         let (fm, ids, _, calls) = fm_session_with_activity(App::new(8), true, true, false, true);

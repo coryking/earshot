@@ -1,3 +1,4 @@
+import { ChannelIdentity } from "@/components/ChannelIdentity";
 import { useEffect } from "react";
 import { usePlayerInstance } from "@/app/player-context";
 import {
@@ -34,7 +35,7 @@ import { useBlocks, useSources } from "@/state/radio";
 export const shortcuts: [string, string][] = [
   ["⌘K, Ctrl+K or /", "Search"],
   ["j / k or ↓ / ↑", "Move"],
-  ["Enter or Space", "Listen / stop"],
+  ["Enter or Space", "Tune to channel"],
   ["Esc", "Stop or close"],
   ["m", "Mute or unmute"],
   ["f", "Follow"],
@@ -64,14 +65,14 @@ export function Palette() {
           <CommandEmpty>Nothing matches.</CommandEmpty>
           <CommandGroup heading="Listen">
             {sources
-              .filter((s) => s.listenable.ok)
+              .filter((s) => s.listenable.ok || s.listenable.reason === "Out of range")
               .map((s) => (
                 <CommandItem
                   key={s.id}
                   value={`listen ${s.name} ${s.summary}`}
                   onSelect={run(() => void player.listen(s))}
                 >
-                  {s.name}
+                  <ChannelIdentity {...s} />
                   {s.talking && <CommandShortcut>talking</CommandShortcut>}
                 </CommandItem>
               ))}
@@ -83,7 +84,7 @@ export function Palette() {
                 value={`about ${s.name}`}
                 onSelect={run(() => openSheet({ type: "source", id: s.id }))}
               >
-                What is {s.name}?
+                <ChannelIdentity {...s} />
               </CommandItem>
             ))}
           </CommandGroup>

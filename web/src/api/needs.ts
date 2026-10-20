@@ -57,6 +57,9 @@ export type WireCatalogEntry = z.infer<typeof catalogEntrySchema>;
 
 /** GET /api/calls?before=&limit=&source= and `{type:"call"}` on /api/events. */
 export const callSchema = z.looseObject({
+  frequency_hz: num.optional(),
+  protocol: str.optional(),
+  slot: num.optional(),
   id,
   source_id: id,
   channel_id: str,

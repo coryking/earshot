@@ -1,3 +1,4 @@
+import { ChannelIdentity } from "@/components/ChannelIdentity";
 import { Play } from "lucide-react";
 import { useMemo, useState } from "react";
 import { usePlayerInstance } from "@/app/player-context";
@@ -19,8 +20,7 @@ function groupOf(call: Call, now: number) {
 }
 
 /** Recent calls newest first, like a podcast queue: playback continues down the list. */
-export function CatchUpScreen({ timeline, embedded = false }: { timeline: boolean; embedded?: boolean }) {
-  const Title = embedded ? "h2" : "h1";
+export function CatchUpScreen({ timeline }: { timeline: boolean }) {
   const { calls, recorded, failed } = useCalls();
   const sources = useSources();
   const { followed, muted } = usePrefs();
@@ -42,7 +42,7 @@ export function CatchUpScreen({ timeline, embedded = false }: { timeline: boolea
   return (
     <div className="pb-4">
       <div className="px-4 pt-3">
-        <Title className="text-[1.75rem] leading-tight font-semibold text-heading">Catch up</Title>
+        <h1 className="text-[1.75rem] leading-tight font-semibold text-heading">Catch up</h1>
         {!visible.length && <p className="mt-1 text-muted-foreground">No calls yet</p>}
       </div>
       <div className="flex flex-wrap items-center gap-2 px-4 py-3">
@@ -121,7 +121,7 @@ function Timeline({ calls, sources, now }: { calls: Call[]; sources: Source[]; n
               className="truncate text-left text-sm text-foreground hover:text-heading"
               onClick={() => openSheet({ type: "source", id: s.id })}
             >
-              {s.name}
+              <ChannelIdentity {...s} />
             </button>
             <CallLane calls={bySource.get(s.id)!} now={now} minutes={60} talking={s.talking} className="h-2.5" />
           </li>

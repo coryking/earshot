@@ -50,6 +50,9 @@ export interface Source {
 }
 
 export interface Call {
+  frequencyHz?: number | null;
+  mode?: Mode;
+  slot?: number | null;
   id: string;
   sourceId: string;
   channelId: string | null;

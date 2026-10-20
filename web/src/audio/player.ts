@@ -1,6 +1,8 @@
+import { engineChannelSchema } from "@/api/engine";
+import { toSources } from "@/domain/adapt";
 import workletUrl from "./pcm-worklet.ts?worker&url";
 import { BackendError, type Backend, type Connection } from "@/backend/types";
-import type { Call, Source } from "@/domain/model";
+import type { Call, Mode, Source } from "@/domain/model";
 import { createStore } from "@/lib/store";
 import { prefsStore } from "@/state/prefs";
 
@@ -12,6 +14,9 @@ export interface PlayerState {
   sourceId: string | null;
   sourceName: string | null;
   channelId: string | null;
+  frequencyHz: number | null;
+  mode: Mode;
+  slot: number | null;
   callId: string | null;
   /** The engine's selection when another device switched it to something else. */
   takenBy: string | null;
@@ -35,6 +40,9 @@ const idle = {
   sourceId: null,
   sourceName: null,
   channelId: null,
+  frequencyHz: null,
+  mode: "unknown",
+  slot: null,
   callId: null,
   takenBy: null,
   error: null,
@@ -49,7 +57,6 @@ const SILENT_SOCKET_MS = 3000;
 
 function monitorMessage(error: unknown): string {
   if (error instanceof BackendError) {
-    if (error.status === 422) return "Can't play this kind of signal yet.";
     if (error.status === 404) return "Channel gone.";
     return error.message;
   }
@@ -241,25 +248,36 @@ export class Player {
     return run;
   }
 
-  /** Rows toggle playback; explicit Listen controls can request an idempotent start. */
-  async listen(source: Source, { toggle = true }: { toggle?: boolean } = {}) {
+  /** Tune a frequency even before it has a catalog entry. Unlock audio in the tap handler. */
+  listenFrequency(frequencyHz: number) {
+    const source = toSources([engineChannelSchema.parse({ id: `tune-${frequencyHz}`,
+      frequency_hz: frequencyHz, protocol: "Unknown", in_range: true })], null)[0];
+    source.channelIds = [];
+    return this.listen(source);
+  }
+
+  /** Selection is idempotent; Stop is an explicit action. */
+  async listen(source: Source, { toggle = false }: { toggle?: boolean } = {}) {
     const current = this.state.get();
     if (current.kind === "live" && current.sourceId === source.id) {
       if (current.phase === "starting" || current.phase === "reconnecting") return;
       if (current.phase === "taken") return this.reclaim();
       if (current.phase !== "error") return toggle ? this.stop() : undefined;
     }
-    if (!source.listenable.ok) {
+    const canTune = !!this.backend.tune && source.frequencyHz !== null;
+    if (!source.listenable.ok && !(canTune && source.listenable.reason === "Out of range")) {
       if (current.kind !== "idle") await this.stop();
-      this.patch({ ...idle, error: source.listenable.reason, sourceName: source.name, phase: "error" });
+      this.patch({ ...idle, error: source.listenable.reason, sourceName: source.name,
+        frequencyHz: source.frequencyHz, mode: source.mode, slot: source.slot, phase: "error" });
       return;
     }
+    const clearPrevious = current.kind === "live" && (this.ownsSelection || this.selectionPending);
     if (current.kind !== "idle") this.teardown();
     const intent = ++this.intent;
-    const channelId = source.channelIds[0];
+    let channelId = source.channelIds[0] ?? null;
     this.lastSource = source;
     const unlocked = this.unlock();
-    this.patch({ ...idle, kind: "live", phase: "starting", sourceId: source.id, sourceName: source.name, channelId });
+    this.patch({ ...idle, kind: "live", phase: "starting", sourceId: source.id, sourceName: source.name, frequencyHz: source.frequencyHz, mode: source.mode, slot: source.slot, channelId });
     this.updateSession(source.name, "Live");
     try {
       await unlocked;
@@ -271,11 +289,26 @@ export class Player {
     if (intent !== this.intent) return;
     this.selectionPending = true;
     try {
-      await this.sendMonitor(channelId);
+      // Tuning and selection share the stop/reselect queue. An old request may finish,
+      // but it must never select its channel after a newer click or Stop.
+      const run = this.monitorChain.catch(() => {}).then(async () => {
+        if (intent !== this.intent) return;
+        if (canTune) {
+          const tuned = await this.backend.tune!(source.frequencyHz!, channelId ?? undefined);
+          channelId = tuned.id;
+        }
+        if (intent !== this.intent) return;
+        if (!channelId) throw new Error("Frequency tuning unavailable");
+        this.patch({ channelId });
+        await this.backend.monitor(channelId);
+      });
+      this.monitorChain = run;
+      await run;
     } catch (error) {
       if (intent === this.intent) {
         this.selectionPending = false;
-        this.patch({ phase: "error", error: monitorMessage(error) });
+        if (clearPrevious) await this.sendMonitor(null).catch(() => {});
+        if (intent === this.intent) this.patch({ phase: "error", error: monitorMessage(error) });
       }
       return;
     }
@@ -467,6 +500,9 @@ export class Player {
       phase: "playing",
       sourceId: call.sourceId,
       sourceName,
+      frequencyHz: call.frequencyHz ?? null,
+      mode: call.mode ?? "unknown",
+      slot: call.slot ?? null,
       callId: call.id,
       channelId: call.channelId,
     });

@@ -3,7 +3,7 @@ import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-quer
 import type { EngineChannel, EngineStatus } from "@/api/engine";
 import { catalogSchema, type WireActivity, type WireCall, type WireCatalogEntry } from "@/api/needs";
 import type { Backend } from "@/backend/types";
-import { healthOf, toSources } from "@/domain/adapt";
+import { healthOf, modeOf, toSources } from "@/domain/adapt";
 import { STARTER_CATALOG } from "@/domain/starter";
 import type { Activity, Block, Call, Source } from "@/domain/model";
 import { createStore, local, useStore } from "@/lib/store";
@@ -282,8 +282,11 @@ export function useHealth() {
   return healthOf(status.isError ? undefined : status.data, events);
 }
 
-function toCall(call: WireCall, backend: Backend): Call {
+function toCall(call: WireCall, backend: Backend, source?: Source): Call {
   return {
+    frequencyHz: call.frequency_hz ?? source?.frequencyHz,
+    mode: call.protocol ? modeOf(call.protocol) : source?.mode,
+    slot: call.slot ?? source?.slot,
     id: call.id,
     sourceId: call.source_id,
     channelId: call.channel_id ?? null,
@@ -307,11 +310,17 @@ export function useCalls(): { calls: Call[]; recorded: boolean; loading: boolean
   });
   const session = useStore(sessionCalls);
   return useMemo(() => {
+    const sourceById = new Map(sources.map((s) => [s.id, s]));
+    const sourceByChannel = new Map(sources.flatMap((s) => s.channelIds.map((id) => [id, s] as const)));
     if (query.data)
-      return { calls: query.data.map((c) => toCall(c, backend)), recorded: true, loading: false, failed: false };
+      return { calls: query.data.map((c) => toCall(c, backend,
+        sourceById.get(c.source_id) ?? sourceByChannel.get(c.channel_id ?? ""))), recorded: true, loading: false, failed: false };
     const owner = channelOwners(sources);
     return {
       calls: session.map((c) => ({
+        frequencyHz: sourceByChannel.get(c.channelId)?.frequencyHz,
+        mode: sourceByChannel.get(c.channelId)?.mode,
+        slot: sourceByChannel.get(c.channelId)?.slot,
         id: c.id,
         sourceId: owner.get(c.channelId) ?? c.channelId,
         channelId: c.channelId,

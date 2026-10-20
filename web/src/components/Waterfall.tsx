@@ -1,3 +1,5 @@
+import { ChannelIdentity } from "@/components/ChannelIdentity";
+import { pickSignal, type WaterfallPick } from "@/waterfall/pick";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatMHz } from "@/domain/adapt";
 import type { Source } from "@/domain/model";
@@ -36,7 +38,7 @@ function stackLabels<T extends { source: Source; x: number; live: boolean }>(
   const rank = (m: T) => (m.live ? 2 : 0) + (m.source.id === activeId ? 1 : 0);
   const ordered = [...markers].sort((a, b) => rank(b) - rank(a) || a.x - b.x);
   return ordered.flatMap((m) => {
-    const half = Math.min(144, m.source.name.length * 6.2 + 10) / 2;
+    const half = 192 / 2;
     const center = Math.min(width - half - 4, Math.max(half + 4, m.x * width));
     const span: [number, number] = [center - half - 3, center + half + 3];
     let lane = lanes.findIndex((spans) => spans.every(([a, b]) => span[1] < a || span[0] > b));
@@ -69,7 +71,7 @@ export function Waterfall({ variant, sources, talking, activeSourceId, onListen,
   const [contextEpoch, setContextEpoch] = useState(0);
   const [width, setWidth] = useState(0);
   const [height, setHeight] = useState(0);
-  const [hover, setHover] = useState<number | null>(null);
+  const [hover, setHover] = useState<WaterfallPick | null>(null);
   const visible = variant === "strip" ? 60 : 300;
 
   useEffect(() => {
@@ -140,17 +142,19 @@ export function Waterfall({ variant, sources, talking, activeSourceId, onListen,
   };
 
   const interactive = variant === "full" && !!onListen;
-  const pick = (clientX: number) => {
+  const targetAt = (clientX: number, clientY: number, exact: boolean) => {
     const rect = box.current?.getBoundingClientRect();
     const frequency = frequencyAt(clientX);
-    if (!interactive || !rect || frequency === null) return;
-    const px = clientX - rect.left;
-    const nearest = markers
-      .map((m) => ({ ...m, d: Math.abs(m.x * rect.width - px) }))
-      .filter((m) => m.d <= HIT_PX)
-      .sort((a, b) => a.d - b.d || Number(b.live) - Number(a.live))[0];
-    if (nearest) onListen?.(nearest.source);
-    else onUnnamed?.(frequency);
+    if (!rect || frequency === null || low === null || !meta.spanHz) return null;
+    const row = Math.floor(Math.max(0, Math.min(0.999, (clientY - rect.top) / rect.height)) * visible);
+    const bins = spectrumRows[spectrumRows.length - 1 - row]?.bins;
+    return pickSignal(frequency, HIT_PX / rect.width * meta.spanHz, low, meta.spanHz, bins, sources, exact);
+  };
+  const pick = (clientX: number, clientY: number, exact: boolean) => {
+    const target = targetAt(clientX, clientY, exact);
+    if (!target) return;
+    if (target.source) onListen?.(target.source);
+    else onUnnamed?.(target.frequencyHz);
   };
 
   const empty = !meta.bins;
@@ -164,8 +168,8 @@ export function Waterfall({ variant, sources, talking, activeSourceId, onListen,
         variant === "strip" ? "h-14 rounded-lg" : "h-full min-h-40 rounded-xl",
         className,
       )}
-      onPointerUp={interactive ? (e) => pick(e.clientX) : undefined}
-      onPointerMove={interactive ? (e) => setHover(frequencyAt(e.clientX)) : undefined}
+      onPointerUp={interactive ? (e) => pick(e.clientX, e.clientY, e.shiftKey) : undefined}
+      onPointerMove={interactive ? (e) => setHover(targetAt(e.clientX, e.clientY, e.shiftKey)) : undefined}
       onPointerLeave={interactive ? () => setHover(null) : undefined}
       role="img"
       aria-label={
@@ -205,28 +209,31 @@ export function Waterfall({ variant, sources, talking, activeSourceId, onListen,
             ? markers
             : markers.filter((m) => m.live || m.source.id === activeSourceId || m.source.named),
           width,
-          variant === "strip" ? 2 : height < 260 ? 2 : 4,
+          variant === "strip" ? 1 : height < 260 ? 2 : 4,
           activeSourceId,
         ).map(({ source, lane, center, live }) => (
           <span
             key={`label-${source.id}`}
             aria-hidden
             className={cn(
-              "pointer-events-none absolute max-w-36 -translate-x-1/2 truncate rounded px-1 text-[11px] leading-4",
+              "pointer-events-none absolute w-48 -translate-x-1/2 truncate rounded px-1 text-[11px] leading-4 [&_.text-muted-foreground]:text-inherit",
               source.id === activeSourceId
                 ? "bg-[#5eb8c9] text-[#0f1a2b]"
                 : live
                   ? "bg-[#f5a524] text-[#0f1a2b]"
                   : "bg-[#0f1a2b]/80 text-[#c9d4e5]",
             )}
-            style={{ left: center, top: (variant === "strip" ? 4 : 12) + lane * 18 }}
+            style={{ left: center, top: (variant === "strip" ? 4 : 12) + lane * 34 }}
           >
-            {source.name}
+            <ChannelIdentity {...source} compact />
           </span>
         ))}
+      {variant === "full" && hover !== null && low !== null && meta.spanHz && (
+        <span aria-hidden className="pointer-events-none absolute inset-y-0 w-px bg-white/70" style={{ left: `${(hover.frequencyHz - low) / meta.spanHz * 100}%` }} />
+      )}
       {variant === "full" && hover !== null && (
         <span className="tabular pointer-events-none absolute bottom-2 left-2 rounded bg-[#0f1a2b]/85 px-1.5 py-0.5 text-xs text-[#f2f5fa]">
-          {formatMHz(hover)} MHz
+          {hover.snapped ? "Snap to " : "Tune "}<ChannelIdentity name={hover.source?.name} frequencyHz={hover.frequencyHz} mode={hover.source?.mode} slot={hover.source?.slot} compact />
         </span>
       )}
     </div>

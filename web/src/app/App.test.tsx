@@ -43,20 +43,20 @@ describe("Now", { timeout: 40_000 }, () => {
     await rowsReady();
     const list = screen.getByRole("list", { name: "Channels" });
     expect(within(list).getByText("Downtown ambassadors")).toBeInTheDocument();
-    expect(within(list).queryByText(/Unidentified|451\.806 MHz/)).not.toBeInTheDocument();
+    expect(within(list).queryByText(/Unidentified|451\.806/)).not.toBeInTheDocument();
     expect(within(list).getAllByText("Shared business network")).toHaveLength(2);
-    expect(within(list).getByText("Line 1")).toBeInTheDocument();
-    expect(within(list).getByText("Line 2")).toBeInTheDocument();
+    expect(within(list).getAllByText(/MHz · DMR · Slot 1/).length).toBeGreaterThan(0);
+    expect(within(list).getAllByText(/MHz · DMR · Slot 2/).length).toBeGreaterThan(0);
     const other = screen.getByRole("button", { name: /^Other activity \(\d+\)$/ });
     expect(other).toHaveAttribute("aria-expanded", "false");
     await user.click(other);
-    expect(within(screen.getByRole("list", { name: "Other activity" })).getByText("451.806 MHz")).toBeInTheDocument();
+    expect(within(screen.getByRole("list", { name: "Other activity" })).getByText(/451\.806/)).toBeInTheDocument();
   });
 
   it("listens with one tap and stops with the player's stop button", async () => {
     const { monitor, user } = setup();
     await rowsReady();
-    const [row] = screen.getAllByRole("button", { name: /^Listen to Downtown ambassadors/ });
+    const [row] = screen.getAllByRole("button", { name: /^Tune to Downtown ambassadors/ });
     await user.click(row);
     expect(monitor).toHaveBeenCalledWith("452685504-DMR-1");
     const player = await screen.findByRole("region", { name: "Player" });
@@ -69,7 +69,7 @@ describe("Now", { timeout: 40_000 }, () => {
   it("never opens the info sheet from a row tap; About is its own button", async () => {
     const { user } = setup();
     await rowsReady();
-    const [row] = screen.getAllByRole("button", { name: /^Listen to Private business radio/ });
+    const [row] = screen.getAllByRole("button", { name: /^Tune to Private business radio/ });
     await user.click(row);
     // Can't be heard: the player says so in a few words; no sheet.
     expect(await screen.findByRole("region", { name: "Player" })).toHaveTextContent("Encrypted");

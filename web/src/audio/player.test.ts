@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AudioDescriptor } from "@/api/engine";
+import { engineChannelSchema, type AudioDescriptor } from "@/api/engine";
 import { BackendError, type Backend, type ListenHandlers } from "@/backend/types";
 import type { Call, Source } from "@/domain/model";
 import { Player } from "./player";
@@ -93,6 +93,48 @@ afterEach(() => {
 });
 
 describe("Player live listening", () => {
+  it("fine tunes a saved out-of-range channel and preserves its slot identity", async () => {
+    const f = fakeBackend();
+    const target = source("saved", "452675000-DMR-2");
+    target.frequencyHz = 452675000;
+    target.slot = 2;
+    target.inRange = false;
+    target.listenable = { ok: false, reason: "Out of range" };
+    f.backend.tune = vi.fn(async () => engineChannelSchema.parse({ id: target.channelIds[0],
+      frequency_hz: target.frequencyHz, protocol: "DMR", slot: 2, in_range: true }));
+    const player = new Player(f.backend);
+    await player.listen(target);
+    expect(f.backend.tune).toHaveBeenCalledWith(452675000, "452675000-DMR-2");
+    expect(f.monitor).toHaveBeenCalledWith("452675000-DMR-2");
+    expect(player.state.get()).toMatchObject({ frequencyHz: 452675000, slot: 2, phase: "waiting" });
+    await player.stop();
+  });
+
+  it("never selects a late tune response after Stop", async () => {
+    const f = fakeBackend();
+    let finish!: (value: ReturnType<typeof engineChannelSchema.parse>) => void;
+    f.backend.tune = vi.fn(() => new Promise<ReturnType<typeof engineChannelSchema.parse>>((resolve) => { finish = resolve; }));
+    const player = new Player(f.backend);
+    const listening = player.listenFrequency(452675000);
+    await settle();
+    const stopping = player.stop();
+    finish(engineChannelSchema.parse({ id: "452675000-Unknown-1", frequency_hz: 452675000 }));
+    await Promise.all([listening, stopping]);
+    expect(f.monitor.mock.calls).toEqual([[null]]);
+    expect(player.state.get().kind).toBe("idle");
+  });
+
+  it("reports the actual tuning error and clears the previous channel", async () => {
+    const f = fakeBackend();
+    const player = new Player(f.backend);
+    await player.listen(source("a"));
+    f.backend.tune = vi.fn().mockRejectedValue(new BackendError("Frequency is outside the receive window", 422));
+    await player.listen(source("b"));
+    expect(f.monitor).toHaveBeenLastCalledWith(null);
+    expect(player.state.get()).toMatchObject({ phase: "error", error: "Frequency is outside the receive window" });
+    await player.stop();
+  });
+
   it("keeps explicit Listen playing when the same frequency is submitted again", async () => {
     const f = fakeBackend();
     const player = new Player(f.backend);
@@ -102,8 +144,10 @@ describe("Player live listening", () => {
     expect(player.state.get()).toMatchObject({ kind: "live", phase: "playing", channelId: "a-DMR-1" });
     expect(f.monitor).toHaveBeenCalledTimes(1);
     expect(f.backend.listen).toHaveBeenCalledTimes(1);
-    // Ordinary channel rows keep their existing tap-again-to-stop behavior.
+    // A repeated channel selection keeps playback armed; stopping is explicit.
     await player.listen(source("a"));
+    expect(player.state.get().kind).toBe("live");
+    await player.stop();
     expect(f.monitor).toHaveBeenLastCalledWith(null);
     expect(player.state.get().kind).toBe("idle");
   });
@@ -134,7 +178,7 @@ describe("Player live listening", () => {
     const player = new Player(f.backend);
     await player.listen(source("a"));
     expect(player.state.get()).toMatchObject({ phase: "error" });
-    expect(player.state.get().error).toMatch(/Can't play this kind/);
+    expect(player.state.get().error).toBe("Channel protocol is not confirmed yet");
     await player.stop();
     expect(f.monitor).toHaveBeenCalledTimes(1);
   });
@@ -283,6 +327,9 @@ describe("Player start-up races", () => {
 
 describe("Player recorded calls", () => {
   const call = (id: string): Call => ({
+    frequencyHz: 452675000,
+    mode: "dmr",
+    slot: 2,
     id,
     sourceId: "a",
     channelId: null,
@@ -300,7 +347,8 @@ describe("Player recorded calls", () => {
     player.playCall(call("1"), "A", [call("2")], () => "A");
     const element = (player as unknown as { callElement: HTMLAudioElement }).callElement;
     element.dispatchEvent(new Event("ended"));
-    expect(player.state.get()).toMatchObject({ kind: "call", callId: "2", phase: "playing" });
+    expect(player.state.get()).toMatchObject({ kind: "call", callId: "2", phase: "playing",
+      frequencyHz: 452675000, mode: "dmr", slot: 2 });
     void player.stop();
     element.dispatchEvent(new Event("error"));
     expect(player.state.get()).toMatchObject({ kind: "idle", phase: "idle" });

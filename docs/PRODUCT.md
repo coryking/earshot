@@ -34,7 +34,7 @@
 6. **Change block.** Rare and deliberate, and offered only when there is more than one block to pick.
 7. **"Is it working?"** One plain status. **"What is this?"** A plain explanation of a source: probable user, kind of traffic, and why encrypted calls can't be heard.
 
-Listeners never tune frequencies, set gain or bandwidth, or pick decoders. Those controls are operator-only.
+Selecting a channel tunes it and keeps it selected until Stop. Now also offers frequency entry and shows whether the selected channel is tuning, waiting for audio, playing audio, or muted. Gain, bandwidth and decoder settings remain operator-only. Every channel block includes its frequency; Catch up stays in its own tab.
 
 ## The waterfall
 
