@@ -17,7 +17,7 @@ index f5c1ab0..c312d65 100644
          m_mbeDecoder1.useHP(useHP);
          m_mbeDecoder2.useHP(useHP);
 diff --git a/dsd_mbe.cpp b/dsd_mbe.cpp
-index 84b58f3..a1d1cbd 100644
+index 84b58f3..58146c3 100644
 --- a/dsd_mbe.cpp
 +++ b/dsd_mbe.cpp
 @@ -29,7 +29,10 @@ namespace DSDcc
@@ -67,6 +67,15 @@ index 84b58f3..a1d1cbd 100644
      else
      {
          mbe_processAmbe3600x2450Framef(m_audio_out_temp_buf, &m_errs,
+@@ -488,3 +512,8 @@ void DSDMBEDecoder::upsample(int upsampling, float invalue)
+ 
+ 
+ }
++
++// Link-time marker for the AMBE+2 vocoder hook (engine/patches/dsdcc-ambe-vocoder-hook.patch):
++// the engine references it, so building against an unpatched libdsdcc fails to link instead of
++// running with a mismatched DSDMBEDecoder layout.
++extern "C" int dsdcc_ambe2450_vocoder_hook_v1(void) { return 1; }
 diff --git a/dsd_mbe.h b/dsd_mbe.h
 index 4144464..da81c45 100644
 --- a/dsd_mbe.h

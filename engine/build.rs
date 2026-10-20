@@ -2,6 +2,9 @@ use std::{env, path::PathBuf};
 fn main() {
     println!("cargo:rerun-if-changed=native/decoder.cpp");
     println!("cargo:rerun-if-changed=.native/lib/libdsdcc.1.dylib");
+    println!("cargo:rerun-if-changed=.native/lib/libdsdcc.so");
+    println!("cargo:rerun-if-changed=.native/src/dsdcc/dsd_mbe.h");
+    println!("cargo:rerun-if-changed=patches/dsdcc-ambe-vocoder-hook.patch");
     for key in ["DSDCC_INCLUDE_DIR", "DSDCC_LIB_DIR"] {
         println!("cargo:rerun-if-env-changed={key}");
     }

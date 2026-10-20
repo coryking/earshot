@@ -38,10 +38,9 @@ fixture TCP listener binds only `127.0.0.1:8811`. Startup does not connect to
 libiio or change receiver settings. The on-device producer owns acquisition,
 RF gates, pre-roll, actual RF control readback, and restoration when it stops.
 
-The build also accepts `DSDCC_INCLUDE_DIR` and `DSDCC_LIB_DIR`. On this development
-Mac, it can use the existing `/tmp/cory-radio-dsdcc-20261019` headers and the
-project's `.tools/lib` bundle. `bootstrap-codecs.sh` creates a local ignored
-`.native` installation instead. DSDcc is pinned to
+The build also accepts `DSDCC_INCLUDE_DIR` and `DSDCC_LIB_DIR`, which must point at a DSDcc
+built with the hook patch below (an unpatched library fails to link).
+`bootstrap-codecs.sh` creates a local ignored `.native` installation. DSDcc is pinned to
 `f27b32d2df131ae3a376fe72d3fb880ae1f9ede1`; mbelib is pinned to
 `9a04ed5c78176a9965f3d43f7aa1b1f5330e771f`. `bootstrap-codecs.sh` applies
 `patches/dsdcc-ambe-vocoder-hook.patch` to DSDcc, which lets the engine's own AMBE+2 decoder

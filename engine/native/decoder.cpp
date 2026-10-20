@@ -44,7 +44,11 @@ struct Codec {
 };
 extern "C" {
 // `vocoder` (nullable) replaces mbelib's AMBE+2 synthesis; `context` is passed back to it.
+// Defined only by a DSDcc built with patches/dsdcc-ambe-vocoder-hook.patch: an unpatched
+// library fails to link rather than run with a different DSDMBEDecoder layout.
+extern "C" int dsdcc_ambe2450_vocoder_hook_v1(void);
 void *radio_codec_new(int protocol, int slot, DSDcc::DSDMBEDecoder::Ambe2450Vocoder vocoder, void *context) {
+    if (dsdcc_ambe2450_vocoder_hook_v1() != 1) return nullptr;
     try { return new Codec(protocol, slot, vocoder, context); } catch(...) { return nullptr; }
 }
 void radio_codec_free(void *p) { delete static_cast<Codec*>(p); }
