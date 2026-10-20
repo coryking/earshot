@@ -28,6 +28,7 @@ set sets [dict create \
   n512_multluts_bflydsp {CONFIG.complex_mult_type use_luts CONFIG.butterfly_type use_xtremedsp_slices} \
   n1024_base       {CONFIG.transform_length 1024} \
   n1024_b5         {CONFIG.transform_length 1024 CONFIG.number_of_stages_using_block_ram_for_data_and_phase_factors 5} \
+  n1024_pf17       {CONFIG.transform_length 1024 CONFIG.phase_factor_width 17} \
   n1024_pf16       {CONFIG.transform_length 1024 CONFIG.phase_factor_width 16} \
   n1024_multluts   {CONFIG.transform_length 1024 CONFIG.complex_mult_type use_luts} \
   n1024_mult4      {CONFIG.transform_length 1024 CONFIG.complex_mult_type use_mults_performance} \

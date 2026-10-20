@@ -52,13 +52,14 @@ def response_db(h: np.ndarray, f: np.ndarray, fs: float) -> np.ndarray:
     return 20 * np.log10(np.abs(r) / abs(h.sum()) + 1e-300)
 
 
-def filter_metrics(h: np.ndarray, cfg: Config) -> dict:
-    fp = np.linspace(0, PROTECT_HZ, 400)
-    fst = np.linspace(ALIAS_EDGE_HZ, cfg.fs / 2, 200_000)
+def filter_metrics(h: np.ndarray, cfg: Config, protect_hz: float = PROTECT_HZ,
+                   alias_edge_hz: float = ALIAS_EDGE_HZ,
+                   points_hz: tuple = (25e3, 31.25e3, 50e3, 68.75e3, 100e3, 150e3)) -> dict:
+    fp = np.linspace(0, protect_hz, 400)
+    fst = np.linspace(alias_edge_hz, cfg.fs / 2, 200_000)
     rp = response_db(h, fp, cfg.fs)
     rs = response_db(h, fst, cfg.fs)
-    pts = {f"at_{int(f / 1e3)}k_db": float(response_db(h, [f], cfg.fs)[0])
-           for f in (25e3, 31.25e3, 50e3, 68.75e3, 100e3, 150e3)}
+    pts = {f"at_{int(f / 1e3)}k_db": float(response_db(h, [f], cfg.fs)[0]) for f in points_hz}
     return {"passband_ripple_db": float(rp.max() - rp.min()), "passband_min_db": float(rp.min()),
             "alias_rejection_db": float(-rs.max()), **pts}
 
@@ -88,6 +89,40 @@ def filter_cmd() -> dict:
         "arm_c_reference_512": filter_metrics(c_reference_prototype(cfg.n, cfg.taps), cfg),
     }
     save("filter", out)
+    return out
+
+
+@app.command("filter1024")
+def filter1024_cmd() -> dict:
+    """Cost study: M = 1024 bins (25 kHz), 2x oversampled (50 ksps). Taps/branch vs 90 dB.
+
+    A 12.5 kHz channel on the 6.25 kHz raster sits up to 12.5 kHz from a bin centre, so
+    the protected band is +/-18.75 kHz and the output folds at +/-25 kHz: stopband from
+    31.25 kHz. Kaiser-windowed sinc, cutoff = bin spacing; for each taps/branch the beta
+    is the one (grid 6..14) that maximizes the alias rejection.
+    """
+    protect = 18_750.0
+    pts = (12.5e3, 18.75e3, 25e3, 31.25e3, 50e3, 100e3)
+    rows = []
+    for taps in (8, 10, 11, 12, 16):
+        cfg = Config(n=1024, taps=taps, cutoff_hz=25e3)
+        edge = cfg.out_rate - protect
+        fst = np.concatenate([np.linspace(edge, edge + 200e3, 2000), np.linspace(edge + 200e3, cfg.fs / 2, 4000)])
+        best = max((float(-response_db(prototype_float(dataclasses.replace(cfg, kaiser_beta=b)),
+                                       fst, cfg.fs).max()), float(b)) for b in np.arange(6.0, 14.01, 0.25))
+        cfg = dataclasses.replace(cfg, kaiser_beta=best[1])
+        rows.append({"taps_per_branch": taps, "length": cfg.length, "kaiser_beta": cfg.kaiser_beta,
+                     "kaiser_float": filter_metrics(prototype_float(cfg), cfg, protect, edge, pts),
+                     "kaiser_18bit": filter_metrics(prototype_fixed(cfg).astype(float), cfg, protect, edge, pts)})
+    df = 31_250.0 - protect
+    meets = [r["taps_per_branch"] for r in rows if r["kaiser_18bit"]["alias_rejection_db"] >= 90.0]
+    out = {"bin_spacing_hz": 25e3, "output_rate_hz": 50e3, "protected_passband_hz": protect,
+           "alias_stopband_edge_hz": 31_250.0, "transition_hz": df,
+           "harris_length_estimate_for_90db": DEFAULT.fs / df * 90.0 / 22,
+           "kaiser_order_estimate_for_90db": (90.0 - 7.95) / (2.285 * 2 * np.pi * df / DEFAULT.fs),
+           "min_taps_per_branch_for_90db_among_tested": min(meets) if meets else None,
+           "rows": rows}
+    save("filter1024", out)
     return out
 
 
