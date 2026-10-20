@@ -300,9 +300,11 @@ fn differences(before: &Snapshot, after: &Snapshot) -> Vec<String> {
 
 impl Radio for Pluto {
     fn probe(&mut self) -> Probe {
-        let mut c = Command::new("iio_info");
-        c.args(["-u", &self.uri()]);
-        let out = match capture(c, Duration::from_secs(25)) {
+        // iio_info reads every device/channel attribute, including slow voltage
+        // monitors that can stall even while Pluto's IIO context is healthy.
+        let mut c = Command::new("iio_attr");
+        c.args(["-u", &self.uri(), "-C"]);
+        let out = match capture(c, Duration::from_secs(10)) {
             Ok(o) => o,
             Err(e) => return Probe::Unreachable(e),
         };
@@ -315,9 +317,11 @@ impl Radio for Pluto {
             .lines()
             .map(str::trim)
             .filter(|l| keep.iter().any(|k| l.starts_with(k)))
-            .collect::<Vec<_>>()
-            .join("; ");
-        Probe::Ready(summary)
+            .collect::<Vec<_>>();
+        if summary.len() != keep.len() {
+            return Probe::Unreachable("Pluto context is missing identity attributes".into());
+        }
+        Probe::Ready(summary.join("; "))
     }
     fn inspect(&mut self) -> Result<Inspection, String> {
         self.inspect_now()
