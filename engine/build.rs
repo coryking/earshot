@@ -27,6 +27,9 @@ fn main() {
                 PathBuf::from(env::var("HOME").unwrap()).join("projects/amateur-radio/.tools/lib")
             }
         });
+    // A worktree may share .native through a symlink. Embed the permanent
+    // library directory so deploying the binary does not depend on that worktree.
+    let lib = lib.canonicalize().expect("DSDcc library directory missing; set DSDCC_LIB_DIR (see README)");
     assert!(
         include.join("dsd_decoder.h").is_file(),
         "DSDcc headers missing; set DSDCC_INCLUDE_DIR (see README)"
