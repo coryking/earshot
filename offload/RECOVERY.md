@@ -12,6 +12,23 @@ concatenated `qspi-complete-32MiB.bin` covers all 32 MiB without gaps. The origi
 firmware FIT is also extracted separately. The runtime archive contains `/etc`,
 `/mnt/jffs2`, and `/root`; the live device tree is saved separately.
 
+The device currently boots a reservation-only FIT in the Linux/FPGA/rootfs
+partition, SHA256 `b3ae872c10413f654990c7baa2bf74a476ce422973e1632a22ecf6887f377ecc`.
+Its stock FPGA, kernel and ramdisk data match this backup byte for byte. Only
+three DTBs reserve `0x04000000–0x07ffffff` as `dma_probe@4000000` with `no-map`;
+the channelizer PL is loaded separately at runtime. The installed FIT can be
+reproduced exactly, without a device write or U-Boot environment change:
+
+```sh
+python3 fpga/sw/make_reserved_stock_itb.py \
+  output/pluto-backups/20261019T221101Z/firmware-original.itb \
+  output/fpga-mvp/reproduced-reserved.itb
+```
+
+The output must hash to the installed SHA above. `make_frm.py` instead makes a
+channelizer-in-FIT image for a different boot path; do not use its `chan_dma`
+reservation node as proof that custom PL is running.
+
 Recheck the backup and prepare original DFU files on the Mac:
 
 ```sh

@@ -1,7 +1,7 @@
 Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
 ---------------------------------------------------------------------------------------------------------------------------------------------
 | Tool Version : Vivado v.2026.1 (lin64) Build 6511674 Tue Jun 16 11:01:26 MDT 2026
-| Date         : Mon Oct 19 19:58:14 2026
+| Date         : Mon Oct 19 22:08:32 2026
 | Host         : wigglebutt running 64-bit Ubuntu 26.04 LTS
 | Command      : check_timing -verbose -file reports/check_timing.rpt
 | Design       : system_top

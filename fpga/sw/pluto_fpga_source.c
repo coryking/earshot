@@ -116,21 +116,21 @@ static int restore_controls(void) {
 static volatile uint32_t *chan, *dma;
 static volatile uint8_t *ring;
 static uint32_t mask[16];
-// The channelizer PL is present after a runtime load (marker file) or when booted
-// from the channelizer firmware (its device tree carries the DMA carve-out).
+// A reserved-memory DT node proves only the DMA address is safe, not which PL
+// image is active. The runtime loader creates the marker after programming.
 static int chan_pl_present(void) {
-    return !access("/tmp/pl_is_chan", F_OK) ||
-           !access("/proc/device-tree/reserved-memory/chan_dma@4000000", F_OK);
+    return !access("/tmp/pl_is_chan", F_OK);
 }
 static int map_hw(void) {
     if (!chan_pl_present()) { fprintf(stderr, "channelizer PL not loaded\n"); return -1; }
     FILE *f = fopen("/proc/iomem", "r"); char line[256]; int ram_hit = 0;
-    while (f && fgets(line, sizeof line, f)) {
+    if (!f) { perror("/proc/iomem"); return -1; }
+    while (fgets(line, sizeof line, f)) {
         unsigned long lo, hi;
         if (line[0] != ' ' && sscanf(line, "%lx-%lx", &lo, &hi) == 2 && strstr(line, "System RAM") &&
             lo < DMA_BASE + NBLOCKS * BLOCK_BYTES && hi >= DMA_BASE) ram_hit = 1;
     }
-    if (f) fclose(f);
+    fclose(f);
     if (ram_hit) { fprintf(stderr, "DMA carve-out is System RAM: needs the channelizer firmware\n"); return -1; }
     int fd = open("/dev/mem", O_RDWR | O_SYNC);
     if (fd < 0) { perror("/dev/mem"); return -1; }
@@ -210,6 +210,10 @@ static int message(unsigned type, unsigned flags, unsigned stream, uint64_t firs
     return send_all(h, 64, payload, bytes);
 }
 static int is_selected(unsigned k) { return mask[k / 32] >> (k % 32) & 1; }
+static int any_selected(void) {
+    for (unsigned i = 0; i < 16; ++i) if (mask[i]) return 1;
+    return 0;
+}
 
 static int send_config(const char *request, int ok, const char *error, int running) {
     static char json[200000];
@@ -222,7 +226,8 @@ static int send_config(const char *request, int ok, const char *error, int runni
         "\"profile\":{\"max_input_rate_hz\":%lld,\"bins\":%d,\"taps\":8,\"hop\":%d,\"pre_roll_ms\":0,\"hang_ms\":100,\"max_iq_packet_ms\":10},"
         "\"capabilities\":{\"controls_supported\":true,\"configure_supported\":false,\"pin_supported\":true,\"stop_supported\":true},"
         "\"psd\":{\"bins\":%d,\"center_hz\":%lld,\"span_hz\":%lld,\"unit\":\"dBFS\"},\"streams\":[",
-        center_hz, rate_hz, bw_hz, running ? "running" : "stopped", rate_hz, BINS, HOP, BINS, center_hz, rate_hz);
+        center_hz, rate_hz, bw_hz, running ? "running" : "stopped", rate_hz, BINS, HOP, BINS,
+        center_hz - rate_hz / (2 * BINS), rate_hz);
     if (running)
         for (unsigned k = 0; k < BINS; ++k) {
             int n = snprintf(json + u, sizeof json - u,
@@ -253,7 +258,7 @@ static int flush_bin(unsigned k) {
 
 // record parser state (records can straddle transfer blocks)
 static uint64_t cur_frame;
-static unsigned cur_flags, have_header, next_flags;
+static unsigned cur_flags, have_header;
 static uint64_t expect_frame;
 static int parse_word(uint64_t w) {
     unsigned tag = w >> 56;
@@ -265,7 +270,6 @@ static int parse_word(uint64_t w) {
         if (fl & 1) riq |= 8;
         if (fl & 2) riq |= 8 | 16;                         // window may span lost ADC samples
         cur_frame = f; cur_flags = riq; have_header = 1; expect_frame = f + 1;
-        next_flags |= riq;
         return 0;
     }
     if ((w >> 60) != 0x5 || !have_header) return 0;
@@ -274,6 +278,7 @@ static int parse_word(uint64_t w) {
     stream_buf *b = &sb[k];
     if (b->n && b->first + b->n != cur_frame) { if (flush_bin(k)) return -1; }
     if (!b->n) { b->first = cur_frame; b->flags = cur_flags; }
+    else b->flags |= cur_flags;  // a loss in the middle marks the whole IQ chunk
     b->iq[2 * b->n] = (int16_t)(w & 0xFFFF);
     b->iq[2 * b->n + 1] = (int16_t)((w >> 16) & 0xFFFF);
     if (++b->n == IQ_CHUNK) return flush_bin(k);
@@ -318,12 +323,17 @@ static char stop_request[80];
 static int handle_control(void) {
     unsigned char h[64];
     ssize_t n = recv(client, h, 64, MSG_DONTWAIT | MSG_PEEK);
-    if (n < 64) return (n == 0) ? -1 : 0;
+    if (n < 64) return (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) ? -1 : 0;
     unsigned bytes = get32(h + 52);
     if (memcmp(h, "RIQ1", 4) || h[8] != 6 || bytes > MAX_CONTROL) return -1;
     char buf[64 + MAX_CONTROL + 1];
-    size_t got = 0;
-    while (got < 64 + bytes) { ssize_t r = recv(client, buf + got, 64 + bytes - got, 0); if (r <= 0) return -1; got += r; }
+    size_t total = 64 + bytes;
+    n = recv(client, buf, total, MSG_DONTWAIT | MSG_PEEK);
+    if (n < (ssize_t)total) return (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) ? -1 : 0;
+    // The full frame is queued. Consume it without ever waiting on the client:
+    // the same thread must keep servicing selected DMA blocks.
+    n = recv(client, buf, total, MSG_DONTWAIT | MSG_WAITALL);
+    if (n != (ssize_t)total) return -1;
     char *j = buf + 64; j[bytes] = 0;
     jsmn_parser p; jsmntok_t t[64]; jsmn_init(&p);
     int count = jsmn_parse(&p, j, bytes, t, 64);
@@ -409,17 +419,27 @@ int main(int argc, char **argv) {
     if (send_config(NULL, 1, NULL, 1)) { result = 1; goto out; }
 
     double t0 = now(), last_psd = 0, last_activity = 0;
+    double last_frame_progress = t0, last_dma_progress = t0;
+    uint32_t previous_frame = chan[0x12];
     while (!interrupted && (seconds == 0 || now() - t0 < seconds)) {
         uint32_t b = completed % NBLOCKS;
         if (completed < submitted && (dma[0x10A] >> (ids[b] & 3) & 1)) {
             const volatile uint64_t *w = (const volatile uint64_t *)(ring + b * BLOCK_BYTES);
             for (unsigned i = 0; i < BLOCK_BYTES / 8; ++i) if (parse_word(w[i])) { result = 1; goto out; }
             completed++;
+            last_dma_progress = now();
             submit_next();
             continue;
         }
         double t = now();
         if (t - last_psd > 0.1) {
+            uint32_t frame = chan[0x12];
+            if (frame != previous_frame) { previous_frame = frame; last_frame_progress = t; }
+            if (!any_selected()) last_dma_progress = t;
+            if (t - last_frame_progress > 2.0 || t - last_dma_progress > 2.0) {
+                fprintf(stderr, "channelizer frame or selected DMA stream stalled\n");
+                result = 1; goto out;
+            }
             int activity_due = t - last_activity > 1.0;
             if (send_psd_activity(activity_due)) { result = 1; goto out; }
             last_psd = t; if (activity_due) last_activity = t;

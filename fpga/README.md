@@ -24,12 +24,13 @@ runtime.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Stock ADI `projects/pluto` | 12,673 (72.0%) | 22,125 | 2 | 72 (90%) | 99.7% | +0.936 | +0.013 | +0.264 |
 | `pluto_rx`: TX DDS, TX IQ correction, TX interpolator removed (built before TDD_DISABLE was added to the overlay) | 7,124 (40.5%) | 13,312 | 2 | 34 | 80.5% | +1.130 | +0.012 | +0.264 |
-| `pluto_chan`: RX-only + channelizer (also axi_ad9361 TDD off) | **13,066 (74.2%)** | 20,281 | 27.5 | 74 (92.5%) | 99.8% | **+0.242** | **+0.007** | +0.264 |
+| `pluto_chan`: deployed `8cea8ae` RX-only channelizer (also axi_ad9361 TDD off) | **13,149 (74.7%)** | 20,319 | 27.5 | 74 (92.5%) | 99.7% | **+0.403** | **+0.013** | +0.264 |
 
 TNS and THS are 0. All constraints are met at 100 MHz (FCLK0) for the channelizer
 and at the ADI-defined clocks elsewhere. No clock was loosened.
 
-Channelizer share of the final build:
+Channelizer share in the earlier synthesis breakdown (the release-wide totals
+above come from the exact deployed `8cea8ae` reports):
 
 | Block | LUT | FF | BRAM36 | RAMB18 | DSP |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -44,7 +45,10 @@ The first full build used the 18-bit, natural-order xfft and failed placement:
 - axi_ad9361's internal TDD controller disabled. It only sequences TX/RX
   switching, so it falls under the authorized TX strip.
 
-**Sign-off checks** (`results/pluto_chan_*.rpt`, compared with `results/pluto_rx_*`):
+**Sign-off checks:** `results/pluto_chan_{check_timing,drc,methodology,timing_summary,utilization}.rpt`
+are copied from the deployed `pluto_chan-8cea8ae/reports/` bundle; the other
+reports in `results/` are from earlier comparison builds. Compared with
+`results/pluto_rx_*`:
 - **Baseline note:** the `pluto_rx_*` reports predate TDD_DISABLE. CDC-15 warning
   counts and clk_fpga_0→rx_clk endpoint counts therefore differ, but the critical
   counts match.

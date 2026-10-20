@@ -1,7 +1,7 @@
 Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
 ---------------------------------------------------------------------------------------------------------------------------------------------
 | Tool Version : Vivado v.2026.1 (lin64) Build 6511674 Tue Jun 16 11:01:26 MDT 2026
-| Date         : Mon Oct 19 19:58:05 2026
+| Date         : Mon Oct 19 22:08:16 2026
 | Host         : wigglebutt running 64-bit Ubuntu 26.04 LTS
 | Command      : report_methodology -file reports/methodology.rpt
 | Design       : system_top
@@ -23,7 +23,7 @@ Table of Contents
           Floorplan: checkpoint_system_top_routed
       Design limits: <entire design considered>
              Max checks: <unlimited>
-             Checks found: 55
+             Checks found: 54
 +-----------+------------------+-------------------------------------------------------------------------------------+--------+
 | Rule      | Severity         | Description                                                                         | Checks |
 +-----------+------------------+-------------------------------------------------------------------------------------+--------+
@@ -32,7 +32,7 @@ Table of Contents
 | TIMING-18 | Warning          | Missing input or output delay                                                       | 36     |
 | ULMTCS-1  | Warning          | Control Sets use limits recommend reduction                                         | 1      |
 | XDCB-5    | Warning          | Runtime inefficient way to find pin objects                                         | 8      |
-| RTGT-1    | Advisory         | RAM retargeting possibility                                                         | 4      |
+| RTGT-1    | Advisory         | RAM retargeting possibility                                                         | 3      |
 +-----------+------------------+-------------------------------------------------------------------------------------+--------+
 
 2. REPORT DETAILS
@@ -249,7 +249,7 @@ Related violations: <none>
 
 ULMTCS-1#1 Warning
 Control Sets use limits recommend reduction  
-This design uses 621 control sets (vs. available limit of 4400, determined by 1 control set per CLB). This exceeds the control set use guideline of 7.5 percent. This is at a level where reduction is RECOMMENDED (see UG949). Use report_control_sets to get more details.
+This design uses 620 control sets (vs. available limit of 4400, determined by 1 control set per CLB). This exceeds the control set use guideline of 7.5 percent. This is at a level where reduction is RECOMMENDED (see UG949). Use report_control_sets to get more details.
 Related violations: <none>
 
 XDCB-5#1 Warning
@@ -344,16 +344,6 @@ i_system_wrapper/system_i/chan/inst/i_mask/g_col[12].col_reg_r2_0_15_0_0,
 i_system_wrapper/system_i/chan/inst/i_mask/g_col[13].col_reg_r2_0_15_0_0,
 i_system_wrapper/system_i/chan/inst/i_mask/g_col[14].col_reg_r2_0_15_0_0
 i_system_wrapper/system_i/chan/inst/i_mask/g_col[15].col_reg_r2_0_15_0_0
-Related violations: <none>
-
-RTGT-1#4 Advisory
-RAM retargeting possibility  
-Identified 6 RAM32X1D primitives that could be retargeted to RAM32M. Retargeting will save approximately 2 memory LUTs and improve routability. These can usually be achieved using synthesis inference or XPMs. The memories are i_system_wrapper/system_i/chan/inst/i_mask/g_col[16].col_reg_r2_0_15_0_0,
-i_system_wrapper/system_i/chan/inst/i_mask/g_col[22].col_reg_r2_0_15_0_0,
-i_system_wrapper/system_i/chan/inst/i_mask/g_col[25].col_reg_r2_0_15_0_0,
-i_system_wrapper/system_i/chan/inst/i_mask/g_col[30].col_reg_r2_0_15_0_0,
-i_system_wrapper/system_i/chan/inst/i_mask/g_col[4].col_reg_r2_0_15_0_0
-i_system_wrapper/system_i/chan/inst/i_mask/g_col[6].col_reg_r2_0_15_0_0
 Related violations: <none>
 
 

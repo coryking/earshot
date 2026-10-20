@@ -19,20 +19,24 @@ fi
 
 PLUTO=${PLUTO:-root@192.168.10.10}
 SSHOPT=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-        -o ConnectTimeout=5 -o LogLevel=ERROR)
-p() { sshpass -p "${PLUTO_SSH_PASSWORD:-analog}" ssh "${SSHOPT[@]}" "$PLUTO" "$@"; }
-put() { sshpass -p "${PLUTO_SSH_PASSWORD:-analog}" scp -O -q "${SSHOPT[@]}" "$1" "$PLUTO:$2"; }
+        -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2
+        -o LogLevel=ERROR)
+p() { SSHPASS="${PLUTO_SSH_PASSWORD:-analog}" timeout 15s sshpass -e ssh "${SSHOPT[@]}" "$PLUTO" "$@"; }
+put() { SSHPASS="${PLUTO_SSH_PASSWORD:-analog}" timeout 15s sshpass -e scp -O -q "${SSHOPT[@]}" "$1" "$PLUTO:$2"; }
 
-for attempt in $(seq 1 30); do
+for attempt in $(seq 1 10); do
   if p true 2>/dev/null; then break; fi
-  if [ "$attempt" -eq 30 ]; then echo "Pluto did not answer SSH" >&2; exit 1; fi
+  if [ "$attempt" -eq 10 ]; then echo "Pluto did not answer SSH" >&2; exit 1; fi
   sleep 2
 done
 
 # The stock image has no safe DMA address. The diagnostic firmware reserves it
 # as dma_probe; a persistent channelizer image calls it chan_dma. Either is
 # acceptable only if Linux also excludes the whole interval from System RAM.
-if ! p 'test -e /proc/device-tree/reserved-memory/dma_probe@4000000/no-map || test -e /proc/device-tree/reserved-memory/chan_dma@4000000/no-map'; then
+reservation=$(p 'if test -e /proc/device-tree/reserved-memory/dma_probe@4000000/no-map || test -e /proc/device-tree/reserved-memory/chan_dma@4000000/no-map; then echo RESERVED; else echo MISSING; fi') || {
+  echo "Pluto SSH failed while checking the DMA reservation" >&2; exit 1;
+}
+if [ "$reservation" != RESERVED ]; then
   echo "Pluto boot has no DMA reservation; refusing to start the producer" >&2
   exit 1
 fi
@@ -47,18 +51,36 @@ if not ram or any(int(lo, 16) < 0x08000000 and int(hi, 16) >= 0x04000000 for lo,
   exit 1
 fi
 
-# A firmware-loaded channelizer has the chan_dma node; a runtime load leaves the
-# marker in ramfs. Do not touch the custom register address on a stock PL boot.
-if p 'test -e /tmp/pl_is_chan || test -e /proc/device-tree/reserved-memory/chan_dma@4000000'; then
+# The reservation only describes RAM. It does not prove which PL image is loaded.
+# Only the runtime loader creates the ramfs marker after programming the PL.
+pl_state=$(p 'if test -e /tmp/pl_is_chan; then echo CHAN; else echo STOCK; fi') || {
+  echo "Pluto SSH failed while checking the FPGA image" >&2; exit 1;
+}
+case "$pl_state" in CHAN|STOCK) ;; *) echo "Unexpected Pluto FPGA state: $pl_state" >&2; exit 1;; esac
+if [ "$pl_state" = CHAN ]; then
   put "$tool" /tmp/chanctl
   p chmod +x /tmp/chanctl
-  if p /tmp/chanctl info | grep -q '"magic":"0x4348414e"'; then
+  info=$(p /tmp/chanctl info) || { echo "Pluto FPGA probe failed" >&2; exit 1; }
+  if grep -q '"magic":"0x4348414e"' <<< "$info"; then
     echo "Pluto FPGA channelizer ready"
     exit 0
   fi
 fi
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
+# A persistent load fault must not drive the Pluto through an endless USB/reboot
+# cycle. Systemd can retry the preflight, but at most one PL load runs per five
+# minutes after a failure. A successful load clears the cooldown.
+failure_file=${FPGA_LOAD_FAILURE_FILE:-$HOME/.cache/amateur-radio-fpga/last-load-failure}
+mkdir -p "$(dirname "$failure_file")"
+last_failure=$(cat "$failure_file" 2>/dev/null || echo 0)
+now=$(date +%s)
+if [[ "$last_failure" =~ ^[0-9]+$ ]] && (( now - last_failure < 300 && now >= last_failure )); then
+  echo "Recent FPGA load failed; waiting for five-minute cooldown" >&2
+  exit 1
+fi
+loading=1
+trap 'if (( loading )); then date +%s > "$failure_file"; fi' EXIT
 "$script_dir/pluto_runtime_load.sh" load "$bit" "$tool"
 if ! p /tmp/chanctl info | grep -q '"magic":"0x4348414e"'; then
   echo "Pluto did not return with the channelizer" >&2
@@ -68,4 +90,7 @@ if [ "$(p cat /sys/kernel/config/usb_gadget/composite_gadget/UDC)" != ci_hdrc.0 
   echo "Pluto USB gadget is detached" >&2
   exit 1
 fi
+loading=0
+trap - EXIT
+echo 0 > "$failure_file"
 echo "Pluto FPGA channelizer ready"

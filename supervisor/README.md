@@ -10,11 +10,14 @@ radio-supervisor --binary ~/.cache/amateur-radio-fpga/sw/pluto-fpga-source \
   --status-file /run/user/1000/amateur-radio/receiver.json
 ```
 
-The producer is `pluto-fpga-source` (`fpga/sw/build.sh`), which needs the flashed channelizer
-firmware (`fpga/README.md`). It is started as
-`--port 9010 --center 460000000 --gain 40 --forward-streams 1` (`--center`, `--gain`, `--forward`
-change it): about 20 MHz in 512 bins of 50 kHz, manual gain. There is no other producer and no
-image detection; on a stock image the producer exits and is retried with backoff.
+The producer is `pluto-fpga-source` (`fpga/sw/build.sh`). The installed boot FIT
+reserves DMA memory while `amateur-radio-live` loads the tested FPGA image into
+volatile PL before this supervisor starts (`fpga/README.md`). The managed unit
+starts it as `--port 9010 --center 460016998 --gain 40 --forward-streams 404`;
+`--center`, `--gain` and `--forward` can change it. That gives about 20 MHz of RF
+in 512 bins of 50 kHz, with manual gain. There is no ARM fallback or image
+detection. If the runtime PL image is absent, the producer refuses to open the
+custom registers.
 
 Per cycle: take `/tmp/pluto-radio.lock` (waits if another session holds it), check the Pluto
 answers `iio_info`, stop leftover producers, snapshot the receiver (`iio_attr`), copy the

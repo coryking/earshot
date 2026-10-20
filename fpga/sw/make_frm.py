@@ -35,13 +35,13 @@ DMA_BASE = 0x04000000   # see module docstring for why 64 MiB at 64 MiB
 DMA_SIZE = 0x04000000
 
 
-def add_reserved_memory(dtb: bytes) -> bytes:
+def add_reserved_memory(dtb: bytes, node_name: str = "chan_dma") -> bytes:
     root, meta = fit.parse(dtb)
     if any(c.name == "reserved-memory" for c in root.children):
         raise SystemExit("device tree already has reserved-memory; refusing to merge")
     rm = fit.Node("reserved-memory", {
         "#address-cells": fit.u32(1), "#size-cells": fit.u32(1), "ranges": b""})
-    rm.add(fit.Node(f"chan_dma@{DMA_BASE:x}", {
+    rm.add(fit.Node(f"{node_name}@{DMA_BASE:x}", {
         "reg": fit.u32(DMA_BASE, DMA_SIZE), "no-map": b""}))
     root.add(rm)
     return fit.serialize(root, meta)

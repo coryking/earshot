@@ -28,8 +28,8 @@ use std::{
 struct Args {
     #[arg(long, default_value = "192.168.10.10")]
     host: String,
-    /// pluto-fpga-source, built by fpga/sw/build.sh. The Pluto must run the channelizer
-    /// firmware (fpga/README.md); on any other image the producer exits and is retried.
+    /// pluto-fpga-source, built by fpga/sw/build.sh. The managed unit first loads
+    /// the runtime channelizer PL and checks the DMA reservation (fpga/README.md).
     #[arg(long)]
     binary: PathBuf,
     #[arg(long, default_value_t = 9010)]

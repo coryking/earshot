@@ -7,16 +7,13 @@ systemctl --user is-active --quiet amateur-radio-live.service || exit 0
 
 PLUTO=${PLUTO:-root@192.168.10.10}
 SSHOPT=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-        -o ConnectTimeout=5 -o LogLevel=ERROR)
-p() { sshpass -p "${PLUTO_SSH_PASSWORD:-analog}" ssh "${SSHOPT[@]}" "$PLUTO" "$@"; }
+        -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2
+        -o LogLevel=ERROR)
+p() { SSHPASS="${PLUTO_SSH_PASSWORD:-analog}" timeout 15s sshpass -e ssh "${SSHOPT[@]}" "$PLUTO" "$@"; }
 
-# A channelizer flashed into the boot image has the DT marker. A runtime load
-# has the ramfs marker. Leave a healthy producer alone.
-if p 'test -e /tmp/pl_is_chan || test -e /proc/device-tree/reserved-memory/chan_dma@4000000' 2>/dev/null; then
-  exit 0
-fi
-# An unreachable Pluto can return on its own. The supervisor already backs off
-# while it is absent; restart only once a booted Pluto actually answers.
-p true 2>/dev/null || exit 0
+# Only the runtime loader creates this marker after successful PL programming.
+# An SSH failure is not evidence that Pluto rebooted: try again next minute.
+state=$(p 'if test -e /tmp/pl_is_chan; then echo CHAN; else echo STOCK; fi' 2>/dev/null) || exit 0
+case "$state" in CHAN) exit 0;; STOCK) ;; *) exit 0;; esac
 echo 'Pluto rebooted without the runtime FPGA; restarting live receiver'
 systemctl --user restart amateur-radio-live.service

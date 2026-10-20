@@ -206,9 +206,8 @@ int main(int argc, char **argv) {
     if (argc < 2) { usage(); return 2; }
     // Only touch 0x7C4x0000 when the channelizer image is loaded: on the stock PL
     // those addresses are not decoded and an access can stall the bus.
-    if (access("/tmp/pl_is_chan", F_OK) != 0 &&
-        access("/proc/device-tree/reserved-memory/chan_dma@4000000", F_OK) != 0) {
-        fprintf(stderr, "channelizer PL not loaded (no runtime-load marker, not the channelizer firmware)\n");
+    if (access("/tmp/pl_is_chan", F_OK) != 0) {
+        fprintf(stderr, "channelizer PL not loaded (no runtime-load marker)\n");
         return 1;
     }
     int fd = open("/dev/mem", O_RDWR | O_SYNC);
