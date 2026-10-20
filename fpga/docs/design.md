@@ -158,11 +158,19 @@ Per coarse bin k, from the power word P_k = |Y_k|²:
    bin to be empty at any particular moment.
    - **Frozen while active.** While a bin is active, its own levels stop feeding the
      minimum and its sub-window minima stop rotating. Without that, a carrier
-     longer than the window (FM voice, two-slot DMR, control channels) becomes the
-     floor and the bin closes after about 1.5 s.
+     longer than the window (FM voice, two-slot DMR) becomes the floor and the
+     bin closes after about 1.5 s.
    - **Bounded.** The freeze lasts at most 90 sub-windows (about 30 s) of
      continuous activity. Tracking then resumes, so a genuine floor rise cannot
-     latch a bin open.
+     latch a bin open forever. A carrier on for longer than about 31 s becomes the
+     floor and reads inactive until it stops.
+   - **Known cost.** Gating on the active flag also freezes the floor during a
+     false open or a small floor rise. In the model at the 1e-6 point, false opens
+     then last 18 s on average instead of 0.76 s, and a +0.5 dB rise during an over
+     holds the bin open about 26 s after it ends. The open-side Pfa is unchanged.
+     The candidate fix gates on the block's own level instead,
+     track = (L ≤ N_prev + T_off) | (held ≥ HOLD_SUBS). In the model it keeps a 5 s
+     carrier held and cuts false opens back to 0.76 s. Not yet implemented.
 4. **Order-statistic CFAR decision** [rohling83; richards14].
    - Open when L > N + T_on. Stay open while L > N + T_off, then for `hang` more
      blocks (39 blocks = 100 ms, which bridges DMR TDMA gaps).

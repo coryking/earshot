@@ -293,7 +293,13 @@ The xfft bit-accurate C model ships with Vivado. The Python CLIs set its
    IIO driver for the two streams is the conventional follow-up.
 5. **Fit margin.** Slices are 99.8% packed, DSP 92.5%. Further logic needs the
    R2²SDF FFT (about −1k LUT and −9 DSP) or giving up the RX low-rate decimator.
-6. **Host channel filter.** It limits 12.5 kHz adjacent-channel rejection
+6. **Detector floor freeze (P2, review 20261019-212400).** Freezing the floor
+   while a bin is active keeps long overs open, but false opens and small floor
+   rises now latch for up to about 30 s. The level-gated fix is in design.md §5,
+   not yet implemented. Carriers on for longer than about 31 s read inactive.
+   Also open: a frame that starts during a DET_RESET sweep is still counted as
+   whole (P3; it only follows an operator reset).
+7. **Host channel filter.** It limits 12.5 kHz adjacent-channel rejection
    (−8.8 dB SNR with a 40 dB-stronger neighbour), whatever the channelizer does.
 
 ## Next phase: freeing DSPs (planned, not started; waits for on-device validation)
