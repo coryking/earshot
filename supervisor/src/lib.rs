@@ -9,7 +9,8 @@
 //!
 //! A cycle:
 //!  1. take `/tmp/pluto-radio.lock` (shared with every other radio session); wait if it is held
-//!  2. check the Pluto is reachable and runs the expected image, otherwise release the lock,
+//!  2. check the Pluto is reachable and runs an image we have a producer for (stock ARM, or an
+//!     FPGA image listed in --profiles), otherwise release the lock,
 //!     back off and look again later (an FPGA test image or a reboot is somebody else's
 //!     business, not something to fight)
 //!  3. stop any leftover producer, snapshot the receiver settings, start the producer
@@ -95,6 +96,10 @@ pub trait Running {
 
 pub trait Radio {
     fn probe(&mut self) -> Probe;
+    /// Which producer profile the last successful probe chose (for the status).
+    fn profile_name(&self) -> String {
+        String::new()
+    }
     fn inspect(&mut self) -> Result<Inspection, String>;
     /// Stop producers somebody left behind (we hold the lock, so they are nobody's live run).
     fn stop_leftovers(&mut self) -> Result<(), String>;
@@ -188,6 +193,7 @@ pub struct Supervisor<R: Radio, L: Lock, E: Env> {
     last_publish: f64,
     retry_in: Option<f64>,
     pluto: String,
+    profile: String,
     producer_started_at: Option<f64>,
     starts: u64,
     last_exit: Option<String>,
@@ -213,6 +219,7 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
             last_publish: f64::MIN,
             retry_in: None,
             pluto: String::new(),
+            profile: String::new(),
             producer_started_at: None,
             starts: 0,
             last_exit: None,
@@ -295,6 +302,7 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
                 self.unreachable_n = 0;
                 self.wrong_image_n = 0;
                 self.pluto = summary;
+                self.profile = self.radio.profile_name();
             }
         }
         let inspection = match self.radio.inspect() {
@@ -454,6 +462,7 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
             "updated": now,
             "retry_in_s": self.retry_in,
             "pluto": self.pluto,
+            "profile": self.profile,
             "producer_started_at": self.producer_started_at,
             "starts": self.starts,
             "last_exit": self.last_exit,
