@@ -37,9 +37,9 @@ This is a protocol identification backed by frame checks, not just a spectral re
 | --- | --- | --- |
 | `iq_454337000Hz.sigmf.tar` | 19.66 s | 24 raw sync reports; 9 CRC-gated Site ID, 4 Service Information, 3 Idle Repeater, 3 Transmission Release messages; 4 CRC failures elsewhere. Metadata target is 454.3375 MHz. |
 | `iq_454250000Hz.sigmf.tar` | 15.48 s | 192 raw sync reports; 175 CRC-gated Service Information messages; 1 CRC failure. |
-| `iq_451350000Hz.sigmf (2).tar` | 30 s | 347 raw sync reports; 310 Capacity Plus Channel Status messages; 19 SLCO CRC errors. No voice frames in the full log. |
+| `iq_451350000Hz.sigmf (2).tar` | 30 s | 335 raw sync reports; 310 Capacity Plus Channel Status messages; 19 CRC errors, including 15 SLCO errors. No voice frames in the full log. |
 
-Raw sync counts include false or unverified detections and are not successful message counts. CRC failure counts can include unrelated false syncs. Message counts are observations within these samples, not unique sites, radios, or conversations.
+Raw sync counts include false or unverified detections and are not successful message counts. They exclude `Sync: no sync` diagnostics. CRC failure counts can include unrelated false syncs. Message counts are observations within these samples, not unique sites, radios, or conversations.
 
 For 454.3375, keep the two identifier namespaces separate:
 
@@ -90,12 +90,12 @@ On wigglebutt, captures and outputs are under `/Users/coryking/projects/amateur-
 - `recordings/mac-downloads-20261020/`: original ten archives, including the off-center 450 ms burst.
 - `recordings/mac-followup-20261020/`: the new 454.3375, 454.2500, and 451.3500 captures.
 - `output/mac-iq-20261020/verified-symbols.json` and `verified-symbols/`: reusable symbol command result and saved arrays; all five SCCH CRCs pass.
-- `output/mac-iq-20261020/followup-4543375-nxdn48-v2.json`, `followup-454250-nxdn48-v2.json`, and `followup-451350-dmr-v2.json`: bounded decoder summaries.
+- `output/mac-iq-20261020/followup-4543375-nxdn48-final.json`, `followup-454250-nxdn48-final.json`, and `followup-451350-dmr-final.json`: bounded decoder summaries.
 - Corresponding `*-full.log` files: full diagnostics, required when a JSON preview is truncated.
 
 Recordings and generated output are ignored by Git. They exist on wigglebutt; the same path on another host does not imply replication.
 
-The reusable commands are being completed on branch `codex/iq-identification` in `/Users/coryking/projects/amateur-radio-iq-identification`. Their targeted tests currently pass (46 tests). Until that branch is integrated, run them from that worktree:
+The reusable commands are `radio iq-fm`, `radio digital-probe`, and `radio iq-symbols`. Run them from the repository checkout with uv:
 
 ```sh
 uv run radio iq-fm /Users/coryking/projects/amateur-radio/recordings/mac-followup-20261020/iq_454337000Hz.sigmf.tar --target-hz 454337500 --seconds 19.66 -o /tmp/type-d-fm.wav --yes --json
@@ -105,6 +105,6 @@ uv run radio iq-symbols /Users/coryking/projects/amateur-radio/recordings/mac-do
 
 Use SigMF capture metadata for the physical center and `--target-hz` for the desired carrier. These files have 100,000 complex samples/s; some initial files have capture discontinuities. The reader rejects a requested segment crossing a capture boundary instead of silently treating a gap as continuous RF.
 
-DSD-FME is now installed on the normal PATH on wigglebutt, without a library-path override. Managed installer source is `run_onchange_install-dsd-fme.sh.tmpl` in the dotfiles repository, branch `codex/dsd-fme-tooling`, commit `98a57e6faefb24d6806ae8bcf7957c8d2552f137`. It pins DSD-FME `5244c857747904811d5fdcc9622758bb67167684` and statically links pinned mbelib. Linux runtime and offline WAV input are verified; the installer’s Darwin path is not yet validated. The installer branch still needs integration into dotfiles main.
+DSD-FME is now installed on the normal PATH on wigglebutt, without a library-path override. Managed installer source is `run_onchange_install-dsd-fme.sh.tmpl` on dotfiles main, commit `98a57e6faefb24d6806ae8bcf7957c8d2552f137`. It pins DSD-FME `5244c857747904811d5fdcc9622758bb67167684` and statically links pinned mbelib. Linux runtime and offline WAV input are verified; the installer’s Darwin path is not yet validated.
 
 DSD-FME auto mode excludes NXDN. Select `--protocol nxdn48` explicitly for these NXDN captures. Decoder log labels alone are not a universal protocol-verification API; CRC-gated counts depend on this pinned implementation. Independent frame validation supplies the stronger evidence for the Type-D burst.

@@ -16,14 +16,19 @@ from scipy.signal import resample_poly
 from .analysis import inspect as analyze
 from .analysis import load_audio, plot_audio
 from .digital import DMRResult, FMResult, dmr_audio, iq_fm
+from .iq_recording import open_iq
 from .pluto import app as pluto_app
+from .probe import digital_probe_command
 from .survey import plot_survey, survey_iq
+from .symbols import iq_symbols_command
 
 app = typer.Typer(
     no_args_is_help=True,
     help="Analyze SDR audio, channelize IQ, and probe digital radio. Exit codes: 0 success (including no decode), 1 operational failure, 2 usage error.",
 )
 app.add_typer(pluto_app, name="pluto")
+app.command("digital-probe")(digital_probe_command)
+app.command("iq-symbols")(iq_symbols_command)
 Json = Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON.")]
 Seconds = Annotated[
     float,
@@ -334,9 +339,12 @@ def iq_fm_command(
         float | None, typer.Option(help="Capture center in Hz; pair with --target-hz.")
     ] = None,
     target_hz: Annotated[
-        float | None, typer.Option(help="Target channel in Hz; pair with --center-hz.")
+        float | None, typer.Option(help="Target channel in Hz; SigMF supplies its capture center.")
     ] = None,
     seconds: Annotated[float, typer.Option(min=0.001, max=60)] = 10,
+    start_s: Annotated[
+        float, typer.Option(min=0, help="Start within the recorded samples, seconds.")
+    ] = 0,
     bandwidth_hz: Annotated[
         float,
         typer.Option(
@@ -346,19 +354,25 @@ def iq_fm_command(
     yes: Annotated[bool, typer.Option("--yes", help="Allow writing new output.")] = False,
     as_json: Json = False,
 ):
-    """Channelize int16 I/Q WAV and FM-demodulate. Example: --offset-hz -100000 --yes."""
-    if offset_hz is None:
-        if center_hz is None or target_hz is None:
-            raise typer.BadParameter(
-                "Supply --offset-hz (including 0), or both --center-hz and --target-hz."
-            )
-        offset_hz = target_hz - center_hz
-    elif center_hz is not None or target_hz is not None:
+    """FM-demodulate IQ WAV or ci16_le SigMF/tar. Example: capture.sigmf.tar --target-hz 454337500."""
+    if offset_hz is not None and (center_hz is not None or target_hz is not None):
         raise typer.BadParameter("Use --offset-hz or --center-hz with --target-hz, not both.")
+    if offset_hz is None and target_hz is None:
+        raise typer.BadParameter("Supply --offset-hz (including 0), or --target-hz.")
     try:
         prepare_wav(output, yes)
         with source(file) as path:
-            rate, analyzed, pcm = iq_fm(path, seconds, offset_hz, bandwidth_hz)
+            if offset_hz is None:
+                with open_iq(path) as recording:
+                    selected_center = (
+                        center_hz if center_hz is not None else recording.center_at(start_s)
+                    )
+                if selected_center is None:
+                    raise ValueError(
+                        "IQ WAV needs --center-hz with --target-hz; SigMF stores its center."
+                    )
+                offset_hz = target_hz - selected_center
+            rate, analyzed, pcm = iq_fm(path, seconds, offset_hz, bandwidth_hz, start_s)
         save_wav(output, 48000, pcm)
         result = FMResult(
             input=file,
@@ -367,6 +381,7 @@ def iq_fm_command(
             offset_hz=offset_hz,
             channel_bandwidth_hz=bandwidth_hz,
             analyzed_s=analyzed,
+            start_s=start_s,
             output_samples=len(pcm),
             notes=[
                 "Complex mixing, resampling to 50 kHz, 161-tap channel FIR, FM phase discriminator, then 48 kHz audio.",
