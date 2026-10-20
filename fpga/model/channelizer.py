@@ -124,8 +124,8 @@ def pfb_float(x: np.ndarray, h: np.ndarray | None = None, cfg: Config = DEFAULT)
 def clip_adc(x: np.ndarray, cfg: Config = DEFAULT) -> tuple[np.ndarray, np.ndarray]:
     """Saturate I and Q to the ADC's signed range; returns (re, im) int64."""
     lo, hi = -(1 << (cfg.adc_bits - 1)), (1 << (cfg.adc_bits - 1)) - 1
-    re = np.clip(np.asarray(np.real(x)).astype(np.int64), lo, hi)
-    im = np.clip(np.asarray(np.imag(x)).astype(np.int64), lo, hi)
+    re = np.clip(np.rint(np.real(x)).astype(np.int64), lo, hi)
+    im = np.clip(np.rint(np.imag(x)).astype(np.int64), lo, hi)
     return re, im
 
 
