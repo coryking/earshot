@@ -1,3 +1,4 @@
+pub mod ambe;
 pub mod api;
 pub mod codec;
 pub mod dsp;
