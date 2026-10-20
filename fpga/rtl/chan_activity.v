@@ -207,35 +207,53 @@ module chan_activity #(
     min16 = (x < y) ? x : y;
   endfunction
 
-  // stage 5: floor and decision (lvl4 valid alongside the stage-4 registers)
+  // stage 5: floor (min statistics + bias) and thresholds, registered
   wire [15:0] smin_new = min16(smin4, lvl4);
   wire [15:0] floor_raw = min16(smin_new, mmin4);
   wire [16:0] floor_b = {1'b0, floor_raw} + {1'b0, bias_q8};
   wire [15:0] floor_v = floor_b[16] ? EMPTY : floor_b[15:0];
-  wire        above_on  = {2'b0, lvl4} > ({2'b0, floor_v} + {2'b0, on_q8});
-  wire        above_off = {2'b0, lvl4} > ({2'b0, floor_v} + {2'b0, off_q8});
-  wire        keep   = act4 & above_off;
-  wire        opened = ~act4 & above_on;
-  wire        hold   = act4 & ~above_off & (hang4 != 8'd0);
-  wire [7:0]  hang_n = (opened | keep) ? hang_blocks : (hold ? hang4 - 8'd1 : 8'd0);
+
+  reg        v5 = 1'b0, blk5, sub5, psd5, last5, act5;
+  reg [8:0]  k5;
+  reg [15:0] lvl5, plv5, floor5, smin5, sminold5;
+  reg [17:0] thr_on5, thr_off5;
+  reg [42:0] acc5;
+  reg [47:0] pacc5;
+  reg [7:0]  hang5;
+  reg [63:0] mins5;
+  always @(posedge clk) begin
+    k5 <= k4; blk5 <= blk4; sub5 <= sub4; psd5 <= psd4; last5 <= last4; act5 <= act4;
+    lvl5 <= lvl4; plv5 <= plv4; floor5 <= floor_v; smin5 <= smin_new; sminold5 <= smin4;
+    thr_on5 <= {2'b0, floor_v} + {2'b0, on_q8};
+    thr_off5 <= {2'b0, floor_v} + {2'b0, off_q8};
+    acc5 <= acc4; pacc5 <= pacc4; hang5 <= hang4; mins5 <= mins4;
+  end
+
+  // stage 6: CFAR decision with hysteresis and hang; write-back
+  wire        above_on  = {2'b0, lvl5} > thr_on5;
+  wire        above_off = {2'b0, lvl5} > thr_off5;
+  wire        keep   = act5 & above_off;
+  wire        opened = ~act5 & above_on;
+  wire        hold   = act5 & ~above_off & (hang5 != 8'd0);
+  wire [7:0]  hang_n = (opened | keep) ? hang_blocks : (hold ? hang5 - 8'd1 : 8'd0);
   wire        act_n  = opened | keep | hold;
 
   always @(posedge clk) begin
-    k_w <= k4;
-    if (blk4) begin
-      a_w <= {hang_n, act_n, (sub4 ? EMPTY : smin_new), 43'd0};
-      b_w <= sub4 ? {mins4[47:0], smin_new} : mins4;
+    k_w <= k5;
+    if (blk5) begin
+      a_w <= {hang_n, act_n, (sub5 ? EMPTY : smin5), 43'd0};
+      b_w <= sub5 ? {mins5[47:0], smin5} : mins5;
     end else begin
-      a_w <= {hang4, act4, smin4, acc4};
-      b_w <= mins4;
+      a_w <= {hang5, act5, sminold5, acc5};
+      b_w <= mins5;
     end
-    c_w <= psd4 ? 48'd0 : pacc4;
+    c_w <= psd5 ? 48'd0 : pacc5;
   end
 
   // activity bitmap: written per bin at block end (cleared during the RAM sweep)
   chan_bitmap i_active (
     .clk (clk),
-    .we_bit (clearing | (v4 & blk4)), .bit_addr (clearing ? clr_addr : k4),
+    .we_bit (clearing | (v5 & blk5)), .bit_addr (clearing ? clr_addr : k5),
     .bit_data (clearing ? 1'b0 : act_n),
     .we_word (1'b0), .word_waddr (4'd0), .word_wdata (32'd0),
     .rd_bit_addr (act_bit_addr), .rd_bit (act_bit),
@@ -248,18 +266,19 @@ module chan_activity #(
   always @(posedge clk) begin
     lvl_rdata <= lvl_ram[lvl_raddr];
     psd_rdata <= psd_ram[psd_raddr];
-    if (v4 & blk4) lvl_ram[k4] <= {floor_v, lvl4};
-    if (v4 & psd4) psd_ram[k4] <= plv4;
+    if (v5 & blk5) lvl_ram[k5] <= {floor5, lvl5};
+    if (v5 & psd5) psd_ram[k5] <= plv5;
   end
 
   always @(posedge clk) begin
     if (rst) begin
-      v1 <= 1'b0; v2 <= 1'b0; v3 <= 1'b0; v4 <= 1'b0; we_w <= 1'b0;
+      v1 <= 1'b0; v2 <= 1'b0; v3 <= 1'b0; v3b <= 1'b0; v4 <= 1'b0; v5 <= 1'b0; we_w <= 1'b0;
       block_count <= 32'd0; psd_count <= 32'd0;
     end else begin
-      v1 <= pw_valid & ~clearing; v2 <= v1; v3 <= v2; v3b <= v3; v4 <= v3b; we_w <= v4;
-      if (v4 & blk4 & last4) block_count <= block_count + 32'd1;
-      if (v4 & psd4 & last4) psd_count <= psd_count + 32'd1;
+      v1 <= pw_valid & ~clearing; v2 <= v1; v3 <= v2; v3b <= v3; v4 <= v3b; v5 <= v4;
+      we_w <= v5;
+      if (v5 & blk5 & last5) block_count <= block_count + 32'd1;
+      if (v5 & psd5 & last5) psd_count <= psd_count + 32'd1;
     end
   end
 

@@ -80,20 +80,14 @@ module chan_pfb_fir #(
   reg  [11:0] fbase = 12'd0;       // 256 * frame mod 4096
   reg  [FIFO_AW:0] fifo_count = 0;
   reg  [PIPE-1:0]  vld = {PIPE{1'b0}};
-  wire        fifo_room = ({1'b0, fifo_count} + {1'b0, inflight_count(vld)}) < (1 << FIFO_AW);
+  reg  [4:0]  inflight = 5'd0;     // issued reads not yet written to the FIFO
+  wire        fifo_room = ({1'b0, fifo_count} + {2'b0, inflight}) < (1 << FIFO_AW);
   wire        issue = frame_ready & fifo_room;
   wire        issue_last = issue & (j_issued == 10'd511);
   wire [11:0] issue_addr = fbase + {3'd0, j_issued[8:0]};
   wire [11:0] snap_abs = snap_base + snap_i;
   wire [11:0] raddr_abs = frozen ? snap_abs : issue_addr;
 
-  function [4:0] inflight_count(input [PIPE-1:0] v);
-    integer k;
-    begin
-      inflight_count = 0;
-      for (k = 0; k < PIPE; k = k + 1) inflight_count = inflight_count + v[k];
-    end
-  endfunction
 
   always @(posedge clk) begin
     if (rst) begin
@@ -259,11 +253,16 @@ module chan_pfb_fir #(
   end
 
   // valid pipeline (control: reset)
-  always @(posedge clk) begin
-    if (rst) vld <= {PIPE{1'b0}};
-    else     vld <= {vld[PIPE-2:0], issue};
-  end
   wire out_we = vld[PIPE-1];
+  always @(posedge clk) begin
+    if (rst) begin
+      vld <= {PIPE{1'b0}};
+      inflight <= 5'd0;
+    end else begin
+      vld <= {vld[PIPE-2:0], issue};
+      inflight <= inflight + {4'd0, issue} - {4'd0, out_we};
+    end
+  end
 
   // ---------------------------------------------------------------------------
   // output FIFO (distributed RAM)

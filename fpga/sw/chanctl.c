@@ -151,12 +151,39 @@ static int dma_test(volatile uint32_t *dma, int pages, const char *out) {
     return done == pages ? 0 : 1;
 }
 
+// Live self-test: freeze at the next frame boundary, then read that frame's exact
+// 4096-sample input window and its 512 output bins. Output file: u32 frame number,
+// 4096 x {I16,Q16} input, 512 x {I16,Q16} bins (little-endian).
+static int snapshot(const char *out) {
+    wr(chan, 0x22, 1);
+    double t0 = now();
+    while ((rd(chan, 0x22) & 6) != 6) {
+        if (now() - t0 > 2.0) { fprintf(stderr, "snapshot not ready (0x%x)\n", rd(chan, 0x22)); wr(chan, 0x22, 0); return 1; }
+        usleep(1000);
+    }
+    uint32_t frame = rd(chan, 0x23);
+    uint32_t *buf = malloc((1 + 4096 + 512) * 4);
+    buf[0] = frame;
+    for (int i = 0; i < 4096; ++i) {
+        uint32_t v = rd(chan, 0x1000 + i);       // {Q[15:0] sign-ext, I[15:0] sign-ext}
+        buf[1 + i] = v;
+    }
+    for (int k = 0; k < 512; ++k) buf[1 + 4096 + k] = rd(chan, 0x600 + k);
+    wr(chan, 0x22, 0);
+    FILE *f = fopen(out, "wb");
+    if (!f) { perror(out); return 1; }
+    fwrite(buf, 4, 1 + 4096 + 512, f);
+    fclose(f);
+    printf("{\"snapshot_frame\":%u}\n", frame);
+    return 0;
+}
+
 static void usage(void) {
     fprintf(stderr,
         "usage: chanctl info | psd | level | active | stop\n"
         "       chanctl start [--out-shift N] [--hist] [--sel] [--auto] [--bins a,b,...]\n"
         "       chanctl set-det ON OFF BIAS HANG | det-reset\n"
-        "       chanctl dma hist|sel PAGES OUTFILE\n"
+        "       chanctl dma hist|sel PAGES OUTFILE | snap OUTFILE\n"
         "Accesses the channelizer at 0x%08x via /dev/mem. Never opens the radio.\n", CHAN_BASE);
 }
 
@@ -200,6 +227,8 @@ int main(int argc, char **argv) {
         wr(chan, 4, 0);
         usleep(1000);
         wr(chan, 4, ctl);
+    } else if (!strcmp(cmd, "snap") && argc == 3) {
+        return snapshot(argv[2]);
     } else if (!strcmp(cmd, "dma") && argc == 5) {
         volatile uint32_t *dma = !strcmp(argv[2], "hist") ? hist_dma : sel_dma;
         return dma_test(dma, atoi(argv[3]), argv[4]);
