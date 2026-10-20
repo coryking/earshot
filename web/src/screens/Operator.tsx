@@ -4,6 +4,7 @@ import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import type { WireCatalogEntry } from "@/api/needs";
 import { navigate, useNow } from "@/app/ui";
+import { usePlayerInstance } from "@/app/player-context";
 import { useSaveLabel } from "@/components/Sheets";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,7 +18,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { formatMHz } from "@/domain/adapt";
+import { formatMHz, toSources } from "@/domain/adapt";
 import type { Need } from "@/backend/types";
 import { relativeTime } from "@/domain/summary";
 import { keys, useBackend, useCatalog, useStatus, useSupports } from "@/state/radio";
@@ -65,6 +66,8 @@ export function OperatorScreen() {
   const [center, setCenter] = useState("");
   const [rate, setRate] = useState("");
   const [width, setWidth] = useState("");
+  const [frequency, setFrequency] = useState("");
+  const player = usePlayerInstance();
 
   const mhz = (text: string) => {
     const value = Number(text);
@@ -74,6 +77,17 @@ export function OperatorScreen() {
   const rateHz = mhz(rate);
   const widthHz = width.trim() === "" ? rateHz : mhz(width);
   const valid = centerHz !== null && rateHz !== null && widthHz !== null;
+  const tuneHz = mhz(frequency);
+  const tune = useMutation({
+    mutationFn: async () => {
+      if (!backend.tune || tuneHz === null) throw new Error("Frequency tuning unavailable");
+      const channel = await backend.tune(tuneHz);
+      const source = toSources([channel], null, { fmAudio: true })[0];
+      await player.listen(source);
+    },
+    onSuccess: () => { void client.invalidateQueries({ queryKey: keys.status }); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Tuning failed"),
+  });
 
   const configure = useMutation({
     mutationFn: () => backend.configureSource({ centerHz: centerHz!, rateHz: rateHz!, bandwidthHz: widthHz! }),
@@ -122,6 +136,13 @@ export function OperatorScreen() {
           />
         </Panel>
         <Panel title="Receiver">
+          <form className="mb-4 flex items-end gap-2" onSubmit={(e) => { e.preventDefault(); tune.mutate(); }}>
+            <label className="flex-1 text-sm text-muted-foreground">
+              Listen at MHz
+              <Input value={frequency} onChange={(e) => setFrequency(e.target.value)} inputMode="decimal" placeholder="454.01875" />
+            </label>
+            <Button type="submit" disabled={!backend.tune || tuneHz === null || tune.isPending}>Listen</Button>
+          </form>
           <form
             className="grid grid-cols-3 gap-2"
             onSubmit={(e) => {
