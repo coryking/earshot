@@ -16,11 +16,32 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::broadcast;
-async fn status(State(app): State<App>) -> Json<Value> {
+fn now_s() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
+}
+/// The browser validates this payload strictly (web/src/lib/radio.ts), so every numeric
+/// field must be a number even before the first CONFIG or sample arrives.
+fn status_json(app: &App) -> Value {
     let e = app.inner.lock().unwrap();
-    Json(
-        json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":e.source["input_center_hz"],"rate_hz":e.source["input_rate_hz"],"bandwidth_hz":e.source["input_bandwidth_hz"],"generation":e.generation,"channels":e.channels.values().collect::<Vec<_>>(),"received_seconds":null,"source_position_s":e.source["source_position_s"],"decode_latency_s":null,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":e.source["queue_depth"],"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"source":e.source}),
-    )
+    let number = |v: &Value| json!(v.as_f64().unwrap_or(0.));
+    let position = number(&e.source["source_position_s"]);
+    // Host ingress age of the latest delivered audio while audio is flowing (the last
+    // chunk was under 5 s ago); otherwise 0, not a stale number.
+    let flowing = e.listener["last_audio_at"]
+        .as_f64()
+        .is_some_and(|t| now_s() - t < 5.);
+    let latency = if flowing {
+        e.listener["ingress_age_ms"].as_f64().unwrap_or(0.) / 1000.
+    } else {
+        0.
+    };
+    json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":number(&e.source["input_center_hz"]),"rate_hz":number(&e.source["input_rate_hz"]),"bandwidth_hz":number(&e.source["input_bandwidth_hz"]),"generation":e.generation,"channels":e.channels.values().collect::<Vec<_>>(),"received_seconds":position,"source_position_s":position,"decode_latency_s":latency,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":number(&e.source["queue_depth"]),"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"source":e.source})
+}
+async fn status(State(app): State<App>) -> Json<Value> {
+    Json(status_json(&app))
 }
 #[derive(Deserialize)]
 struct Monitor {
@@ -90,8 +111,25 @@ struct After {
     #[serde(default)]
     after: u64,
 }
+/// Display range for the waterfall. A producer that reports power per Hz is shown on
+/// the documented fixed scale; integrated per-bin dBFS has no fixed floor, so the range
+/// follows the retained rows (5th percentile to 99.9th percentile with a minimum span).
+fn display_range(unit: &str, rows: &std::collections::VecDeque<(u64, f64, Vec<f32>)>) -> (f64, f64) {
+    // Only the newest rows: bounded work under the engine lock, and the scale tracks now.
+    let mut values: Vec<f32> = rows.iter().rev().take(30).flat_map(|r| r.2.iter().copied()).collect();
+    if unit == "dBFS/Hz" || values.len() < 16 {
+        return (-125., -65.);
+    }
+    values.sort_by(f32::total_cmp);
+    let at = |q: f64| values[((values.len() - 1) as f64 * q) as usize] as f64;
+    let low = at(0.05) - 2.;
+    let high = (at(0.999) + 2.).max(low + 30.);
+    (low, high)
+}
 async fn spectrum(State(app): State<App>, Query(q): Query<After>) -> Json<Value> {
     let e = app.inner.lock().unwrap();
+    let unit = e.source["psd"]["unit"].as_str().unwrap_or("uncalibrated");
+    let (low_db, high_db) = display_range(unit, &e.psd);
     let rows: Vec<_> = e
         .psd
         .iter()
@@ -99,7 +137,7 @@ async fn spectrum(State(app): State<App>, Query(q): Query<After>) -> Json<Value>
         .take(60)
         .collect();
     Json(
-        json!({"sequence":rows.last().map(|x|x.0).unwrap_or(e.psd_seq),"generation":e.generation,"rows":rows.iter().map(|x|&x.2).collect::<Vec<_>>(),"times":rows.iter().map(|x|x.1).collect::<Vec<_>>(),"center_hz":e.source["input_center_hz"],"span_hz":e.source["input_bandwidth_hz"],"low_db":-125,"high_db":-65,"unit":e.source["psd"]["unit"].as_str().unwrap_or("uncalibrated"),"source":if e.active{"live"}else{"disconnected"}}),
+        json!({"sequence":rows.last().map(|x|x.0).unwrap_or(e.psd_seq),"generation":e.generation,"rows":rows.iter().map(|x|&x.2).collect::<Vec<_>>(),"times":rows.iter().map(|x|x.1).collect::<Vec<_>>(),"center_hz":e.source["input_center_hz"],"span_hz":e.source["input_bandwidth_hz"],"low_db":low_db,"high_db":high_db,"unit":unit,"source":if e.active{"live"}else{"disconnected"}}),
     )
 }
 async fn ws(State(app): State<App>, ws: WebSocketUpgrade) -> impl IntoResponse {
@@ -292,6 +330,42 @@ pub fn router(app: App, web_dir: Option<PathBuf>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Mirrors the required numeric fields of statusSchema in web/src/lib/radio.ts.
+    #[test]
+    fn status_satisfies_the_browser_schema_before_and_after_a_source_connects() {
+        let required = [
+            "center_hz",
+            "rate_hz",
+            "bandwidth_hz",
+            "generation",
+            "received_seconds",
+            "source_position_s",
+            "decode_latency_s",
+            "dropped_batches",
+            "processed_batches",
+            "queue_depth",
+        ];
+        let app = App::new(3);
+        for phase in 0..2 {
+            let status = status_json(&app);
+            for key in required {
+                assert!(status[key].is_number(), "phase {phase}: {key} = {}", status[key]);
+            }
+            assert!(status["channels"].is_array() && status["continuity"].is_string());
+            let mut e = app.inner.lock().unwrap();
+            e.source = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,"queue_depth":0});
+        }
+    }
+    #[test]
+    fn waterfall_range_follows_integrated_dbfs_and_keeps_the_density_scale() {
+        let rows: std::collections::VecDeque<_> = (0..20u64)
+            .map(|n| (n, n as f64, (0..64).map(|k| if k == 5 { -12.0 } else { -60.0 + (k % 7) as f32 }).collect()))
+            .collect();
+        let (low, high) = display_range("dBFS", &rows);
+        assert!(low < -58. && low > -66., "low {low}");
+        assert!(high > -12. && high < -5., "high {high}");
+        assert_eq!(display_range("dBFS/Hz", &rows), (-125., -65.));
+    }
     #[tokio::test]
     async fn missing_source_controls_never_report_applied() {
         let app = App::new(3);

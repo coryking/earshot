@@ -32,12 +32,21 @@ notices are in `licenses/`. Rust wraps the existing C++/C algorithms through a
 small C ABI. The production data path does not invoke Python or decoder
 subprocesses.
 
+Filter specifications, their derivation from the channel plan (ITU-R M.478-5, 47 CFR
+90.209/90.210), the design method, and measured results against synthetic and real IQ are in
+[`DESIGN-DSP.md`](DESIGN-DSP.md).
+
 ## Streaming contract
 
 A physical coarse IQ stream may declare multiple logical `targets` in CONFIG.
 One shared IQ packet fans out to the admitted logical workers; each worker mixes
 and filters its target before FM. Existing one-target stream configurations work
-unchanged. The coarse 100 ksps profile has not yet had fixture or device acceptance.
+unchanged. Channel `rf_active` is per frequency: on a shared slice it needs both
+`slice_rf_active` (the producer's physical activity, same for every target in the slice)
+and `target_rf_active` (measured in-band by the host from the slice spectrum, independent
+of decoder admission); `slice_targets` says how many targets share the slice. Each
+channel also carries `slice_level_db` and `target_level_db`. The coarse 100 ksps profile
+has fixture and synthetic acceptance (see DESIGN-DSP.md) but no device acceptance yet.
 
 The fixed 64-byte little-endian RIQ1 header is specified in
 [`../offload/PROTOCOL.md`](../offload/PROTOCOL.md). Incoming payloads are bounded
@@ -55,8 +64,12 @@ unmute audio. Data-only channels are not promoted to voice by an empty codec
 output.
 
 `--max-decoders 8` limits actual codec instances. Unknown RF streams cost three
-instances; known DMR streams cost two and NXDN streams cost one. The selected
-stream is scheduled first, followed by RF-active streams. Each stream has a
+instances; known DMR streams cost two and NXDN streams cost one. Admission order is
+the pinned stream, then streams the source actually forwards IQ for (CONFIG
+`iq_forwarded`/`pinned`, or IQ received in the last 2 s; RF-active before quiet), then
+lower frequency. Metadata-only streams never take decoder budget, however RF-active
+their activity looks (`source.metadata_only_streams` counts them). A source that does
+not publish `iq_forwarded` is assumed to forward every stream it declares. Each stream has a
 four-packet input queue; overflow is counted and resets DSP and codec state on
 the next accepted packet. Catalog entries survive silence, retuning, and source
 loss. `available`/`decoder_admitted` describe the bounded decode budget;
@@ -112,80 +125,103 @@ producer, measured RF/USB continuity, and a live browser check. The ARM prototyp
 has a lower input-rate ceiling than the planned FPGA producer; the host reports
 that advertised capacity rather than treating every requested width as applied.
 
-## Checkpoint, 2026-10-19
+## Live acceptance and status
 
-The embedded codec and 25 ksps IQ-to-WebSocket fixture paths passed. The actual
-on-Pluto producer has not been connected to this host: integration was stopped
-for the session transfer before acquisition began. Native servers are stopped.
+`offload/live_acceptance.py` runs the bounded Pluto to engine to browser-path acceptance
+under the shared `/tmp/pluto-radio.lock` (see offload/arm/README.md for the cross-build and
+the exact command). It checks the Pluto's reported firmware first, then records spectrum
+rows, WebSocket events and audio, freshness, gaps, pinning, and the acknowledged STOP with
+receiver readbacks. Pass criteria are the delivered path and restoration; audio and RF
+activity are reported, since the air may be quiet.
 
-Before live integration, prioritize physical streams actually forwarding IQ (or
-the producer's forwarding mask) when assigning the codec budget. The current
-scheduler prioritizes the selected target and RF-active catalog entries; a
-forwarded stream can otherwise be skipped while lower-numbered metadata-only
-streams occupy the pool. CONFIG protocol hints or a deliberate initial target
-selection are alternative ways to establish the first live decoder.
+Endpoint notes: `/api/status` always reports numeric `received_seconds`,
+`source_position_s`, `decode_latency_s`, `center_hz`, `rate_hz` and `bandwidth_hz`, because
+the browser validates them strictly (`decode_latency_s` is the ingress age of audio that
+flowed in the last 5 s, else 0). `/api/spectrum` `low_db`/`high_db` are display hints: fixed
+-125 to -65 for unit `dBFS/Hz`, otherwise fitted to the newest 30 rows (5th percentile - 2 dB
+to 99.9th percentile + 2 dB, at least 30 dB apart). On a slice shared by several targets,
+per-target `rf_active` needs forwarded IQ; with none, `slice_rf_active` is true while each
+target's `rf_active` stays false. Targets the slice cannot contain are refused and counted
+in `source.out_of_slice_targets`; targets on the same frequency (DMR slots) count once in
+`slice_targets`.
 
-Remaining acceptance: multi-target 100 ksps adjacent-channel rejection and live
-producer-to-host binary audio; source stop ACK and actual RF/FIR/clock restoration
-with the host connected; sustained idle/noise behavior; frontend capability and
-waterfall checks. ARM throughput and the FPGA build remain producer work.
+Remaining acceptance: sustained idle/noise behavior over hours; frontend capability checks
+for the new channel fields (`slice_*`, `target_*`); device acceptance of a multi-target
+100 ksps slice, which waits for the FPGA producer. The ARM producer at 800 ksps runs at about
+0.87x real time (late buffers), so its IQ has gaps; hardware continuity is unproven.
 
 ## Frontend needs
 
-The new web UI (`web/`, design in `web/DESIGN.md`) is typed against the
-endpoints above, treating producer-derived fields as nullable. It also needs
-the endpoints below. Until the engine serves them, live mode falls back in the
-browser (frequency names, a session-only call log without audio, activity
-since the page opened) and `?demo` runs everything on a typed mock
+The web UI (`web/`, design in `web/DESIGN.md`) is typed against the endpoints
+above and treats producer-derived fields as nullable; `0` for `center_hz`,
+`rate_hz` or `bandwidth_hz` is read as "not known yet", so either is fine. It
+also needs the endpoints below. Until the engine serves them, live mode falls
+back in the browser (a starter list of names from the RF research, labels
+saved on the device, a session-only call log without audio, activity since the
+page opened) and `?demo` runs everything on a typed mock
 (`web/src/backend/mock.ts`). Wire types are in `web/src/api/needs.ts`; the
-operator view lists which of these the engine answers. A 404 means "not built
-yet", so each can land independently.
+operator view shows which of these the engine answers. Each can land
+independently.
+
+Conventions: a 404 on one of these paths means "not built yet" (missing
+resources use 410 or 422); errors are `{detail: string}`; timestamps are Unix
+seconds; ids are strings.
 
 1. **Per-client listening.** `/api/monitor` selects one channel for every
    browser, so two people in the house can't listen to different channels.
    Accept `WS /api/listen?channel_id=…` and keep a decoder for each channel
-   that has a listener; keep `/api/monitor` for compatibility. The UI already
-   detects a takeover via the heartbeat's `channel_id` and offers "Switch back".
+   that has a listener; release a selection when its last listener closes;
+   keep `/api/monitor` for compatibility. Today the UI treats a heartbeat
+   `channel_id` of `null` as "released" and re-selects its channel, and a
+   different non-null id as "someone else switched", with "Switch back".
 2. **Analog FM audio.** Monitoring an FM or `Unknown` channel returns 422 and
    there's no FM audio path. Conventional analog FM is in scope (450–470 MHz).
-   Report `protocol: "FM"` for confirmed analog voice and send its audio on
-   the same listen socket.
+   Report `protocol: "FM"` for confirmed analog voice, send its audio on the
+   same listen socket, and advertise `capabilities.fm_audio: true` in the
+   source CONFIG so the UI offers it.
 3. **Recent calls with audio (lookback).**
    - `GET /api/calls?before=<unix s>&limit=<n>&source=<id>` →
      `{calls: [{id, source_id, channel_id, started_at, ended_at|null,
-     encrypted, audio_url|null, talker|null, transcript|null}], next_before}`,
-     newest first.
+     encrypted, audio_url|null, talker|null, transcript|null}],
+     next_before: <unix s>|null}`, newest first.
    - `GET <audio_url>` → `audio/ogg; codecs=opus` (or WAV), seekable.
    - `{type:"call", call}` on `/api/events` when a call starts and ends.
    - `talker` is for trunking (radio ID) and `transcript` for later STT; both
-     null for now. Retention can be time- or size-bounded; say which in the
-     response.
+     null for now. Retention can be time- or size-bounded; say which.
 4. **Source catalog with labels.**
    - `GET /api/catalog` → `{sources: [{id, kind: "channel"|"talkgroup",
      channel_ids, frequency_hz, slot, system: {id, name}|null,
      talkgroup_id|null, name, description, probable_user, traffic_kind,
      mode: "fm"|"dmr"|"nxdn"|"p25"|"unknown",
      encryption: "clear"|"encrypted"|"mixed"|"unknown"}]}`.
-   - `PUT /api/catalog/{id}` with the same object saves a label (household
-     members can name channels from the UI). Persist it across restarts.
+   - `PUT /api/catalog/{id}` with the same object is an upsert (household
+     members name channels from the UI). Persist it across restarts.
+   - The UI joins entries to channels by `frequency_hz` (within 3 kHz) and
+     `slot`, falling back to `channel_ids`, because a channel's id changes
+     when the engine identifies its protocol (`…-Unknown-1` → `…-DMR-2`).
+     Ids should stay stable once issued; the UI keys follow/mute on them.
    - Seed from `docs/rf-environment-seattle.md` on the `rf-research` branch,
      keyed by measured frequency. Trunked talkgroups use
      `kind: "talkgroup"` with `system` and `talkgroup_id`.
+   - When this lands, the UI uploads labels that were saved on a device.
 5. **Activity history (busy vs normal).**
    `GET /api/activity?window_s=86400&bucket_s=300` →
    `{bucket_s, start, block: [talk_s…], sources: {source_id: [talk_s…]},
-   baseline: [talk_s…]|null}`, where `baseline` is the typical talk time for
-   the same weekday and hour (null until learned). The home screen compares
-   the last 15 minutes against it.
+   baseline: [talk_s…]|null}`, where `baseline[i]` is the typical talk time
+   for the same weekday and hour as `block[i]` (null until learned). The home
+   screen compares the last 15 minutes against it.
 6. **Compact spectrum rows.** `GET /api/spectrum.bin?after=N`
-   (`application/octet-stream`, optionally pushed on `WS /api/spectrum`), RSP1,
-   little-endian: `"RSP1"`, u16 bins, u16 rows, f64 center_hz, f64 span_hz,
-   f32 low_db, f32 high_db, then per row u64 sequence, f64 time_s and
-   `bins` × u8 levels scaled between low_db and high_db. A 1024-bin row is
-   1,040 bytes instead of about 8 KB of JSON. Pick low/high from the data:
-   today's JSON reports a fixed −125/−65 window while real dBFS rows sit at
-   about −60 to −15, so the UI quantizes JSON over −150…+10 and auto-levels.
-   Keep at least 60 s of rows (the engine keeps 120 rows today).
+   (`application/octet-stream`, optionally pushed on `WS /api/spectrum`).
+   RSP1, little-endian, 48-byte header: `"RSP1"`, u16 bins, u16 rows,
+   f64 center_hz, f64 span_hz, f32 low_db, f32 high_db, u64 latest sequence
+   (even with zero rows), u32 generation, u32 reserved; then per row
+   u64 sequence, f64 time_s and `bins` × u8 levels scaled between low_db and
+   high_db. A 1024-bin row is 1,040 bytes instead of about 8 KB of JSON.
+   Keep low/high stable across responses (the fitted display range is fine
+   if it changes slowly); the UI clears its history when the generation,
+   center or span changes. Until then the UI reads `/api/spectrum` JSON,
+   quantizes it over a fixed −150…+10 dB window and auto-levels, since the
+   per-response display range would shift the scale between batches.
 7. **Listening areas (blocks).** `GET /api/blocks` →
    `{current_id, blocks: [{id, name, description, center_hz, span_hz}]}` and
    `POST /api/blocks/current {id}`, which applies through the same
