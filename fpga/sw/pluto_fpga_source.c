@@ -285,7 +285,7 @@ static int parse_word(uint64_t w) {
     return 0;
 }
 
-static int send_psd_activity(int activity_due) {
+static int send_psd_activity(void) {
     float psd[BINS];
     for (unsigned m = 0; m < BINS; ++m) {           // low to high frequency
         unsigned k = (m + BINS / 2) % BINS;
@@ -295,10 +295,12 @@ static int send_psd_activity(int activity_due) {
     if (message(2, 0, 0, (uint64_t)chan[0x12], 2, 32, psd, sizeof psd)) return -1;
     // The detector is not calibrated on live RF yet. A noisy window can mark
     // nearly every bin active; sending 512 individual activity frames at the
-    // 10 Hz PSD cadence overwhelms the host with unchanged state. Keep the
-    // measured PSD at 10 Hz and report every bin's current activity at 1 Hz.
-    if (!activity_due) return 0;
-    for (unsigned k = 0; k < BINS; ++k) {
+    // 10 Hz PSD cadence overwhelms the host with unchanged state. Spread one
+    // sweep over ten PSD ticks instead of blocking DMA service with 512 writes.
+    static unsigned activity_bin;
+    for (unsigned sent = 0; sent < (BINS + 9) / 10; ++sent) {
+        unsigned k = activity_bin;
+        activity_bin = (activity_bin + 1) % BINS;
         int active = chan[0x50 + k / 32] >> (k % 32) & 1;
         uint32_t lv = chan[0x200 + k];
         char j[200];
@@ -418,17 +420,19 @@ int main(int argc, char **argv) {
     submit_next(); submit_next();
     if (send_config(NULL, 1, NULL, 1)) { result = 1; goto out; }
 
-    double t0 = now(), last_psd = 0, last_activity = 0;
+    double t0 = now(), last_psd = 0;
     double last_frame_progress = t0, last_dma_progress = t0;
     uint32_t previous_frame = chan[0x12];
     while (!interrupted && (seconds == 0 || now() - t0 < seconds)) {
         uint32_t b = completed % NBLOCKS;
         if (completed < submitted && (dma[0x10A] >> (ids[b] & 3) & 1)) {
+            // Refill the hardware queue before parsing and socket writes can
+            // block. The next destination is a different ring block.
+            completed++;
+            submit_next();
             const volatile uint64_t *w = (const volatile uint64_t *)(ring + b * BLOCK_BYTES);
             for (unsigned i = 0; i < BLOCK_BYTES / 8; ++i) if (parse_word(w[i])) { result = 1; goto out; }
-            completed++;
             last_dma_progress = now();
-            submit_next();
             continue;
         }
         double t = now();
@@ -440,9 +444,8 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "channelizer frame or selected DMA stream stalled\n");
                 result = 1; goto out;
             }
-            int activity_due = t - last_activity > 1.0;
-            if (send_psd_activity(activity_due)) { result = 1; goto out; }
-            last_psd = t; if (activity_due) last_activity = t;
+            if (send_psd_activity()) { result = 1; goto out; }
+            last_psd = t;
         }
         int r = handle_control();
         if (r < 0) break;                 // client gone

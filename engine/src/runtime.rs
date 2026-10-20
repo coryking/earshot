@@ -598,7 +598,15 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                 let physical = e
                     .channels
                     .values()
-                    .find(|c| c["stream_id"] == stream && c["slice_rf_active"] == true)
+                    .find(|c| {
+                        c["stream_id"] == stream
+                            && if e.source["activity_calibrated"] == false {
+                                c["logical_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
+                                    && c["target_rf_active"] == true
+                            } else {
+                                c["slice_rf_active"] == true
+                            }
+                    })
                     .cloned();
                 let sibling = e
                     .channels
@@ -2253,6 +2261,59 @@ mod tests {
         println!("DMR fixture decoded audio: {} s on {}", best.0, best.1);
         assert!(best.0 > 0.5, "no decoded DMR audio: {best:?}");
     }
+
+    /// Private off-air regression: DSDcc falsely finds voice sync in this quiet
+    /// 100 ksps slice. The uncalibrated coarse activity flag must not unmute it.
+    #[test]
+    #[ignore = "set RADIO_QUIET_FPGA_RIQ to the private 452.675 MHz noise capture"]
+    fn quiet_fpga_slice_does_not_record_false_dmr_calls() {
+        let mut input = std::fs::File::open(std::env::var("RADIO_QUIET_FPGA_RIQ").unwrap()).unwrap();
+        let app = App::new(8);
+        let target = 452685547u64;
+        let cfg = json!({"input_center_hz":460016998,"input_rate_hz":25600000,
+            "input_bandwidth_hz":20000000,"activity_calibrated":false,
+            "streams":[{"stream_id":366,"center_hz":452666998,"target_hz":target,
+                "rate_hz":100000,"protocol":"DMR","iq_forwarded":true}]});
+        let mut bytes = Vec::new();
+        Frame {kind:4,flags:0,generation:1,stream_id:0,sequence:0,first_sample:0,
+            rate:100000,center_hz:460016998,format:3,valid_bits:0,
+            payload:serde_json::to_vec(&cfg).unwrap()}.write(&mut bytes).unwrap();
+        // Pace a channel at 2x real time to exercise the actual worker, meter,
+        // call recorder, and false-sync path without queue overflow.
+        let mut frames = vec![(0., bytes)];
+        let mut start = None;
+        let mut sequence = 0;
+        while let Ok(mut f) = Frame::read(&mut input) {
+            if f.kind != 1 || f.stream_id != 366 { continue; }
+            let first = *start.get_or_insert(f.first_sample);
+            // A stale partial packet at pin time predates the continuous capture.
+            if f.first_sample > first + 10_000_000 && sequence == 2 {
+                start = Some(f.first_sample);
+                frames.truncate(1);
+                sequence = 0;
+            }
+            let at = (f.first_sample - start.unwrap()) as f64 / 100000.;
+            let mut b = Vec::new();
+            Frame {kind:3,flags:0,generation:1,stream_id:366,sequence,first_sample:f.first_sample,
+                rate:100000,center_hz:452666998,format:3,valid_bits:0,
+                payload:br#"{"rf_active":true,"level_db":-48.0}"#.to_vec()}.write(&mut b).unwrap();
+            sequence += 1;
+            f.generation = 1;
+            f.sequence = sequence;
+            f.write(&mut b).unwrap();
+            frames.push((at, b));
+            sequence += 1;
+        }
+        assert!(sequence > 10000, "regression needs a minute of quiet IQ");
+        let input = PacedFrames {frames:frames.into_iter(),
+            current:std::io::Cursor::new(vec![]),started:Instant::now(),speed:2.,hold:None};
+        ingest(input, app.clone()).unwrap();
+        let e = app.engine();
+        assert_eq!(e.drops, 12, "only the capture's twelve device discontinuities are expected");
+        assert!(e.channels.values().all(|c| c["audio_seconds"].as_f64().unwrap_or(0.) == 0.),
+            "noise was promoted to recorded speech");
+    }
+
 
     /// 100 ksps coarse slice centered at `center` carrying a strong FM carrier at
     /// `carrier` over noise, as interleaved i16 IQ.
