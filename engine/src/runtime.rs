@@ -220,6 +220,8 @@ impl App {
 struct Work {
     frame: Arc<Frame>,
     received: Instant,
+    /// RF decision for this IQ packet, before decoder queueing.
+    target_rf_active: Option<bool>,
 }
 struct Worker {
     sender: mpsc::SyncSender<Work>,
@@ -303,13 +305,14 @@ fn channel_id(frequency: f64, protocol: &str, slot: u8) -> String {
 }
 /// `rf_active` is what a listener sees for this exact frequency. On a slice shared by
 /// several logical targets it needs both the slice (physical) activity and the
-/// target's own in-band activity; on a one-target stream it is the slice activity.
-fn refresh_rf(c: &mut Value) {
+/// target's own in-band activity. Uncalibrated sources use held target activity
+/// for every stream; calibrated one-target streams retain slice activity.
+fn refresh_rf(c: &mut Value, uncalibrated: bool) {
     let slice = c["slice_rf_active"] == true;
     let shared = c["slice_targets"].as_u64().unwrap_or(1) > 1;
     let own = c["target_rf_active"] == true;
-    c["rf_active"] = json!(slice && (!shared || own));
-    c["level_db"] = if shared && c["target_level_db"].is_number() {
+    c["rf_active"] = json!(if uncalibrated { own } else { slice && (!shared || own) });
+    c["level_db"] = if (shared || uncalibrated) && c["target_level_db"].is_number() {
         c["target_level_db"].clone()
     } else {
         c["slice_level_db"].clone()
@@ -400,6 +403,7 @@ fn merge_host_targets(app: &App, base: &HashMap<u64, Value>, configs: &mut HashM
         next.retain(|key, _| *key == logical || app.display_frequency(*key as f64).0 != display);
         next.insert(logical, cfg);
     }
+    let uncalibrated = e.source["activity_calibrated"] == false;
     let mut counts = HashMap::<u32, usize>::new();
     for cfg in next.values() {
         *counts.entry(cfg["stream_id"].as_u64().unwrap_or(0) as u32).or_default() += 1;
@@ -407,7 +411,7 @@ fn merge_host_targets(app: &App, base: &HashMap<u64, Value>, configs: &mut HashM
     for c in e.channels.values_mut() {
         if let Some(count) = counts.get(&(c["stream_id"].as_u64().unwrap_or(0) as u32)) {
             c["slice_targets"] = json!(count);
-            refresh_rf(c);
+            refresh_rf(c, uncalibrated);
         }
     }
     let changed = *configs != next;
@@ -595,19 +599,8 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                 {
                     continue;
                 }
-                let physical = e
-                    .channels
-                    .values()
-                    .find(|c| {
-                        c["stream_id"] == stream
-                            && if e.source["activity_calibrated"] == false {
-                                c["logical_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
-                                    && c["target_rf_active"] == true
-                            } else {
-                                c["slice_rf_active"] == true
-                            }
-                    })
-                    .cloned();
+                let rf_active = work.target_rf_active.unwrap_or_else(|| e.channels.values()
+                    .any(|c| c["stream_id"] == stream && c["slice_rf_active"] == true));
                 let sibling = e
                     .channels
                     .values()
@@ -621,8 +614,8 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                 // voice: a "voice" confirmation there is an artifact, never a call.
                 let control_channel = sibling.as_ref().is_some_and(|c| c["label_kind"] == "control")
                     || app.labels.lookup(app.calibration.true_hz(frequency)).is_some_and(|l| l["kind"] == "control");
-                let speech = speech && physical.is_some() && !control_channel;
-                if confirmed && !audio.is_empty() && physical.is_some() && !control_channel {
+                let speech = speech && rf_active && !control_channel;
+                if confirmed && !audio.is_empty() && rf_active && !control_channel {
                     if protocol != "FM" {
                         protocol_evidence = Some(protocol);
                     }
@@ -919,7 +912,7 @@ fn schedule(
 /// One spectrum meter per physical stream: per-target activity for shared slices, and the
 /// carrier estimate for every target. Targets already measured keep their state across
 /// CONFIG refreshes.
-fn rebuild_meters(configs: &HashMap<u64, Value>, meters: &mut HashMap<u32, SliceMeter>) {
+fn rebuild_meters(configs: &HashMap<u64, Value>, meters: &mut HashMap<u32, SliceMeter>, uncalibrated: bool) {
     let mut grouped: HashMap<u32, Vec<TargetBand>> = HashMap::new();
     for (&logical, cfg) in configs {
         let stream = cfg["stream_id"].as_u64().unwrap_or(0) as u32;
@@ -930,6 +923,7 @@ fn rebuild_meters(configs: &HashMap<u64, Value>, meters: &mut HashMap<u32, Slice
             .and_then(|m| m.targets.iter().find(|t| t.logical == logical))
         {
             target.active = old.active;
+            target.hang_remaining = old.hang_remaining;
             target.carrier_hz = old.carrier_hz;
             target.carrier_updates = old.carrier_updates;
         }
@@ -938,7 +932,9 @@ fn rebuild_meters(configs: &HashMap<u64, Value>, meters: &mut HashMap<u32, Slice
     meters.clear();
     for (stream, mut targets) in grouped {
         targets.sort_by_key(|t| t.logical);
-        meters.insert(stream, SliceMeter::new(targets));
+        let mut meter = SliceMeter::new(targets);
+        if uncalibrated { meter.hang_seconds = 0.3; }
+        meters.insert(stream, meter);
     }
 }
 /// Record a measured carrier on a channel entry. `carrier_hz` always holds the calibrated
@@ -1167,7 +1163,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                             channel["stream_id"] = json!(stream);
                             channel["in_range"] = json!(true);
                             channel["slice_targets"] = json!(target_count);
-                            refresh_rf(channel);
+                            refresh_rf(channel, config["activity_calibrated"] == false);
                         }
                     }
                     configs.insert(frequency.round() as u64, cfg);
@@ -1181,7 +1177,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
             merge_host_targets(&app, &base_configs, &mut configs);
             schedule(&app, &configs, &mut workers, &iq_seen)?;
             sync_pins(&mut app.engine());
-            rebuild_meters(&configs, &mut meters);
+            rebuild_meters(&configs, &mut meters, app.engine().source["activity_calibrated"] == false);
             transport_sequences.insert(frame.stream_id, frame.sequence);
             config_generation = Some(frame.generation);
             continue;
@@ -1211,7 +1207,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
         }
         if scheduled.elapsed() > Duration::from_millis(100) {
             if merge_host_targets(&app, &base_configs, &mut configs) {
-                rebuild_meters(&configs, &mut meters);
+                rebuild_meters(&configs, &mut meters, app.engine().source["activity_calibrated"] == false);
             }
             schedule(&app, &configs, &mut workers, &iq_seen)?;
             activity_channels.clear();
@@ -1245,6 +1241,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     let full_scale = 2f64.powi(frame.valid_bits.clamp(1, 16) as i32 - 1);
                     if meter.measure(&iq, frame.rate as f64, full_scale) {
                         let mut e = app.engine();
+                        let uncalibrated = e.source["activity_calibrated"] == false;
                         for target in &meter.targets {
                             for c in e.channels.values_mut().filter(|c| {
                                 c["stream_id"] == frame.stream_id
@@ -1254,7 +1251,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                                 let before = c["rf_active"].clone();
                                 c["target_rf_active"] = json!(target.active);
                                 c["target_level_db"] = json!(target.level_dbfs);
-                                refresh_rf(c);
+                                refresh_rf(c, uncalibrated);
                                 let moved = match target.carrier_hz {
                                     Some(offset) if target.carrier_updates >= 3 => {
                                         apply_carrier(&app, c, frame.center_hz as f64 + offset, offset)
@@ -1274,13 +1271,17 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                 let shared = Arc::new(frame);
                 let mut missed = false;
                 let queue_limit = input_queue_limit(&shared);
-                for worker in workers.values().filter(|w| w.stream == shared.stream_id) {
+                let uncalibrated = app.engine().source["activity_calibrated"] == false;
+                for (&logical, worker) in workers.iter().filter(|(_, w)| w.stream == shared.stream_id) {
+                    let target_rf_active = uncalibrated.then(|| meters.get(&shared.stream_id)
+                        .is_some_and(|m| m.targets.iter().any(|t| t.logical == logical && t.active)));
                     let queued = worker.queued.fetch_add(1, Ordering::Relaxed);
                     if queued >= queue_limit || worker
                         .sender
                         .try_send(Work {
                             frame: shared.clone(),
                             received: Instant::now(),
+                            target_rf_active,
                         })
                         .is_err()
                     {
@@ -1329,14 +1330,15 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     .as_f64()
                     .filter(|v| v.is_finite())
                     .map_or(Value::Null, |v| json!(v));
-                if !slice_active && let Some(meter) = meters.get_mut(&frame.stream_id) {
+                let uncalibrated = app.engine().source["activity_calibrated"] == false;
+                if !uncalibrated && !slice_active && let Some(meter) = meters.get_mut(&frame.stream_id) {
                     // A closed gate ends the burst; the next one opens from the open threshold.
                     for target in &mut meter.targets {
                         target.active = false;
                     }
                 }
                 let mut e = app.engine();
-                // FPGA activity can report all 512 bins every 100 ms. Index once
+                // FPGA activity refreshes all bins in staggered batches. Index once
                 // per scheduler tick or catalog growth instead of scanning the
                 // entire catalog under the decoder lock for every metadata frame.
                 if activity_channels.is_empty() || indexed_channels != e.channels.len() {
@@ -1353,13 +1355,13 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     let before = c["rf_active"].clone();
                     c["slice_rf_active"] = json!(slice_active);
                     c["slice_level_db"] = slice_level.clone();
-                    if !slice_active {
+                    if !uncalibrated && !slice_active {
                         // No IQ is forwarded while the gate is closed, so the target
                         // measurement is stale; the next live packet re-measures it.
                         c["target_rf_active"] = json!(false);
                         c["target_level_db"] = Value::Null;
                     }
-                    refresh_rf(c);
+                    refresh_rf(c, uncalibrated);
                     if c["rf_active"] == true {
                         c["last_rf"] = json!(now());
                     } else {
@@ -1782,7 +1784,11 @@ mod tests {
         fm_session_in(App::new(8), voice, pin_unknown, true)
     }
     fn fm_session_in(app: App, voice: bool, pin_unknown: bool, rf_active: bool) -> (Option<Value>, Vec<String>, bool, Vec<Value>) {
+        fm_session_with_activity(app, voice, pin_unknown, rf_active, false)
+    }
+    fn fm_session_with_activity(app: App, voice: bool, pin_unknown: bool, rf_active: bool, uncalibrated: bool) -> (Option<Value>, Vec<String>, bool, Vec<Value>) {
         let config = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,
+            "activity_calibrated":!uncalibrated,
             "streams":[{"stream_id":1,"center_hz":454000000u64,"target_hz":454000000u64,"rate_hz":25000,"protocol":"Unknown","iq_forwarded":true}],"psd":{"unit":"dBFS"}});
         let mut bytes = Vec::new();
         let mut cfg = frame(4, 1, 0, 0, 0, config.to_string().into_bytes());
@@ -1853,6 +1859,18 @@ mod tests {
         runner.join().unwrap().unwrap();
         (fm, audio_ids, digital, calls)
     }
+    #[test]
+    fn uncalibrated_activity_uses_the_exact_target_for_display_and_audio() {
+        let (fm, ids, _, calls) = fm_session_with_activity(App::new(8), true, true, false, true);
+        assert!(fm.is_some_and(|c| c["audio_seconds"].as_f64().unwrap_or(0.) > 1.));
+        assert!(!ids.is_empty() && !calls.is_empty(), "real target was muted by the raw inactive flag");
+        let (fm, ids, digital, calls) = fm_session_with_activity(App::new(8), false, true, true, true);
+        assert!(fm.is_none() && ids.is_empty() && !digital && calls.is_empty(), "raw activity unmuted noise");
+        let mut decoy = json!({"slice_rf_active":true,"target_rf_active":false,"slice_targets":1});
+        refresh_rf(&mut decoy, true);
+        assert_eq!(decoy["rf_active"], false, "activity on the same coarse slice is not target activity");
+    }
+
     #[test]
     fn quiet_narrowband_fm_becomes_an_analog_voice_channel_and_noise_does_not() {
         let (fm, _, digital, calls) = fm_session(true, false);
@@ -2204,9 +2222,18 @@ mod tests {
     #[ignore = "set RADIO_DMR_IQ25K to the 25 ksps CI16 fixture"]
     fn actual_dmr_iq_fixture_decodes_through_channel_filter() {
         let path = std::env::var("RADIO_DMR_IQ25K").expect("RADIO_DMR_IQ25K");
+        dmr_iq_fixture(&path, 25000, false);
+    }
+    #[test]
+    #[ignore = "set RADIO_DMR_IQ100K to the private centered 100 ksps DMR fixture"]
+    fn actual_uncalibrated_dmr_iq_fixture_keeps_speech() {
+        let path = std::env::var("RADIO_DMR_IQ100K").expect("RADIO_DMR_IQ100K");
+        dmr_iq_fixture(&path, 100000, true);
+    }
+    fn dmr_iq_fixture(path: &str, rate: u32, uncalibrated: bool) {
         let data = std::fs::read(path).unwrap();
         let mut frames = vec![];
-        let config = json!({"input_center_hz":454216998,"input_rate_hz":6000000,"input_bandwidth_hz":6000000,"hardware_counter":false,"streams":[{"stream_id":1,"center_hz":454029223,"target_hz":454029223,"rate_hz":25000,"protocol":"Unknown","slot":1}]});
+        let config = json!({"input_center_hz":454216998,"input_rate_hz":6000000,"input_bandwidth_hz":6000000,"hardware_counter":false,"activity_calibrated":!uncalibrated,"streams":[{"stream_id":1,"center_hz":454029223,"target_hz":454029223,"rate_hz":rate,"protocol":"Unknown","slot":1}]});
         let mut b = vec![];
         frame(4, 1, 0, 0, 0, config.to_string().into_bytes()).write(&mut b).unwrap();
         frames.push((0., b));
@@ -2215,8 +2242,9 @@ mod tests {
             let mut b = vec![];
             let mut f = frame(1, 1, 1, sequence, sample, chunk.to_vec());
             f.format = 1;
+            f.rate = rate;
             f.write(&mut b).unwrap();
-            let at = sample as f64 / 25000.;
+            let at = sample as f64 / rate as f64;
             frames.push((at, b));
             let mut a = vec![];
             frame(3, 1, 1, sequence + 1, sample, br#"{"rf_active":true,"level_db":-30.0}"#.to_vec())
@@ -2262,58 +2290,54 @@ mod tests {
         assert!(best.0 > 0.5, "no decoded DMR audio: {best:?}");
     }
 
-    /// Private off-air regression: DSDcc falsely finds voice sync in this quiet
-    /// 100 ksps slice. The uncalibrated coarse activity flag must not unmute it.
+    /// A private quiet capture that triggers DSDcc's old false-positive gate.
     #[test]
     #[ignore = "set RADIO_QUIET_FPGA_RIQ to the private 452.675 MHz noise capture"]
     fn quiet_fpga_slice_does_not_record_false_dmr_calls() {
-        let mut input = std::fs::File::open(std::env::var("RADIO_QUIET_FPGA_RIQ").unwrap()).unwrap();
-        let app = App::new(8);
-        let target = 452685547u64;
-        let cfg = json!({"input_center_hz":460016998,"input_rate_hz":25600000,
-            "input_bandwidth_hz":20000000,"activity_calibrated":false,
-            "streams":[{"stream_id":366,"center_hz":452666998,"target_hz":target,
-                "rate_hz":100000,"protocol":"DMR","iq_forwarded":true}]});
-        let mut bytes = Vec::new();
-        Frame {kind:4,flags:0,generation:1,stream_id:0,sequence:0,first_sample:0,
-            rate:100000,center_hz:460016998,format:3,valid_bits:0,
-            payload:serde_json::to_vec(&cfg).unwrap()}.write(&mut bytes).unwrap();
-        // Pace a channel at 2x real time to exercise the actual worker, meter,
-        // call recorder, and false-sync path without queue overflow.
-        let mut frames = vec![(0., bytes)];
-        let mut start = None;
-        let mut sequence = 0;
-        while let Ok(mut f) = Frame::read(&mut input) {
-            if f.kind != 1 || f.stream_id != 366 { continue; }
-            let first = *start.get_or_insert(f.first_sample);
-            // A stale partial packet at pin time predates the continuous capture.
-            if f.first_sample > first + 10_000_000 && sequence == 2 {
-                start = Some(f.first_sample);
-                frames.truncate(1);
-                sequence = 0;
+        let path = std::env::var("RADIO_QUIET_FPGA_RIQ").expect("RADIO_QUIET_FPGA_RIQ");
+        let mut input = std::fs::File::open(path).unwrap();
+        let mut iq = Vec::new();
+        while let Ok(f) = Frame::read(&mut input) {
+            if f.kind == 1 && f.stream_id == 366 {
+                // Pinning flushed a stale partial packet before continuous IQ began.
+                if iq.is_empty() && f.payload.len() != 4000 { continue; }
+                iq.push(f);
             }
-            let at = (f.first_sample - start.unwrap()) as f64 / 100000.;
-            let mut b = Vec::new();
-            Frame {kind:3,flags:0,generation:1,stream_id:366,sequence,first_sample:f.first_sample,
-                rate:100000,center_hz:452666998,format:3,valid_bits:0,
-                payload:br#"{"rf_active":true,"level_db":-48.0}"#.to_vec()}.write(&mut b).unwrap();
-            sequence += 1;
-            f.generation = 1;
-            f.sequence = sequence;
-            f.write(&mut b).unwrap();
-            frames.push((at, b));
-            sequence += 1;
         }
-        assert!(sequence > 10000, "regression needs a minute of quiet IQ");
-        let input = PacedFrames {frames:frames.into_iter(),
-            current:std::io::Cursor::new(vec![]),started:Instant::now(),speed:2.,hold:None};
-        ingest(input, app.clone()).unwrap();
-        let e = app.engine();
-        assert_eq!(e.drops, 12, "only the capture's twelve device discontinuities are expected");
-        assert!(e.channels.values().all(|c| c["audio_seconds"].as_f64().unwrap_or(0.) == 0.),
-            "noise was promoted to recorded speech");
+        assert!(iq.len() > 5000, "regression needs a minute of quiet IQ");
+        let first = iq[0].first_sample;
+        for uncalibrated in [false, true] {
+            let cfg = json!({"input_center_hz":460016998,"input_rate_hz":25600000,
+                "input_bandwidth_hz":20000000,"activity_calibrated":!uncalibrated,
+                "streams":[{"stream_id":366,"center_hz":452666998,"target_hz":452685547,
+                    "rate_hz":100000,"protocol":"DMR","iq_forwarded":true}]});
+            let mut bytes = Vec::new();
+            frame(4, 1, 0, 0, 0, serde_json::to_vec(&cfg).unwrap()).write(&mut bytes).unwrap();
+            let mut frames = vec![(0., bytes)];
+            for (i, f) in iq.iter().enumerate() {
+                let mut bytes = Vec::new();
+                frame(3, 1, 366, (i * 2) as u64, f.first_sample,
+                    br#"{"rf_active":true,"level_db":-48.0}"#.to_vec()).write(&mut bytes).unwrap();
+                let mut copy = frame(1, 1, 366, (i * 2 + 1) as u64, f.first_sample, f.payload.clone());
+                copy.rate = f.rate;
+                copy.center_hz = f.center_hz;
+                copy.flags = f.flags;
+                copy.write(&mut bytes).unwrap();
+                frames.push(((f.first_sample - first) as f64 / f.rate as f64, bytes));
+            }
+            let app = App::new(8);
+            let input = PacedFrames {frames:frames.into_iter(), current:std::io::Cursor::new(vec![]),
+                started:Instant::now(),speed:2.,hold:None};
+            ingest(input, app.clone()).unwrap();
+            let seconds: f64 = app.engine().channels.values()
+                .filter_map(|c| c["audio_seconds"].as_f64()).sum();
+            if uncalibrated {
+                assert_eq!(seconds, 0., "quiet IQ became recorded speech");
+            } else {
+                assert!(seconds > 0.5, "capture must reproduce the old false-audio gate: {seconds}");
+            }
+        }
     }
-
 
     /// 100 ksps coarse slice centered at `center` carrying a strong FM carrier at
     /// `carrier` over noise, as interleaved i16 IQ.
@@ -2459,7 +2483,7 @@ mod fpga_tests {
         assert!(merge_host_targets(&app, &base, &mut configs));
         assert_eq!(configs, base);
         let mut meters = HashMap::new();
-        rebuild_meters(&configs, &mut meters);
+        rebuild_meters(&configs, &mut meters, app.engine().source["activity_calibrated"] == false);
         assert_eq!(meters[&1].targets.iter().map(|t| t.logical).collect::<Vec<_>>(), vec![coarse]);
     }
 
