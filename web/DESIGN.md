@@ -20,6 +20,10 @@ protocol discovery, Explore is the default workspace on every screen size.
 - Save IQ sits below the waterfall with sampled bandwidth, buffered seconds
   and rolling/paused state. The actual physical slice is shaded on the plot.
   FM audio export is a separate action when audio has been buffered.
+- Messages opens a resizable pane below the waterfall for decoded text and
+  structured protocol events. It starts collapsed and identifies the selected
+  frequency. Until an engine message feed exists, it shows an unconnected empty
+  state, without sample messages or activity counts.
 - Signal details separate RF activity, protocol decoding and speech. Catalog
   names are annotations, not decoder evidence. Non-audio results must be typed
   messages or events, with text only when an actual text payload was decoded.
