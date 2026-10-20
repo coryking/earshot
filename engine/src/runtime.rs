@@ -71,6 +71,16 @@ pub(crate) struct Engine {
     pub(crate) channels: HashMap<String, Value>,
     worker_epochs: HashMap<u64, u64>,
     pub(crate) selected_at: Instant,
+    /// Browser sockets listening to a specific channel (`/api/listen?channel_id=`), by
+    /// connection id. Together with `selected` they decide which channels get decoders,
+    /// pins and audio.
+    pub(crate) listeners: HashMap<u64, String>,
+    /// Producer streams this host currently asks the source to forward.
+    pub(crate) pinned_streams: HashSet<u32>,
+    /// The listening set last changed here; a fresh listener may hold budget while its IQ
+    /// is still on the way.
+    pub(crate) listen_changed_at: Instant,
+    pub(crate) audio_sequence: u64,
     pub(crate) control: Option<mpsc::SyncSender<Value>>,
     pub(crate) selected: Option<String>,
     pub(crate) generation: u64,
@@ -106,6 +116,10 @@ impl App {
                 worker_epochs: HashMap::new(),
                 selected: None,
                 selected_at: Instant::now(),
+                listeners: HashMap::new(),
+                pinned_streams: HashSet::new(),
+                listen_changed_at: Instant::now(),
+                audio_sequence: 0,
                 control: None,
                 generation: 0,
                 decoder_generation: 0,
@@ -136,6 +150,7 @@ impl App {
         e.decoder_generation += 1;
         e.control = None;
         e.worker_epochs.clear();
+        e.pinned_streams.clear();
         e.source["active_decoders"] = json!(0);
         e.source["queue_depth"] = json!(0);
         e.listener["voice_active"] = json!(false);
@@ -163,12 +178,55 @@ struct Worker {
     queued: Arc<AtomicUsize>,
     cost: Arc<AtomicUsize>,
 }
-fn selected_logical(e: &Engine) -> Option<u64> {
-    e.selected
-        .as_deref()
-        .and_then(|id| e.channels.get(id))
-        .and_then(|c| c["logical_hz"].as_f64())
+/// Channel ids someone wants to hear: the legacy `/api/monitor` selection plus every
+/// per-socket listener.
+pub(crate) fn wanted_ids(e: &Engine) -> HashSet<String> {
+    e.selected.iter().cloned().chain(e.listeners.values().cloned()).collect()
+}
+fn wanted_logicals(e: &Engine) -> HashSet<u64> {
+    wanted_ids(e)
+        .iter()
+        .filter_map(|id| e.channels.get(id))
+        .filter_map(|c| c["logical_hz"].as_f64())
         .map(|v| v.round() as u64)
+        .collect()
+}
+static PIN_REQUEST: AtomicU64 = AtomicU64::new(1);
+/// Make the source forward IQ for exactly the streams the wanted channels live on:
+/// pin new ones, unpin streams nobody wants any more. Idempotent.
+pub(crate) fn sync_pins(e: &mut Engine) {
+    let wanted: HashSet<u32> = wanted_ids(e)
+        .iter()
+        .filter_map(|id| e.channels.get(id))
+        .filter_map(|c| c["stream_id"].as_u64())
+        .filter(|s| *s > 0)
+        .map(|s| s as u32)
+        .collect();
+    let Some(control) = e.control.clone() else { return };
+    let mut changed = false;
+    for &stream in wanted.difference(&e.pinned_streams.clone()) {
+        let id = PIN_REQUEST.fetch_add(1, Ordering::Relaxed);
+        if control
+            .try_send(json!({"action":"pin","request_id":format!("pin-{id}"),"stream_id":stream,"pinned":true}))
+            .is_ok()
+        {
+            e.pinned_streams.insert(stream);
+            changed = true;
+        }
+    }
+    for &stream in e.pinned_streams.clone().difference(&wanted) {
+        let id = PIN_REQUEST.fetch_add(1, Ordering::Relaxed);
+        if control
+            .try_send(json!({"action":"pin","request_id":format!("unpin-{id}"),"stream_id":stream,"pinned":false}))
+            .is_ok()
+        {
+            e.pinned_streams.remove(&stream);
+            changed = true;
+        }
+    }
+    if changed {
+        e.listen_changed_at = Instant::now();
+    }
 }
 fn channel_id(frequency: f64, protocol: &str, slot: u8) -> String {
     format!("{frequency:.0}-{protocol}-{slot}")
@@ -250,7 +308,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
     {
         let mut e = app.inner.lock().unwrap();
         e.worker_epochs.insert(logical, epoch);
-        if selected_logical(&e) == Some(logical) {
+        if wanted_logicals(&e).contains(&logical) {
             e.decoder_generation += 1;
         }
     }
@@ -334,7 +392,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                     } else {
                         e.drops += 1;
                     }
-                    if selected_logical(&e) == Some(logical) {
+                    if wanted_logicals(&e).contains(&logical) {
                         e.decoder_generation += 1;
                     }
                 }
@@ -491,35 +549,36 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                         );
                     }
                 }
-                // A pin on an unconfirmed ("Unknown") channel follows whatever is heard at that
-                // frequency; audio is then labeled with the pinned id so the listener matches.
-                let pinned_unknown = e.selected.as_deref().is_some_and(|s| {
-                    e.channels.get(s).is_some_and(|c| {
-                        c["protocol"] == "Unknown"
-                            && c["logical_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
+                // Everyone listening to this channel, including pins on an unconfirmed
+                // ("Unknown") channel at this frequency: those follow whatever is heard
+                // here, and the audio is labeled with the pinned id so the listener matches.
+                let targets: Vec<String> = wanted_ids(&e)
+                    .into_iter()
+                    .filter(|w| {
+                        *w == id
+                            || e.channels.get(w).is_some_and(|c| {
+                                c["protocol"] == "Unknown"
+                                    && c["logical_hz"].as_f64().map(|v| v.round() as u64)
+                                        == Some(logical)
+                            })
                     })
-                });
-                let selected = e.selected.as_deref() == Some(&id) || pinned_unknown;
-                let out_id = if pinned_unknown {
-                    e.selected.clone().unwrap_or_else(|| id.clone())
-                } else {
-                    id.clone()
-                };
+                    .collect();
                 let source_generation = e.generation;
                 let decoder_generation = e.decoder_generation;
-                if selected {
+                if e.selected.as_ref().is_some_and(|s| targets.contains(s)) {
                     e.listener["voice_active"] = json!(speech);
                 }
-                if speech
-                    && selected
-                    && work.received >= e.selected_at
-                    && (!saw_preroll || live_samples >= 17280)
-                {
-                    let sequence = e.listener["sequence"].as_u64().unwrap_or(0) + 1;
+                if speech && !targets.is_empty() && (!saw_preroll || live_samples >= 17280) {
                     let ingress = work.received.elapsed().as_secs_f64() * 1000.;
                     let bytes: Vec<u8> = audio.iter().flat_map(|v| v.to_le_bytes()).collect();
-                    e.listener = json!({"status":"listening","state":"listening","channel_id":out_id,"voice_active":true,"generation":decoder_generation,"source_generation":source_generation,"sequence":sequence,"audio_chunks":sequence,"last_audio_at":now(),"ingress_age_ms":ingress,"ingress_age_basis":"host ingress receipt; device speech alignment unknown","dropped_blocks":e.drops,"input_dropped":e.drops,"queue_blocks":0,"error":null});
-                    let _=app.audio.send(Audio{meta:json!({"type":"audio","encoding":"s16le","channels":1,"rate_hz":8000,"samples":audio.len(),"channel_id":out_id,"generation":decoder_generation,"source_generation":source_generation,"sequence":sequence,"ingress_age_ms":ingress,"ingress_age_basis":"host ingress receipt; device speech alignment unknown"}),pcm:bytes,created:Instant::now()});
+                    for out_id in targets {
+                        e.audio_sequence += 1;
+                        let sequence = e.audio_sequence;
+                        if e.selected.as_deref() == Some(out_id.as_str()) {
+                            e.listener = json!({"status":"listening","state":"listening","channel_id":out_id,"voice_active":true,"generation":decoder_generation,"source_generation":source_generation,"sequence":sequence,"audio_chunks":sequence,"last_audio_at":now(),"ingress_age_ms":ingress,"ingress_age_basis":"host ingress receipt; device speech alignment unknown","dropped_blocks":e.drops,"input_dropped":e.drops,"queue_blocks":0,"error":null});
+                        }
+                        let _=app.audio.send(Audio{meta:json!({"type":"audio","encoding":"s16le","channels":1,"rate_hz":8000,"samples":audio.len(),"channel_id":out_id,"generation":decoder_generation,"source_generation":source_generation,"sequence":sequence,"ingress_age_ms":ingress,"ingress_age_basis":"host ingress receipt; device speech alignment unknown"}),pcm:bytes.clone(),created:Instant::now()});
+                    }
                 }
             }
             if let Some(protocol) = protocol_evidence {
@@ -578,8 +637,8 @@ fn schedule(
     iq_seen: &HashMap<u32, Instant>,
 ) -> Result<()> {
     let e = app.inner.lock().unwrap();
-    let selected = selected_logical(&e);
-    let pin_pending = e.selected_at.elapsed() < PIN_GRACE;
+    let wanted = wanted_logicals(&e);
+    let pin_pending = e.listen_changed_at.elapsed() < PIN_GRACE;
     let mut effective = configs.clone();
     for (&stream, cfg) in &mut effective {
         if cfg["protocol"].as_str().unwrap_or("Unknown") == "Unknown"
@@ -614,7 +673,7 @@ fn schedule(
                 .is_some_and(|t| t.elapsed() < IQ_RECENT);
             Candidate {
                 logical,
-                selected: Some(logical) == selected,
+                selected: wanted.contains(&logical),
                 pin_pending,
                 forwarded: declared || received,
                 rf_active: e.channels.values().any(|c| {
@@ -813,6 +872,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
             e.active = config["receiver_state"].as_str() != Some("stopped");
             e.error = None;
             if changed {
+                e.pinned_streams.clear(); // a new source generation starts with nothing pinned
                 e.decoder_generation += 1;
                 e.psd.clear();
                 if e.started.is_none() {
@@ -922,6 +982,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                 json!({"type":"source_config","generation":frame.generation,"source":config}),
             );
             schedule(&app, &configs, &mut workers, &iq_seen)?;
+            sync_pins(&mut app.inner.lock().unwrap());
             rebuild_meters(&configs, &mut meters);
             transport_sequences.insert(frame.stream_id, frame.sequence);
             config_generation = Some(frame.generation);
@@ -1512,6 +1573,98 @@ mod tests {
         assert!(channel["carrier_offset_hz"].as_f64().unwrap().abs() < 100.);
         // The id was fixed from the calibrated nominal frequency, not the reading.
         assert_eq!(channel["id"], "454206250-Unknown-1");
+    }
+    #[test]
+    fn listeners_pin_their_streams_once_and_unpin_when_the_last_one_leaves() {
+        let app = App::new(3);
+        let (tx, rx) = mpsc::sync_channel::<Value>(16);
+        let mut e = app.inner.lock().unwrap();
+        e.control = Some(tx);
+        for (id, stream) in [("a", 5u64), ("b", 5), ("c", 6)] {
+            e.channels.insert(id.into(), json!({"id":id,"stream_id":stream,"logical_hz":454000000.0 + stream as f64}));
+        }
+        e.listeners.insert(1, "a".into());
+        e.listeners.insert(2, "b".into()); // same physical stream as "a"
+        sync_pins(&mut e);
+        let sent: Vec<Value> = rx.try_iter().collect();
+        assert_eq!(sent.len(), 1, "one pin for one stream: {sent:?}");
+        assert_eq!((sent[0]["stream_id"].as_u64(), sent[0]["pinned"].as_bool()), (Some(5), Some(true)));
+        e.listeners.insert(3, "c".into());
+        sync_pins(&mut e);
+        let sent: Vec<Value> = rx.try_iter().collect();
+        assert_eq!((sent.len(), sent[0]["stream_id"].as_u64()), (1, Some(6)));
+        e.listeners.remove(&1);
+        sync_pins(&mut e);
+        assert!(rx.try_iter().next().is_none(), "stream 5 still has a listener");
+        e.listeners.remove(&2);
+        sync_pins(&mut e);
+        let sent: Vec<Value> = rx.try_iter().collect();
+        assert_eq!((sent[0]["stream_id"].as_u64(), sent[0]["pinned"].as_bool()), (Some(5), Some(false)));
+        sync_pins(&mut e);
+        assert!(rx.try_iter().next().is_none(), "idempotent");
+    }
+    #[test]
+    fn two_browsers_listening_to_different_channels_each_get_their_own_audio() {
+        let config = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,
+            "streams":[
+              {"stream_id":1,"center_hz":454000000u64,"target_hz":454000000u64,"rate_hz":25000,"protocol":"Unknown","iq_forwarded":true},
+              {"stream_id":2,"center_hz":454012500u64,"target_hz":454012500u64,"rate_hz":25000,"protocol":"Unknown","iq_forwarded":true}],
+            "psd":{"unit":"dBFS"}});
+        let mut first = vec![];
+        frame(4, 1, 0, 0, 0, config.to_string().into_bytes()).write(&mut first).unwrap();
+        let mut frames = vec![(0., first)];
+        let (mut sequence, mut sample) = (1u64, 0u64);
+        for _ in 0..30 {
+            let mut bytes = Vec::new();
+            for stream in [1u32, 2] {
+                let center = 454_000_000 + (stream as i64 - 1) * 12_500;
+                let mut act = frame(3, 1, stream, sequence, sample, br#"{"rf_active":true,"level_db":-20.0}"#.to_vec());
+                act.center_hz = center;
+                act.write(&mut bytes).unwrap();
+                let mut iq = frame(1, 1, stream, sequence + 1, sample, fm_stream_payload(true, sample + stream as u64));
+                iq.center_hz = center;
+                iq.write(&mut bytes).unwrap();
+            }
+            frames.push((sample as f64 / 25000., bytes));
+            sequence += 2;
+            sample += 2500;
+        }
+        let (release, rx) = mpsc::channel();
+        let app = App::new(8);
+        let mut audio_rx = app.audio.subscribe();
+        let runner = {
+            let app = app.clone();
+            let input = PacedFrames { frames: frames.into_iter(), current: std::io::Cursor::new(vec![]), started: Instant::now(), speed: 5., hold: Some(rx) };
+            thread::spawn(move || ingest(input, app))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !app.inner.lock().unwrap().channels.contains_key("454012500-Unknown-1") {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        }
+        {
+            let mut e = app.inner.lock().unwrap();
+            e.listeners.insert(1, "454000000-Unknown-1".into());
+            e.listeners.insert(2, "454012500-Unknown-1".into());
+        }
+        thread::sleep(Duration::from_millis(1200));
+        let mut ids = std::collections::HashSet::new();
+        loop {
+            match audio_rx.try_recv() {
+                Ok(a) => {
+                    ids.insert(a.meta["channel_id"].as_str().unwrap().to_string());
+                }
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+        release.send(()).unwrap();
+        runner.join().unwrap().unwrap();
+        assert_eq!(
+            ids,
+            ["454000000-Unknown-1", "454012500-Unknown-1"].iter().map(|s| s.to_string()).collect(),
+            "each listener hears its own channel"
+        );
     }
     #[test]
     fn rf_active_metadata_only_streams_do_not_starve_forwarded_stream() {

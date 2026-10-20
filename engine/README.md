@@ -131,6 +131,54 @@ producer, measured RF/USB continuity, and a live browser check. The ARM prototyp
 has a lower input-rate ceiling than the planned FPGA producer; the host reports
 that advertised capacity rather than treating every requested width as applied.
 
+## API for the household UI
+
+All JSON unless noted. A 404 from a route means the feature is not built yet; none of these
+require a source to be connected.
+
+* `GET /api/status`, `GET /api/spectrum` (JSON rows), `GET /api/listener`, `POST /api/monitor`,
+  `POST /api/stop`, `POST /api/source`, `WS /api/events` as before. Channel entries now carry
+  `frequency_hz` (calibrated true frequency, snapped to the 6.25 kHz raster when a measured
+  carrier lands on it; `frequency_snapped`), `reading_hz`/`logical_hz` (what the radio reported),
+  `carrier_hz`/`carrier_offset_hz`/`carrier_snapped` (the measured carrier), `label`,
+  `label_kind`, `label_detail` (plain name from RadioReference/FCC data, see
+  `offload/build_labels.py`), and `user` (operator edits) with `display_name`
+  (user name, else label). Status also reports `calibration_ppm`, `labels_loaded`, `listeners`.
+* **Per-browser listening.** `WS /api/listen?channel_id=ID` listens to that channel on its own;
+  several browsers can listen to different channels at once. The engine pins the producer
+  streams for every listened channel (and unpins when the last listener leaves), admits
+  decoders for them first, and sends audio labeled with the requested id. Without
+  `channel_id` the socket follows the shared `/api/monitor` selection. Pinning an `Unknown`
+  channel works; audio follows whatever is heard on it (digital or analog `FM`).
+* **Recent calls.** `GET /api/calls?before=&limit=&source=` returns
+  `{calls, next_before, in_progress}`, newest first (`before` is an exclusive id cursor).
+  Each call: `id`, `source` (channel id), `protocol`, `slot`, `frequency_hz`, `label`,
+  `started_at` (unix s), `duration_s`, `level_db`, `audio_url`
+  (`/api/calls/{id}/audio.wav`, 8 kHz mono signed16 WAV), `talker` and `transcript` (null),
+  `encrypted` (false). Every speaking channel is recorded, not only the one being heard. A
+  call ends 2 s after its audio stops; bursts under 0.8 s are discarded. `WS /api/events` sends
+  `{type:"call", phase:"start"|"end", call}`.
+* **Catalog.** `GET /api/catalog` lists located, decoded or edited channels
+  (`kind: "channel"`; `channel_kind` is voice/data/unidentified). `PUT /api/catalog/{id}`
+  accepts `name` (80 chars, or null), `notes` (500), `followed`, `muted`; edits persist.
+* **Activity.** `GET /api/activity?window_s=86400&bucket_s=300` returns talk-seconds per
+  bucket for the block (`total`), per source (`sources`), RF-active seconds (`rf_total`) and
+  a `baseline` (mean of the same bucket one or two weeks earlier, else one to six days
+  earlier; null without history). Buckets are 5 minutes, kept 14 days.
+* **Compact spectrum.** `GET /api/spectrum.bin?after=N&limit=` returns RSP1: a 32-byte
+  little-endian header (`RSP1`, version u16 = 1, bins u16, rows u16, flags u16 = 0, low_db f32,
+  high_db f32, center_hz f64, span_hz f32), then per row `seq u64, time f64, bins x u8` with
+  `level = round(255 * (clamp(db, low, high) - low) / (high - low))`. `low`/`high` are fitted
+  to the data like `/api/spectrum`. `X-Sequence` carries the newest sequence number.
+* **Block.** `GET /api/blocks` reports the parked block and whether the producer can retune
+  (`can_change`; the ARM producer cannot). `POST /api/blocks/current` goes through the same
+  acknowledged path as `/api/source` and returns 501 for producers without it.
+
+Persistence: with `--state-dir DIR` the call index and WAVs (`calls/`), activity buckets,
+the catalog and operator edits survive restarts and shutdown flushes on SIGTERM. Without it
+everything stays in memory. `--call-memory-mb` bounds the call audio held in RAM (older audio
+is served from disk). Retention: 500 calls, 7 days.
+
 ## Live acceptance and status
 
 `offload/live_acceptance.py` runs the bounded Pluto to engine to browser-path acceptance

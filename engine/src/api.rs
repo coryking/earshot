@@ -1,4 +1,4 @@
-use crate::runtime::App;
+use crate::runtime::{App, sync_pins};
 use axum::{
     Json, Router,
     extract::{
@@ -49,7 +49,7 @@ fn status_json(app: &App) -> Value {
     } else {
         0.
     };
-    json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":number(&e.source["input_center_hz"]),"rate_hz":number(&e.source["input_rate_hz"]),"bandwidth_hz":number(&e.source["input_bandwidth_hz"]),"generation":e.generation,"channels":e.channels.values().map(|c| with_user(c, &e.store.user)).collect::<Vec<_>>(),"received_seconds":position,"source_position_s":position,"decode_latency_s":latency,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":number(&e.source["queue_depth"]),"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"calibration_ppm":app.calibration.ppm,"labels_loaded":app.labels.len(),"source":e.source})
+    json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":number(&e.source["input_center_hz"]),"rate_hz":number(&e.source["input_rate_hz"]),"bandwidth_hz":number(&e.source["input_bandwidth_hz"]),"generation":e.generation,"channels":e.channels.values().map(|c| with_user(c, &e.store.user)).collect::<Vec<_>>(),"received_seconds":position,"source_position_s":position,"decode_latency_s":latency,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":number(&e.source["queue_depth"]),"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"calibration_ppm":app.calibration.ppm,"labels_loaded":app.labels.len(),"listeners":e.listeners.len(),"source":e.source})
 }
 async fn status(State(app): State<App>) -> Json<Value> {
     Json(status_json(&app))
@@ -71,23 +71,10 @@ async fn monitor(
     if e.selected == m.channel_id {
         return Ok(Json(e.listener.clone()));
     }
-    let stream_for = |id: Option<&str>| {
-        id.and_then(|id| e.channels.get(id))
-            .and_then(|c| c["stream_id"].as_u64())
-    };
-    let previous = stream_for(e.selected.as_deref());
-    let next = stream_for(m.channel_id.as_deref());
-    if let Some(control) = &e.control {
-        if let Some(stream) = previous.filter(|s| Some(*s) != next) {
-            let _=control.try_send(json!({"action":"pin","request_id":format!("unpin-{}",e.decoder_generation+1),"stream_id":stream,"pinned":false}));
-        }
-        if let Some(stream) = next {
-            let _=control.try_send(json!({"action":"pin","request_id":format!("pin-{}",e.decoder_generation+1),"stream_id":stream,"pinned":true}));
-        }
-    }
     e.selected = m.channel_id;
     e.selected_at = Instant::now();
     e.decoder_generation += 1;
+    sync_pins(&mut e);
     e.listener["channel_id"] = json!(e.selected);
     e.listener["voice_active"] = json!(false);
     e.listener["status"] = json!(if e.selected.is_some() {
@@ -142,21 +129,55 @@ async fn spectrum(State(app): State<App>, Query(q): Query<After>) -> Json<Value>
         json!({"sequence":rows.last().map(|x|x.0).unwrap_or(e.psd_seq),"generation":e.generation,"rows":rows.iter().map(|x|&x.2).collect::<Vec<_>>(),"times":rows.iter().map(|x|x.1).collect::<Vec<_>>(),"center_hz":e.source["input_center_hz"],"span_hz":e.source["input_bandwidth_hz"],"low_db":low_db,"high_db":high_db,"unit":unit,"source":if e.active{"live"}else{"disconnected"}}),
     )
 }
-async fn ws(State(app): State<App>, ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.max_message_size(8192)
-        .on_upgrade(move |s| socket(s, app))
+#[derive(Deserialize)]
+struct Listen {
+    channel_id: Option<String>,
 }
-async fn socket(mut socket: WebSocket, app: App) {
+/// Audio for one browser. With `?channel_id=` this socket listens to that channel on its
+/// own (several browsers can listen to different channels at once); without it the socket
+/// follows the shared `/api/monitor` selection.
+async fn ws(State(app): State<App>, Query(q): Query<Listen>, ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.max_message_size(8192)
+        .on_upgrade(move |s| socket(s, app, q.channel_id))
+}
+static NEXT_CONNECTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// Registers a per-socket listener and removes it (and its pin) when the socket ends.
+struct ListenerGuard {
+    app: App,
+    connection: u64,
+}
+impl Drop for ListenerGuard {
+    fn drop(&mut self) {
+        let mut e = self.app.inner.lock().unwrap();
+        e.listeners.remove(&self.connection);
+        sync_pins(&mut e);
+    }
+}
+async fn socket(mut socket: WebSocket, app: App, requested: Option<String>) {
+    let joined = Instant::now();
+    let connection = NEXT_CONNECTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _guard = requested.as_ref().map(|id| {
+        let mut e = app.inner.lock().unwrap();
+        e.listeners.insert(connection, id.clone());
+        sync_pins(&mut e);
+        ListenerGuard { app: app.clone(), connection }
+    });
     let mut rx = app.audio.subscribe();
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     loop {
         tokio::select! {
-                audio=rx.recv()=>{match audio{Ok(a)=>{let current={let e=app.inner.lock().unwrap();e.active&&a.meta["generation"]==e.decoder_generation&&a.meta["source_generation"]==e.generation&&a.meta["channel_id"].as_str()==e.selected.as_deref()};if current {
+                audio=rx.recv()=>{match audio{Ok(a)=>{
+                    let current={let e=app.inner.lock().unwrap();
+                        let want=requested.clone().or_else(||e.selected.clone());
+                        // Never play audio made before this listener (or the shared selection) began.
+                        let since=if requested.is_some(){joined}else{e.selected_at};
+                        e.active&&a.meta["source_generation"]==e.generation&&a.meta["channel_id"].as_str()==want.as_deref()&&a.created>=since};
+                    if current {
         if a.created.elapsed()>Duration::from_millis(250){if socket.send(Message::Text(json!({"type":"gap","reason":"audio_expired"}).to_string().into())).await.is_err(){break;}continue;}
         let sent=tokio::time::timeout(Duration::from_millis(250),async{socket.send(Message::Text(a.meta.to_string().into())).await?;socket.send(Message::Binary(a.pcm.into())).await}).await;
         if !matches!(sent,Ok(Ok(()))){break;}
         }},Err(broadcast::error::RecvError::Lagged(n))=>{rx=app.audio.subscribe();if socket.send(Message::Text(json!({"type":"gap","dropped_chunks":n}).to_string().into())).await.is_err(){break;}},Err(_)=>break}},
-                _=tick.tick()=>{let value={let e=app.inner.lock().unwrap();json!({"type":"heartbeat","generation":e.decoder_generation,"source_generation":e.generation,"channel_id":e.selected})};if socket.send(Message::Text(value.to_string().into())).await.is_err(){break;}},
+                _=tick.tick()=>{let value={let e=app.inner.lock().unwrap();json!({"type":"heartbeat","generation":e.decoder_generation,"source_generation":e.generation,"channel_id":requested.clone().or_else(||e.selected.clone()),"listeners":e.listeners.len()})};if socket.send(Message::Text(value.to_string().into())).await.is_err(){break;}},
                 msg=socket.recv()=>{if matches!(msg,None|Some(Err(_))|Some(Ok(Message::Close(_)))){break;}}
                }
     }
