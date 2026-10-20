@@ -34,8 +34,10 @@ ad_dcfilter (RTL, the 4-deep DSP loop): Q[n+4] = Q[n] + c * (x[n] - floor(Q[n] >
 y[n] = x[n] - floor(Q[n] >> 17), i.e. four interleaved one-pole filters, one per n mod 4.
 With valid every clock the per-sample coefficient is c / 2**19 (corner ~ c * Fs / (2 pi 2**19));
 the driver's formula assumes c / 2**14. The module as shipped also ties the P register's clock
-enable low (.CEP(1'd0)), which freezes the accumulator at zero: verify-rtl shows the shipped
-module passes data through unchanged even when enabled, and the IIR only works with CEP = 1.
+enable low (.CEP(1'd0)), which freezes the accumulator at zero: in xsim (dc_step.sv scratch bench, not in the
+repo) the shipped module passed a 1000-LSB step through unchanged with the filter enabled, and the IIR
+only decays with CEP = 1. verify-rtl (tb_adc_corr_vec.sv) re-checks this and the Python models bit-for-bit,
+but was NOT run for the committed results (box resource pause); treat dcfilter_float as unverified against RTL.
 """
 
 from __future__ import annotations
