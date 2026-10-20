@@ -1,0 +1,8 @@
+node_modules
+dist
+*.log
+*.local
+*.tsbuildinfo
+test-results/
+playwright-report/
+*.tmp.mjs
