@@ -147,3 +147,47 @@
     transform: scaleY(0.8);
   }
 }
+
+/*
+ * "Talking now" cards unfold in and fold away instead of popping, so the list
+ * below glides rather than jumps. Reduced motion: they simply appear and go.
+ */
+@keyframes calm-unfold {
+  from {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+  to {
+    grid-template-rows: 1fr;
+    opacity: 1;
+  }
+}
+@keyframes calm-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.calm-presence {
+  grid-template-rows: 1fr;
+  animation: calm-unfold 320ms ease-out;
+  transition:
+    grid-template-rows 320ms ease-in,
+    opacity 240ms ease-in;
+}
+.calm-presence.calm-leaving {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+.calm-fade {
+  animation: calm-fade 400ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .calm-presence,
+  .calm-fade {
+    animation: none;
+    transition: none;
+  }
+}

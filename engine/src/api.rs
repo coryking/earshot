@@ -456,7 +456,9 @@ fn catalog_entry(id: &str, group: &[&Value], user: Option<&Value>) -> Value {
         .map(|l| l.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
     let description = text("description").unwrap_or_else(|| match (label_name.as_deref(), licensees.len()) {
-        (Some(_), 0) => detail.and_then(|d| d["kind"].as_str()).map(|k| format!("{k} channel (RadioReference)")).unwrap_or_default(),
+        // A label with no licensee says only what kind of channel it is; traffic_kind carries
+        // that, so the description stays empty rather than repeating it with source attribution.
+        (Some(_), 0) => String::new(),
         (Some(_), n) => format!("Licensed to {}{}", licensees.iter().take(2).copied().collect::<Vec<_>>().join(", "), if n > 2 { " and others" } else { "" }),
         _ => String::new(),
     });
@@ -642,6 +644,20 @@ async fn spectrum_bin(State(app): State<App>, Query(q): Query<SpectrumBin>) -> i
 }
 /// Listening areas. The parked block is the only one this producer can offer; choosing a
 /// different one needs a producer that retunes live (the ARM prototype cannot).
+/// A plain name for the parked block: what it is and where it sits, e.g. "Business radio,
+/// 453.8–454.6 MHz". Narrow blocks get one decimal so the two ends differ.
+pub(crate) fn block_name(center_hz: f64, span_hz: f64) -> String {
+    if center_hz <= 0. || span_hz <= 0. {
+        return "Business radio".into();
+    }
+    let (low, high) = ((center_hz - span_hz / 2.) / 1e6, (center_hz + span_hz / 2.) / 1e6);
+    let what = if (450. ..=470.).contains(&low) && (450. ..=470.).contains(&high) { "Business radio" } else { "Radio" };
+    if span_hz < 2e6 {
+        format!("{what}, {:.1}–{:.1} MHz", low, high)
+    } else {
+        format!("{what}, {:.0}–{:.0} MHz", low, high)
+    }
+}
 async fn blocks(State(app): State<App>) -> Json<Value> {
     let e = app.engine();
     let center = app.calibration.true_hz(e.source["input_center_hz"].as_f64().unwrap_or(0.));
@@ -650,7 +666,7 @@ async fn blocks(State(app): State<App>) -> Json<Value> {
         "current_id": "current",
         "blocks": [{
             "id": "current",
-            "name": "Current listening area",
+            "name": block_name(center, span),
             "description": "The block of spectrum the radio is parked on now.",
             "center_hz": center,
             "span_hz": span,
@@ -915,6 +931,10 @@ mod tests {
         let Json(b) = blocks(State(app.clone())).await;
         assert_eq!(b["current_id"], "current");
         assert_eq!(b["blocks"][0]["center_hz"], 454216998.0);
+        assert_eq!(b["blocks"][0]["name"], "Business radio, 453.8–454.6 MHz");
+        assert_eq!(block_name(454_206_415., 800_000.), "Business radio, 453.8–454.6 MHz");
+        assert_eq!(block_name(453_000_000., 6_000_000.), "Business radio, 450–456 MHz");
+        assert_eq!(block_name(0., 0.), "Business radio");
         assert_eq!(b["can_change"], false);
         assert!(set_block(State(app.clone()), Json(json!({"id":"current"}))).await.is_ok());
         assert_eq!(set_block(State(app), Json(json!({"id":"elsewhere"}))).await.unwrap_err().0, StatusCode::UNPROCESSABLE_ENTITY);

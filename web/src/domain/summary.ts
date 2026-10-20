@@ -1,4 +1,4 @@
-import type { Activity, Health, Source } from "./model";
+import type { Activity, Health } from "./model";
 
 const words = ["No", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten"];
 
@@ -47,39 +47,18 @@ export function busyness(activity: Activity | null, now: number): { level: Busyn
   return { level: "normal", ratio };
 }
 
-/** The sentence at the top of Now: what's happening, then how that compares with normal. */
-export function headline(
-  sources: Source[],
-  activity: Activity | null,
-  health: Health,
-  now: number,
-): { lead: string; context: string } {
-  if (health.state === "offline") return { lead: "The radio isn't connected.", context: health.detail };
-  if (health.state === "paused") return { lead: "The radio is paused.", context: health.detail };
-
-  const talking = sources.filter((s) => s.talking);
-  let lead: string;
-  if (talking.length === 1) lead = `${talking[0].name} is talking.`;
-  else if (talking.length > 1) lead = `${countWord(talking.length)} channels talking.`;
-  else {
-    const last = sources
-      .filter((s) => s.lastHeardAt !== null)
-      .sort((a, b) => (b.lastHeardAt ?? 0) - (a.lastHeardAt ?? 0))[0];
-    lead = last?.lastHeardAt
-      ? `Quiet right now. ${last.name} was last, ${relativeTime(last.lastHeardAt, now)}.`
-      : "Quiet so far.";
-  }
-
+/**
+ * The one small status line under the area name: how busy it is compared with
+ * normal for this weekday and time. Null until there's a baseline to compare
+ * with, or while the radio isn't listening; the screen then shows nothing.
+ */
+export function busyLine(activity: Activity | null, health: Health, now: number): string | null {
+  if (health.state !== "listening") return null;
+  const level = busyness(activity, now).level;
+  if (level === "unknown") return null;
   const day = new Date(now).toLocaleDateString("en-US", { weekday: "long" });
   const when = `for a ${day} ${partOfDay(new Date(now))}`;
-  const level = busyness(activity, now).level;
-  const context =
-    level === "busier"
-      ? `Busier than usual ${when}.`
-      : level === "quieter"
-        ? `Quieter than usual ${when}.`
-        : level === "normal"
-          ? `About normal ${when}.`
-          : "Still learning what normal sounds like here.";
-  return { lead, context };
+  if (level === "busier") return `Busier than usual ${when}`;
+  if (level === "quieter") return `Quieter than usual ${when}`;
+  return `About normal ${when}`;
 }

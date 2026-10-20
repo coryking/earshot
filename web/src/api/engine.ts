@@ -36,6 +36,10 @@ export const engineChannelSchema = z.looseObject({
   available: bool,
   /** Absent until the scheduler has run once. */
   decoder_admitted: bool,
+  /** Plain name from the engine's channel labels (RadioReference/FCC data); null when unlabeled. */
+  display_name: str,
+  /** "voice" | "control" | …: what the labels say the channel carries. Control channels never talk. */
+  label_kind: str,
 });
 export type EngineChannel = z.infer<typeof engineChannelSchema>;
 
