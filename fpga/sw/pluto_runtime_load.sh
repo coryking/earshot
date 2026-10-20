@@ -73,8 +73,8 @@ b platform dma-axi-dmac 7c400000.dma
 b platform dma-axi-dmac 7c420000.dma
 b spi ad9361 spi0.0
 sleep 1
-b platform cf_axi_adc 79020000.cf-ad9361-lpc
 b platform cf_axi_dds 79024000.cf-ad9361-dds-core-lpc
+b platform cf_axi_adc 79020000.cf-ad9361-lpc
 sleep 0.5
 for d in /sys/bus/iio/devices/iio:device*; do cat $d/name; done
 '
@@ -93,6 +93,8 @@ case "${1:-}" in
     # an ssh drop cannot strand it half-way. If programming does not reach
     # 'operating', it reboots (stock PL) instead of rebinding drivers onto dead fabric.
     p "cat > /tmp/pl_swap.sh <<'EOS'
+killall -TERM pluto-fpga-source chanctl 2>/dev/null; sleep 1
+killall -KILL pluto-fpga-source chanctl 2>/dev/null
 [ -f /tmp/pl_is_chan ] && /tmp/chanctl stop
 rm -f /tmp/pl_is_chan
 $UNBIND

@@ -116,8 +116,14 @@ static int restore_controls(void) {
 static volatile uint32_t *chan, *dma;
 static volatile uint8_t *ring;
 static uint32_t mask[16];
+// The channelizer PL is present after a runtime load (marker file) or when booted
+// from the channelizer firmware (its device tree carries the DMA carve-out).
+static int chan_pl_present(void) {
+    return !access("/tmp/pl_is_chan", F_OK) ||
+           !access("/proc/device-tree/reserved-memory/chan_dma@4000000", F_OK);
+}
 static int map_hw(void) {
-    if (access("/tmp/pl_is_chan", F_OK)) { fprintf(stderr, "channelizer PL not loaded\n"); return -1; }
+    if (!chan_pl_present()) { fprintf(stderr, "channelizer PL not loaded\n"); return -1; }
     FILE *f = fopen("/proc/iomem", "r"); char line[256]; int ram_hit = 0;
     while (f && fgets(line, sizeof line, f)) {
         unsigned long lo, hi;
@@ -133,12 +139,28 @@ static int map_hw(void) {
     ring = mmap(NULL, NBLOCKS * BLOCK_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, fd, DMA_BASE);
     if (chan == MAP_FAILED || dma == MAP_FAILED || ring == MAP_FAILED) { perror("mmap"); return -1; }
     if (chan[3] != 0x4348414E) { fprintf(stderr, "channelizer magic missing\n"); return -1; }
+    if ((chan[7] & 0xFFFF) != BINS || (chan[0] >> 16) != 1) {
+        fprintf(stderr, "unexpected channelizer build (CONFIG 0x%08x VERSION 0x%08x)\n", chan[7], chan[0]);
+        return -1;
+    }
     return 0;
 }
 static void write_mask(void) { for (int w = 0; w < 16; ++w) chan[0x40 + w] = mask[w]; }
+// Stop: RUN = 0 first (the packetizer finishes its record), then keep the DMA
+// running until the selected-stream FIFO is empty, so nothing stale is left for the
+// next session, then disable the DMA.
 static void hw_stop(void) {
-    if (dma) dma[0x100] = 0;
     if (chan) { chan[4] = 0; chan[0x22] = 0; }
+    if (dma && chan) {
+        for (int i = 0; i < 100 && !((chan[5] & 0xC) == 0x4); ++i) {   // sel FIFO empty, not busy
+            if (dma[0x102] == 0 && (dma[0x100] & 1)) {
+                dma[0x104] = DMA_BASE + (NBLOCKS - 1) * BLOCK_BYTES;   // scratch block
+                dma[0x106] = BLOCK_BYTES - 1; dma[0x107] = 0; dma[0x102] = 1;
+            }
+            usleep(1000);
+        }
+    }
+    if (dma) dma[0x100] = 0;
 }
 
 // transfer bookkeeping: at most two outstanding (IDs are 2 bits)
@@ -344,6 +366,7 @@ int main(int argc, char **argv) {
     if (rate_hz % BINS || port < 1 || port > 65535) return 2;
     signal(SIGINT, on_signal); signal(SIGTERM, on_signal); signal(SIGPIPE, SIG_IGN);
     if (find_phy() || map_hw()) return 1;
+    dma[0x100] = 0; dma[0x100] = 1; dma[0x103] = 0;   // drain anything a previous session left
     hw_stop();
 
     int ls = socket(AF_INET, SOCK_STREAM, 0), one = 1;
