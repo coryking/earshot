@@ -229,6 +229,11 @@ for the new channel fields (`slice_*`, `target_*`); device acceptance of a multi
 
 ## Frontend needs
 
+Engine status: items 1 to 7 are implemented as described in "API for the household UI" above
+(per-browser listening, analog FM, calls, catalog, activity, RSP1, blocks with a single
+current block); item 8 (push alerts) is not. `WS /api/spectrum` (push) is not built; the
+HTTP `GET /api/spectrum.bin` is.
+
 The web UI (`web/`, design in `web/DESIGN.md`) is typed against the endpoints
 above and treats producer-derived fields as nullable; `0` for `center_hz`,
 `rate_hz` or `bandwidth_hz` is read as "not known yet", so either is fine. It
