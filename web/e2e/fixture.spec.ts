@@ -2,14 +2,14 @@ import { expect, test } from "@playwright/test";
 import { expectAccessible } from "./helpers";
 
 // Real engine + the DMR slot 2 fixture through engine/examples/fixture_ingress.
-// 454.029 MHz carries the starter name from the RF research (Columbia Tower).
+// Match the fixture's measured frequency and slot; catalog names can change.
 test.skip(!process.env.FIXTURE_ENGINE, "needs the engine binary and the private DMR fixture");
 
 test("real engine: the fixture's DMR call shows up and plays", async ({ page }, info) => {
   await page.goto("/");
   const row = page
     .getByRole("list", { name: "Recent activity" })
-    .getByRole("button", { name: /^Tune to Columbia Tower shared radio/ });
+    .getByRole("button", { name: /^Tune to .*454\.029\d* MHz.*DMR.*Slot 2/ });
   await expect(row).toBeVisible({ timeout: 30_000 });
   await row.click();
   const player = page.getByRole("region", { name: "Player" });
@@ -31,8 +31,8 @@ test("real engine: the fixture's DMR call shows up and plays", async ({ page }, 
 test("real engine: the call shows up in catch up", async ({ page }) => {
   await page.goto("/");
   await expect(
-    page.getByRole("list", { name: "Recent activity" }).getByRole("button", { name: /^Tune to Columbia Tower shared radio/ }),
+    page.getByRole("list", { name: "Recent activity" }).getByRole("button", { name: /^Tune to .*454\.029\d* MHz.*DMR.*Slot 2/ }),
   ).toBeVisible({ timeout: 30_000 });
   await page.goto("/#/catch-up");
-  await expect(page.getByText("Columbia Tower shared radio").first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/454\.029\d* MHz/).first()).toBeVisible({ timeout: 30_000 });
 });
