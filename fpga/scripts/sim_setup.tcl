@@ -10,7 +10,7 @@ set_property target_language Verilog [current_project]
 set_property simulator_language Mixed [current_project]
 add_files [glob $fpga/rtl/*.v] $adi/library/common/up_axi.v
 add_files [glob $fpga/rtl/mem/*.mem]
-add_files -fileset sim_1 [glob $fpga/tb/*.sv]
+add_files -fileset sim_1 $fpga/tb/tb_chan.sv
 
 create_ip -name xfft -vendor xilinx.com -library ip -module_name chan_xfft
 set_property -dict [chan_xfft_config] [get_ips chan_xfft]

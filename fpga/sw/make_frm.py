@@ -7,14 +7,17 @@ runs) and changes exactly two things:
 
 * images/fpga@1: the new bitstream (.bit with header, as in the stock image), with
   its md5 hash node recomputed so U-Boot's FIT verification passes;
-* every flat_dt image: a `reserved-memory` node that takes 64 MiB at 64 MiB out of
+* every flat_dt image: a `reserved-memory` node that takes 160 MiB at 64 MiB out of
   Linux's hands (no-map) as the channelizer's DMA area, so user space can map it
   uncached through /dev/mem without colliding with kernel allocations.
   Placement (from this unit's U-Boot environment and boot log): the FIT is staged at
   0x02080000 (about 11 MiB), the kernel runs from 0x8000, initrd_high = fdt_high =
   0x20000000 puts the initrd and FDT just below 512 MiB, and the kernel's 256 MiB
-  CMA pool needs a contiguous span (today 0x0E400000-0x1E400000). 0x04000000-
-  0x08000000 avoids all of them and leaves ~380 MiB contiguous above it for CMA.
+  CMA pool sits at 0x0E400000-0x1E400000. 0x04000000-0x0E000000 avoids all of them,
+  so the CMA pool keeps its place; Linux keeps 352 MiB, CMA included.
+  Use: 8 MiB for selected-stream buffers, 152 MiB for the history ring = 77,520
+  full records (2056 B) = 0.78 s of every bin, or ~1 s of the 400 bins inside
+  +/-10 MHz (design.md section 7). chanctl reads the size from the device tree.
 
 Kernel and ramdisk are carried over byte-for-byte (their hashes are checked). The
 output is the FIT plus the md5 trailer ADI's update path expects. Nothing is
@@ -31,8 +34,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import fit  # noqa: E402
 
-DMA_BASE = 0x04000000   # see module docstring for why 64 MiB at 64 MiB
-DMA_SIZE = 0x04000000
+DMA_BASE = 0x04000000   # see module docstring for the placement
+DMA_SIZE = 0x0A000000   # 160 MiB, ends 4 MiB below the CMA pool
 
 
 def add_reserved_memory(dtb: bytes) -> bytes:

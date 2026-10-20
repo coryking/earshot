@@ -18,6 +18,8 @@ module tb_chan;
   int frames, samples, out_shift, ready_pct, adc_period_ps, adc_gap_pct;
   int expect_drops, expect_overflow, sat_samples, clipped, reset_at_frame;
   int on_q8, off_q8, hang, bias_q8, snapshot_at, auto_fwd, det_reset_at, adc_losses;
+  int hist_first, hist_pairs, n_events;
+  localparam int EVT_DEPTH = 16;   // small, so scenarios with many events overflow it
   bit h_lost = 0, s_lost = 0;    // a loss flag was seen: later records are not model-exact
   int errors = 0;
 
@@ -27,6 +29,7 @@ module tb_chan;
   logic [31:0] exp_active [0:15];
   logic [15:0] exp_psd [0:511];
   logic [31:0] mask_words [0:15];
+  logic [41:0] exp_events [];
   bit          mask_bit [0:511];
   int          mask_count;
 
@@ -63,7 +66,8 @@ module tb_chan;
 
   chan_top #(
     .ID(7), .COEF_FILE_PREFIX("pfb_coef_p"), .LOG_TABLE("chan_log2_table.mem"),
-    .BLOCK_LOG2(2), .SUB_BLOCKS(2), .PSD_LOG2(3)   // = golden.SIM_DET
+    .BLOCK_LOG2(2), .SUB_BLOCKS(2), .PSD_LOG2(3),  // = golden.SIM_DET
+    .FIR2X(1), .EVT_DEPTH(EVT_DEPTH)
   ) dut (
     .s_axi_aclk (clk), .s_axi_aresetn (aresetn),
     .s_axi_awvalid (awvalid), .s_axi_awaddr (awaddr), .s_axi_awprot (3'd0),
@@ -180,7 +184,11 @@ module tb_chan;
     sel_ready  <= ($urandom_range(99) < ready_pct);
   end
 
-  // History records: header + 256 words, checked against exp_bins[] by frame number.
+  // History records: header + hist_pairs words of the window that starts at bin
+  // hist_first (wrapping), checked against exp_bins[] by frame number.
+  function automatic int wbin(input int i);
+    return (hist_first + i) % 512;
+  endfunction
   int     h_word = -1;          // -1: expecting header
   longint h_frame, h_last = -1;
   int     h_records = 0, h_disc_flags = 0, h_ovf_flags = 0, h_sat_flags = 0, h_gaps = 0;
@@ -205,17 +213,18 @@ module tb_chan;
       end
     end else begin
       if (!h_lost && h_frame < frames &&
-          hist_data !== {exp_bins[h_frame*512 + 2*h_word + 1], exp_bins[h_frame*512 + 2*h_word]}) begin
+          hist_data !== {exp_bins[h_frame*512 + wbin(2*h_word + 1)], exp_bins[h_frame*512 + wbin(2*h_word)]}) begin
         if (errors < 20) $error("hist f%0d p%0d: got %h expected %h", h_frame, h_word, hist_data,
-               {exp_bins[h_frame*512 + 2*h_word + 1], exp_bins[h_frame*512 + 2*h_word]});
+               {exp_bins[h_frame*512 + wbin(2*h_word + 1)], exp_bins[h_frame*512 + wbin(2*h_word)]});
         errors++;
       end
       h_word++;
-      if (h_word == 256) begin h_word = -1; h_records++; end
+      if (h_word == hist_pairs) begin h_word = -1; h_records++; end
     end
   end
 
-  // Selected-bin records: header, then exactly the masked bins in increasing order.
+  // Selected-bin records: header, then exactly the masked bins in walk order (from
+  // hist_first, wrapping).
   longint s_frame = -1, s_last = -1;
   int     s_prev_bin, s_count, s_records = 0, s_gaps = 0;
   task automatic sel_close();
@@ -235,7 +244,8 @@ module tb_chan;
       s_last = s_frame; s_prev_bin = -1; s_count = 0; s_records++;
     end else if (sel_data[63:60] == 4'h5) begin
       automatic int bn = sel_data[56:48];
-      if (s_frame < 0 || bn <= s_prev_bin || (!mask_bit[bn] && !auto_fwd) ||
+      automatic int pos = (bn - hist_first + 512) % 512;
+      if (s_frame < 0 || pos <= s_prev_bin || (!mask_bit[bn] && !auto_fwd) ||
           sel_data[47:32] != s_frame[15:0]) begin
         $error("sel: bad sample word %h in frame %0d", sel_data, s_frame); errors++;
       end else if (!s_lost && s_frame < frames && sel_data[31:0] !== exp_bins[s_frame*512 + bn]) begin
@@ -243,7 +253,7 @@ module tb_chan;
                                 sel_data[31:0], exp_bins[s_frame*512 + bn]);
         errors++;
       end
-      s_prev_bin = bn; s_count++;
+      s_prev_bin = pos; s_count++;
     end else begin
       $error("sel: unknown word %h", sel_data); errors++;
     end
@@ -280,6 +290,54 @@ module tb_chan;
     axi_write(reg_addr(10), bias_q8);
     axi_write(reg_addr(11), hang);
     for (int w = 0; w < 16; w++) axi_write(reg_addr('h40 + w), mask_words[w]);
+    axi_write(reg_addr('h28), (hist_pairs << 16) | hist_first);
+  endtask
+
+  task automatic wait_locked();
+    logic [31:0] v;
+    int n = 0;
+    do begin
+      repeat (100) @(posedge clk);
+      axi_read(reg_addr(5), v);
+      n++;
+    end while (!v[4] && n < 1000);
+    if (!v[4]) begin $error("FIR clock never locked"); errors++; end
+  endtask
+
+  // Activity events. Exact against the model where the detector saw an unbroken
+  // run (no resets, no lost samples); otherwise only well-formedness. The FIFO keeps
+  // the oldest EVT_DEPTH events and counts the rest as lost.
+  task automatic check_events();
+    logic [31:0] st, head, fr;
+    int kept, exact, bad = 0;
+    longint last_fr = -1;
+    exact = (reset_at_frame < 0 && det_reset_at < 0 && !expect_overflow && snapshot_at < 0);
+    axi_read(reg_addr('h24), st);
+    kept = st[15:0];
+    $display("  events: %0d queued, %0d lost, %0d expected", kept, st[31:16], n_events);
+    if (exact) begin
+      if (kept != (n_events < EVT_DEPTH ? n_events : EVT_DEPTH) ||
+          st[31:16] != (n_events > EVT_DEPTH ? n_events - EVT_DEPTH : 0)) begin
+        $error("event count/lost mismatch"); errors++;
+      end
+    end
+    for (int i = 0; i < kept; i++) begin
+      axi_read(reg_addr('h25), head);
+      axi_read(reg_addr('h26), fr);
+      if (!head[31]) begin $error("event %0d: head not valid", i); bad++; end
+      if (exact && {head[30], head[8:0], fr} !== exp_events[i]) begin
+        if (bad < 5) $error("event %0d: got open=%0d bin=%0d frame=%0d, expected %h", i,
+                            head[30], head[8:0], fr, exp_events[i]);
+        bad++;
+      end
+      if (fr < last_fr) begin $error("event %0d: frame %0d before %0d", i, fr, last_fr); bad++; end
+      last_fr = fr;
+      axi_write(reg_addr('h27), 1);
+    end
+    check_reg('h25, "evt_head@drained", 0);
+    axi_read(reg_addr('h24), st);
+    if (st[15:0] != 0) begin $error("events left after draining: %0d", st[15:0]); bad++; end
+    errors += bad;
   endtask
 
   task automatic wait_frames(input int target);
@@ -377,6 +435,12 @@ module tb_chan;
     void'($value$plusargs("DET_RESET_AT_FRAME=%d", det_reset_at));
     void'($value$plusargs("ADC_LOSSES=%d", adc_losses));
     void'($value$plusargs("SNAPSHOT_AT_FRAME=%d", snapshot_at));
+    hist_first = 0; hist_pairs = 256; n_events = 0;
+    void'($value$plusargs("HIST_FIRST=%d", hist_first));
+    void'($value$plusargs("HIST_PAIRS=%d", hist_pairs));
+    void'($value$plusargs("EVENTS=%d", n_events));
+    exp_events = new[n_events > 0 ? n_events : 1];
+    $readmemh({vec, "/events.hex"}, exp_events);
     stim = new[samples];
     exp_bins = new[frames * 512];
     $readmemh({vec, "/stim.hex"}, stim);
@@ -398,6 +462,7 @@ module tb_chan;
     repeat (5) @(posedge adc_clk);
     adc_rst <= 0;
     repeat (50) @(posedge clk);
+    wait_locked();
 
     axi_read(reg_addr(0), v);  $display("  VERSION 0x%h", v);
     axi_read(reg_addr(3), v);
@@ -415,6 +480,9 @@ module tb_chan;
     check_reg(1, "id", 7);
     check_reg(7, "config", {8'd2, 8'd8, 16'd512});
     check_reg('hC, "det_config", {8'd3, 8'd4, 16'd2});
+    check_reg('h28, "hist_window@reset", {7'd0, 9'd256, 7'd0, 9'd0});
+    check_reg('h24, "evt_status@reset", 0);
+    check_reg('h25, "evt_head@reset", 0);
     configure();
     check_reg(6, "out_shift", out_shift);
     check_reg(8, "det_on", on_q8);
@@ -448,6 +516,9 @@ module tb_chan;
       @(posedge adc_clk) adc_rst <= 0;
       repeat (50) @(posedge clk);
       check_reg(4, "control@sysreset", 0);
+      check_reg('h28, "hist_window@sysreset", {7'd0, 9'd256, 7'd0, 9'd0});
+      check_reg('h24, "evt_status@sysreset", 0);
+      wait_locked();
       check_reg(6, "out_shift@sysreset", 7);
       check_reg('h12, "frames@sysreset", 0);
       if (h_word != -1) begin $error("hist record truncated by the stop (word %0d)", h_word); errors++; end
@@ -498,6 +569,14 @@ module tb_chan;
       if (s_records != v) begin $error("sel records %0d != SEL_FRAMES %0d", s_records, v); errors++; end
     end
     if (h_records == 0 || s_records == 0) begin $error("no records"); errors++; end
+    check_reg('h2C, "hist_window", {7'd0, hist_pairs[8:0], 7'd0, hist_first[8:0]});
+    if (reset_at_frame < 0) begin
+      // ring position registers: everything admitted since arming has drained
+      check_reg('h29, "hist_records", h_records);
+      check_reg('h2A, "hist_last_frame", h_last[31:0]);
+      check_reg('h2B, "hist_done", h_records);
+    end
+    check_events();
     if (sat_samples > 0 && h_sat_flags == 0) begin $error("no saturation flag"); errors++; end
 
     if (!expect_overflow && det_reset_at < 0) begin

@@ -25,7 +25,11 @@ module chan_top #(
   parameter [7:0]  DEFAULT_HANG = 8'd39,
   parameter BLOCK_LOG2 = 8,             // detector block = 2^8 frames (2.56 ms)
   parameter SUB_BLOCKS = 128,           // minimum-statistics sub-window, blocks
-  parameter PSD_LOG2 = 13               // long PSD = 2^13 frames (81.9 ms)
+  parameter PSD_LOG2 = 13,              // long PSD = 2^13 frames (81.9 ms)
+  // 1: PFB FIR multipliers double-pumped at 2 x s_axi_aclk from an internal MMCM
+  // (8 DSP48E1 instead of 16; requires s_axi_aclk = 100 MHz, MMCM VCO 1000 MHz)
+  parameter FIR2X = 1,
+  parameter EVT_DEPTH = 512             // activity event FIFO entries
 ) (
   // AXI4-Lite (ADI up_axi), clock and reset for the whole core
   (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 s_axi_aclk CLK" *)
@@ -97,7 +101,7 @@ module chan_top #(
   output wire         m_axis_sel_tlast
 );
 
-  localparam [31:0] VERSION = 32'h0001_0000;
+  localparam [31:0] VERSION = 32'h0001_0100;   // 1.1.0: history window, events
   localparam [31:0] MAGIC   = 32'h4348_414E;   // "CHAN"
 
   wire clk = s_axi_aclk;
@@ -135,6 +139,9 @@ module chan_top #(
   reg  [7:0]   hang = DEFAULT_HANG;
   reg          det_clear = 1'b0;     // CONTROL bit 4: self-clearing detector reset
   reg          freeze = 1'b0;        // SNAP_CTRL bit 0
+  reg  [8:0]   hist_first_r = 9'd0;  // HIST_WINDOW: first bin of the history window
+  reg  [8:0]   hist_pairs_r = 9'd256;//   and bin pairs per record (1..256)
+  reg          evt_pop = 1'b0;       // EVT_POP: self-clearing
 
   always @(posedge clk) begin
     if (srst) begin
@@ -145,8 +152,11 @@ module chan_top #(
       out_shift <= 4'd7;
       on_q8 <= DEFAULT_ON_Q8; off_q8 <= DEFAULT_OFF_Q8; bias_q8 <= DEFAULT_BIAS_Q8;
       hang <= DEFAULT_HANG;
+      hist_first_r <= 9'd0; hist_pairs_r <= 9'd256;
+      evt_pop <= 1'b0;
     end else begin
       up_wack <= up_wreq;
+      evt_pop <= up_wreq & (up_waddr == 14'h027);
       det_clear <= up_wreq & (up_waddr == 14'h004) & up_wdata[4];
       if (dp_rst) freeze <= 1'b0;       // a stopped core never stays frozen
       if (up_wreq) begin
@@ -159,15 +169,45 @@ module chan_top #(
           14'h00A: bias_q8 <= up_wdata[15:0];
           14'h00B: hang <= up_wdata[7:0];
           14'h022: freeze <= up_wdata[0];
+          14'h028: begin hist_first_r <= up_wdata[8:0]; hist_pairs_r <= up_wdata[24:16]; end
           default: ;
         endcase
       end
     end
   end
 
-  // datapath soft reset while not running (also during system reset)
+  // ---------------------------------------------------------------------------
+  // FIR clock: clk2x = 2 x clk from an MMCM fed by clk. Both outputs are derived
+  // from the same input, so the tools time clk <-> clk2x paths synchronously; the
+  // feedback goes through a BUFG so clk2x is deskewed against the clk tree.
+  wire clk2x;
+  wire clk2x_locked;
+  generate
+  if (FIR2X) begin : g_clk2x
+    wire fb, fb_buf, clk2x_mmcm, locked_raw;
+    MMCME2_BASE #(
+      .CLKIN1_PERIOD (10.0), .DIVCLK_DIVIDE (1), .CLKFBOUT_MULT_F (10.0),
+      .CLKOUT0_DIVIDE_F (5.0), .BANDWIDTH ("OPTIMIZED")
+    ) i_mmcm (
+      .CLKIN1 (clk), .CLKFBIN (fb_buf), .CLKFBOUT (fb), .CLKFBOUTB (),
+      .CLKOUT0 (clk2x_mmcm), .CLKOUT0B (), .CLKOUT1 (), .CLKOUT1B (), .CLKOUT2 (),
+      .CLKOUT2B (), .CLKOUT3 (), .CLKOUT3B (), .CLKOUT4 (), .CLKOUT5 (), .CLKOUT6 (),
+      .LOCKED (locked_raw), .PWRDWN (1'b0), .RST (srst)
+    );
+    BUFG i_fb_bufg (.I (fb), .O (fb_buf));
+    BUFG i_clk2x_bufg (.I (clk2x_mmcm), .O (clk2x));
+    xpm_cdc_single #(.DEST_SYNC_FF (3), .SRC_INPUT_REG (0)) i_locked_sync (
+      .src_clk (1'b0), .src_in (locked_raw), .dest_clk (clk), .dest_out (clk2x_locked));
+  end else begin : g_no_clk2x
+    assign clk2x = 1'b0;
+    assign clk2x_locked = 1'b1;
+  end
+  endgenerate
+
+  // datapath soft reset while not running (also during system reset, and until
+  // the FIR clock is locked)
   reg dp_rst = 1'b1;
-  always @(posedge clk) dp_rst <= srst | ~run;
+  always @(posedge clk) dp_rst <= srst | ~run | ~clk2x_locked;
   wire hist_fifo_empty, sel_fifo_empty;
 
   // xfft: aresetn low >= 2 cycles with the datapath; one config beat (forward)
@@ -210,8 +250,8 @@ module chan_top #(
   wire        pack_busy;
   wire        u_last;
   wire [31:0] fir_frames;
-  chan_pfb_fir #(.COEF_FILE_PREFIX(COEF_FILE_PREFIX)) i_fir (
-    .clk (clk), .rst (dp_rst),
+  chan_pfb_fir #(.COEF_FILE_PREFIX(COEF_FILE_PREFIX), .FIR2X(FIR2X)) i_fir (
+    .clk (clk), .clk2x (clk2x), .rst (dp_rst),
     .s_valid (cdc_valid & ~dp_rst), .s_i (clip12(cdc_i)), .s_q (clip12(cdc_q)),
     .s_ready (cdc_ready),
     .m_valid (m_axis_fft_tvalid), .m_i (u_i), .m_q (u_q), .m_last (u_last),
@@ -260,28 +300,64 @@ module chan_top #(
   wire [31:0]  lvl_rdata;
   wire [15:0]  psd_rdata;
   wire [31:0]  block_count, psd_count;
+  wire         evt_valid, evt_open;
+  wire [8:0]   evt_bin;
+  wire [31:0]  evt_frame;
 
   chan_activity #(
     .BLOCK_LOG2(BLOCK_LOG2), .SUB_BLOCKS(SUB_BLOCKS), .PSD_LOG2(PSD_LOG2),
     .LOG_TABLE(LOG_TABLE)
   ) i_activity (
-    .clk (clk), .rst (dp_rst | det_clear),
+    .clk (clk), .rst (dp_rst | det_clear), .frame_rst (dp_rst),
     .pw_valid (pw_valid), .pw_k (pw_k), .pw (pw), .pw_last (pw_last),
     .on_q8 (on_q8), .off_q8 (off_q8), .bias_q8 (bias_q8), .hang_blocks (hang),
     .act_bit_addr (sel_query), .act_bit (active_bit),
     .act_word_addr (raddr2[3:0]), .act_word (active_word),
     .lvl_raddr (lvl_raddr), .lvl_rdata (lvl_rdata),
     .psd_raddr (psd_raddr), .psd_rdata (psd_rdata),
-    .block_count (block_count), .psd_count (psd_count)
+    .block_count (block_count), .psd_count (psd_count),
+    .evt_valid (evt_valid), .evt_open (evt_open), .evt_bin (evt_bin), .evt_frame (evt_frame)
   );
 
+  // Activity events for the ARM: {open, bin, frame}, oldest first. A full FIFO
+  // drops new events and counts them. The FIFO resets with the system only, so
+  // events survive RUN = 0 (their frame numbers then refer to the previous run).
+  localparam EW = $clog2(EVT_DEPTH) + 1;
+  wire        evt_empty, evt_full;
+  wire [41:0] evt_head;
+  wire [EW-1:0] evt_level;
+  reg  [15:0] evt_lost = 16'd0;
+  xpm_fifo_sync #(
+    .DOUT_RESET_VALUE ("0"), .ECC_MODE ("no_ecc"), .FIFO_MEMORY_TYPE ("block"),
+    .FIFO_READ_LATENCY (0), .FIFO_WRITE_DEPTH (EVT_DEPTH), .FULL_RESET_VALUE (0),
+    .PROG_EMPTY_THRESH (10), .PROG_FULL_THRESH (10), .RD_DATA_COUNT_WIDTH (EW),
+    .READ_DATA_WIDTH (42), .READ_MODE ("fwft"), .SIM_ASSERT_CHK (0),
+    .USE_ADV_FEATURES ("0400"), .WAKEUP_TIME (0), .WRITE_DATA_WIDTH (42),
+    .WR_DATA_COUNT_WIDTH (EW)
+  ) i_evt_fifo (
+    .rst (srst), .wr_clk (clk), .wr_en (evt_valid & ~evt_full),
+    .din ({evt_open, evt_bin, evt_frame}), .full (evt_full),
+    .rd_en (evt_pop & ~evt_empty), .dout (evt_head), .empty (evt_empty),
+    .rd_data_count (evt_level), .sleep (1'b0), .injectsbiterr (1'b0),
+    .injectdbiterr (1'b0), .almost_empty (), .almost_full (), .data_valid (),
+    .dbiterr (), .overflow (), .prog_empty (), .prog_full (), .sbiterr (),
+    .underflow (), .wr_ack (), .wr_data_count (), .wr_rst_busy (), .rd_rst_busy ()
+  );
+  always @(posedge clk) begin
+    if (srst) evt_lost <= 16'd0;
+    else if (evt_valid & evt_full & (evt_lost != 16'hFFFF)) evt_lost <= evt_lost + 16'd1;
+  end
+
   wire [31:0] hist_frames, hist_drops, sel_frames, sel_drops, overruns;
-  wire [47:0] hist_first;
+  wire [47:0] hist_first, hist_last_frame;
+  wire [31:0] hist_records, hist_done;
+  wire [8:0]  hist_win_first, hist_win_pairs;
   chan_pack i_pack (
     .clk (clk), .rst (dp_rst), .fifo_rst (srst),
     .fb_we (fb_we), .fb_bank (fb_bank), .fb_addr (fb_addr), .fb_data (fb_data),
     .fd_valid (fd_valid), .fd_frame (fd_frame), .fd_sat (fd_sat),
-    .hist_en (hist_en), .sel_en (sel_en), .auto_forward (auto_fwd),
+    .hist_en (hist_en), .hist_first_in (hist_first_r), .hist_pairs_in (hist_pairs_r),
+    .sel_en (sel_en), .auto_forward (auto_fwd),
     .sel_query (sel_query), .mask_bit (mask_bit), .active_bit (active_bit),
     .adc_overflow_count (adc_overflows),
     .m_hist_valid (m_axis_hist_tvalid), .m_hist_data (m_axis_hist_tdata),
@@ -289,6 +365,8 @@ module chan_top #(
     .m_sel_valid (m_axis_sel_tvalid), .m_sel_data (m_axis_sel_tdata),
     .m_sel_ready (m_axis_sel_tready), .m_sel_last (m_axis_sel_tlast),
     .hist_frames (hist_frames), .hist_drops (hist_drops), .hist_first_frame (hist_first),
+    .hist_records (hist_records), .hist_last_frame (hist_last_frame), .hist_done (hist_done),
+    .hist_first (hist_win_first), .hist_pairs (hist_win_pairs),
     .sel_frames (sel_frames), .sel_drops (sel_drops), .overruns (overruns),
     .busy_o (pack_busy), .hist_empty_o (hist_fifo_empty), .sel_empty_o (sel_fifo_empty),
     .snap_addr (snap_addr), .snap_data (snap_out_data)
@@ -338,7 +416,7 @@ module chan_top #(
           14'h002: up_rdata <= scratch;
           14'h003: up_rdata <= MAGIC;
           14'h004: up_rdata <= {28'd0, auto_fwd, sel_en, hist_en, run};
-          14'h005: up_rdata <= {28'd0, pack_busy, sel_fifo_empty, hist_fifo_empty, ~dp_rst};
+          14'h005: up_rdata <= {27'd0, clk2x_locked, pack_busy, sel_fifo_empty, hist_fifo_empty, ~dp_rst};
           14'h006: up_rdata <= {28'd0, out_shift};
           14'h007: up_rdata <= {BLOCK_LOG2[7:0], 8'd8, 16'd512};  // block_log2, taps, bins
           14'h00C: up_rdata <= {PSD_LOG2[7:0], 8'd4, SUB_BLOCKS[15:0]};  // psd_log2, sub-windows, U
@@ -366,6 +444,14 @@ module chan_top #(
           14'h021: up_rdata <= fir_frames;
           14'h022: up_rdata <= {29'd0, snap_out_ready, frozen, freeze};
           14'h023: up_rdata <= snap_frame;
+          14'h024: up_rdata <= {evt_lost, {(16-EW){1'b0}}, evt_level};
+          14'h025: up_rdata <= {~evt_empty, evt_head[41], 21'd0, evt_head[40:32]};
+          14'h026: up_rdata <= evt_head[31:0];
+          14'h028: up_rdata <= {7'd0, hist_pairs_r, 7'd0, hist_first_r};
+          14'h029: begin up_rdata <= hist_records; hi_latch <= hist_last_frame[31:0]; end
+          14'h02A: up_rdata <= hi_latch;
+          14'h02B: up_rdata <= hist_done;
+          14'h02C: up_rdata <= {7'd0, hist_win_pairs, 7'd0, hist_win_first};
           14'b00_011?_????_????: up_rdata <= snap_out_data;           // 0x600-0x7FF
           14'b01_????_????_????: up_rdata <= {{4{snap_in_data[23]}}, snap_in_data[23:12],
                                                {4{snap_in_data[11]}}, snap_in_data[11:0]};

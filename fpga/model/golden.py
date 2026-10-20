@@ -10,6 +10,8 @@ Vector files (hex, one value per line) consumed by fpga/tb/tb_chan.sv:
   active.hex      expected ACTIVE bitmap, 16 x 32-bit words
   psd.hex         expected PSD window after the last complete long-PSD period
   mask.hex        FORWARD_MASK, 16 x 32-bit words
+  events.hex      expected activity events {open, bin[8:0], frame[31:0]} (42 bits),
+                  in RTL order: by frame, then FFT output (bit-reversed) bin order
   params.json     scenario summary (expected counters)
   plusargs.txt    the same values as testbench plusargs
 """
@@ -40,6 +42,12 @@ def hexfile(path: Path, values, width_bits: int) -> None:
     path.write_text("".join(f"{int(v) & mask:0{digits}x}\n" for v in values))
 
 
+def bit_reverse_order(n: int) -> list[int]:
+    """Bin order of the xfft's bit-reversed output (XK_INDEX sequence)."""
+    bits = n.bit_length() - 1
+    return [int(f"{i:0{bits}b}"[::-1], 2) for i in range(n)]
+
+
 @app.command()
 def mems(outdir: Path) -> None:
     """Coefficient ROM images (4 x 1024 x 18) and the log2 mantissa table."""
@@ -62,7 +70,8 @@ def stimulus(name: str, rng: np.random.Generator) -> tuple[np.ndarray, dict]:
     opts = {"out_shift": DEFAULT.out_shift, "ready_pct": 70, "adc_period_ns": 39.0625, "adc_gap_pct": 0,
             "mask_bins": [0, 1, 7, 40, 41, 255, 256, 300, 511], "auto_forward": 0,
             "expect_drops": 0, "expect_overflow": 0, "reset_at_frame": -1,
-            "snapshot_at_frame": -1, "det_reset_at_frame": -1, "adc_losses": 0}
+            "snapshot_at_frame": -1, "det_reset_at_frame": -1, "adc_losses": 0,
+            "hist_first": 0, "hist_pairs": 256}
     if name == "mixed":
         x = (tone(0, 300) + tone(40 * cfg.bin_hz, 600) + tone(41 * cfg.bin_hz + 25e3, 400)
              + tone(-212 * cfg.bin_hz + 12.5e3, 200) + tone(7 * cfg.bin_hz + 31.25e3, 100)
@@ -81,11 +90,15 @@ def stimulus(name: str, rng: np.random.Generator) -> tuple[np.ndarray, dict]:
         x = rng.integers(-2048, 2048, n) + 1j * rng.integers(-2048, 2048, n)
         opts["ready_pct"] = 50
         opts["mask_bins"] = sorted(rng.choice(512, 64, replace=False).tolist())
+        # a history window that wraps past bin 511 (a span centred on DC)
+        opts["hist_first"], opts["hist_pairs"] = 400, 100
     elif name == "backpressure":
         x = tone(10 * cfg.bin_hz, 1000) + 20 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
         opts["ready_pct"] = 4
         opts["expect_drops"] = 1
         opts["mask_bins"] = list(range(0, 512, 2))
+        # an odd-length window: the FIFO room check uses the shorter record
+        opts["hist_first"], opts["hist_pairs"] = 101, 37
     elif name == "overflow":
         x = tone(3 * cfg.bin_hz, 1000)
         opts["adc_period_ns"] = 5.0          # 200 Msps into a 100 MHz consumer
@@ -133,12 +146,20 @@ def vectors(scenario: str, outdir: Path, seed: int = 1) -> None:
 
     st = act.initial_state(cfg.n, SIM_DET)
     last_block = last_psd = None
+    prev_active = np.zeros(cfg.n, bool)
+    fft_order = bit_reverse_order(cfg.n)
+    events = []
     for f in range(r.power.shape[0]):
         blk, psd = act.step(st, r.power[f], SIM_DET)
         if blk is not None:
             last_block = blk
+            changed = blk.active != prev_active
+            events += [(int(blk.active[k]) << 41) | (k << 32) | (f & 0xFFFFFFFF)
+                       for k in fft_order if changed[k]]
+            prev_active = blk.active.copy()
         if psd is not None:
             last_psd = psd
+    hexfile(outdir / "events.hex", events if events else [0], 42)
     level = (last_block.floor.astype(np.int64) << 16) | last_block.level
     hexfile(outdir / "level.hex", level, 32)
     bits = last_block.active.astype(np.int64)
@@ -147,7 +168,7 @@ def vectors(scenario: str, outdir: Path, seed: int = 1) -> None:
     hexfile(outdir / "psd.hex", last_psd, 16)
     frames = r.out_re.shape[0]
     params = {**opts, "frames": frames, "samples": len(xi),
-              "sat_samples": int(r.out_sat.sum()),
+              "sat_samples": int(r.out_sat.sum()), "events": len(events),
               "clipped_samples": int(np.sum((np.abs(np.clip(xi, -2048, 2047) - xi) > 0)
                                             | (np.abs(np.clip(xq, -2048, 2047) - xq) > 0))),
               "det": dataclasses.asdict(SIM_DET)}
@@ -164,7 +185,8 @@ def vectors(scenario: str, outdir: Path, seed: int = 1) -> None:
             f"+ON_Q8={SIM_DET.on_q8}", f"+OFF_Q8={SIM_DET.off_q8}", f"+HANG={SIM_DET.hang}",
             f"+BIAS_Q8={SIM_DET.bias_q8}", f"+SNAPSHOT_AT_FRAME={opts['snapshot_at_frame']}",
             f"+AUTO_FWD={opts['auto_forward']}", f"+DET_RESET_AT_FRAME={opts['det_reset_at_frame']}",
-            f"+ADC_LOSSES={opts['adc_losses']}"]
+            f"+ADC_LOSSES={opts['adc_losses']}", f"+HIST_FIRST={opts['hist_first']}",
+            f"+HIST_PAIRS={opts['hist_pairs']}", f"+EVENTS={len(events)}"]
     (outdir / "plusargs.txt").write_text(" ".join(plus) + "\n")
     print(json.dumps({k: v for k, v in params.items() if k != "det"}))
 
