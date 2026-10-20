@@ -105,8 +105,21 @@ restart_iiod() {
 }
 touch /tmp/pl_swap_pending
 # Independent of this script: recover even if a driver operation or USB restart
-# gets stuck. Only a returning host that has read PL_SWAP_DONE cancels this.
-(sleep 90; if [ -f /tmp/pl_swap_pending ]; then sync; reboot -f; fi) &
+# gets stuck. A configured gadget and completed swap are also proof of recovery
+# when the host's SSH poll is delayed or its preflight is killed.
+(
+  sleep 90
+  if [ -f /tmp/pl_swap_pending ]; then
+    if [ -f /tmp/pl_is_chan ] &&
+       grep -qx configured /sys/class/udc/ci_hdrc.0/state &&
+       grep -q PL_SWAP_DONE /tmp/pl_swap.log; then
+      rm -f /tmp/pl_swap_pending
+    else
+      sync
+      reboot -f
+    fi
+  fi
+) &
 trap 'echo PL_SWAP_FAILED; sync; reboot' EXIT
 echo '' > /sys/kernel/config/usb_gadget/composite_gadget/UDC
 killall iiod 2>/dev/null || true

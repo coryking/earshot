@@ -83,7 +83,8 @@ echo "$now" > "$failure_file"  # also survives a killed preflight with no EXIT t
 loading=1
 trap 'if (( loading )); then date +%s > "$failure_file"; fi' EXIT
 "$script_dir/pluto_runtime_load.sh" load "$bit" "$tool"
-if ! p /tmp/chanctl info | grep -q '"magic":"0x4348414e"'; then
+info=$(p /tmp/chanctl info) || { echo "Pluto FPGA probe failed after loading" >&2; exit 1; }
+if ! grep -q '"magic":"0x4348414e"' <<< "$info"; then
   echo "Pluto did not return with the channelizer" >&2
   exit 1
 fi

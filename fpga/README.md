@@ -166,7 +166,8 @@ the verified backup. `fpga/sw/ensure_pluto_fpga.sh` checks that reservation and
 Linux's memory map, then loads the already routed image through FPGA manager if
 needed. It checks the channelizer magic before reporting ready. The runtime loader
 unbinds and rebinds the USB gadget around `iiod`; a 90-second on-device timer
-reboots if the host never confirms reconnection. A normal Pluto reboot loses the
+reboots if the swap or USB enumeration stays incomplete. A configured gadget
+and completed swap also cancel it if the host's check is delayed. A normal Pluto reboot loses the
 runtime image. The installed `amateur-radio-live` preflight reloads it, and its
 one-minute guard restarts the unit after an unexpected Pluto reboot.
 
