@@ -14,6 +14,16 @@ test("real engine: the fixture's DMR call shows up and plays", async ({ page }, 
   await row.click();
   const player = page.getByRole("region", { name: "Player" });
   await expect(player).toContainText("Playing live voice", { timeout: 15_000 });
+  const iq = page.getByRole("region", { name: "IQ capture", exact: true });
+  await expect(iq).toContainText(/s buffered \/ 30 s maximum/);
+  await expect(iq).toContainText("Sampled range");
+  const save = iq.getByRole("button", { name: "Download IQ snapshot" });
+  await expect(save).toBeEnabled();
+  const downloaded = page.waitForEvent("download");
+  await save.click();
+  const snapshot = await downloaded;
+  expect(snapshot.suggestedFilename()).toMatch(/^iq_\d+Hz\.sigmf\.tar$/);
+  expect(await snapshot.failure()).toBeNull();
   await page.screenshot({ path: info.outputPath(`fixture-${info.project.name}.png`) });
   await expectAccessible(page, "live fixture");
 });
