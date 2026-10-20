@@ -97,7 +97,9 @@ localCatalog.subscribe(() => local.write(LOCAL_CATALOG, localCatalog.get()));
 
 /** Apply a burst of channel events in one cache update (one render), newest wins. */
 function applyChannels(client: QueryClient, updates: EngineChannel[]) {
-  // An in-flight snapshot may predate these events; drop it rather than let it land after them.
+  // An in-flight refetch may predate these events; drop it rather than let it land after them.
+  // Never cancel the first fetch: without a snapshot there's nothing to patch.
+  if (!client.getQueryData(keys.status)) return;
   void client.cancelQueries({ queryKey: keys.status });
   client.setQueryData<EngineStatus>(keys.status, (status) => {
     if (!status) return status;
@@ -223,7 +225,11 @@ export function useCatalog() {
   const saved = useStore(localCatalog);
   const engine = query.data ?? null;
   const entries = useMemo(() => {
-    if (!engine) return [...saved, ...STARTER_CATALOG];
+    if (!engine) {
+      // An edited starter name is saved on the device under the same id and replaces it.
+      const mine = new Set(saved.map((e) => e.id));
+      return [...saved, ...STARTER_CATALOG.filter((e) => !mine.has(e.id))];
+    }
     const known = new Set(engine.map((e) => e.id));
     return [...engine, ...saved.filter((e) => !known.has(e.id))];
   }, [engine, saved]);

@@ -240,6 +240,30 @@ describe("Player live listening", () => {
   });
 });
 
+describe("Player start-up races", () => {
+  it("doesn't send a stale selection when stopped while audio is still starting", async () => {
+    const f = fakeBackend();
+    let finishLoad: () => void = () => {};
+    const Original = globalThis.AudioContext;
+    vi.stubGlobal(
+      "AudioContext",
+      class extends (Original as unknown as { new (): object }) {
+        audioWorklet = { addModule: () => new Promise<void>((r) => (finishLoad = r)) };
+      },
+    );
+    const player = new Player(f.backend);
+    const listening = player.listen(source("a"));
+    await player.stop();
+    finishLoad();
+    await listening;
+    await settle();
+    // Nothing was sent for this device, so nothing is cleared (it might be someone else's channel).
+    expect(f.monitor).not.toHaveBeenCalled();
+    expect(player.state.get().kind).toBe("idle");
+    vi.stubGlobal("AudioContext", Original);
+  });
+});
+
 describe("Player recorded calls", () => {
   const call = (id: string): Call => ({
     id,

@@ -118,6 +118,17 @@ describe("catalog joins", () => {
     expect(sources[0].listenable.ok).toBe(true);
   });
 
+  it("gives each DMR timeslot its own row when a frequency-only name covers both", () => {
+    const sources = toSources(
+      [channel("454029223-DMR-1"), channel("454029223-DMR-2", { speech_active: true })],
+      STARTER_CATALOG,
+    );
+    expect(sources.map((s) => [s.id, s.name, s.channelIds[0]])).toEqual([
+      ["starter-columbia-shared-line1", "Columbia Tower shared radio, line 1", "454029223-DMR-1"],
+      ["starter-columbia-shared-line2", "Columbia Tower shared radio, line 2", "454029223-DMR-2"],
+    ]);
+  });
+
   it("leaves out catalog entries that cover nothing currently heard", () => {
     expect(toSources([], STARTER_CATALOG)).toEqual([]);
   });

@@ -92,6 +92,43 @@ export function channelKey(frequencyHz: number, slot: number | null, mode: Mode)
   return mode === "dmr" && slot ? `ch-${Math.round(frequencyHz)}-${slot}` : `ch-${Math.round(frequencyHz)}`;
 }
 
+function named(
+  entry: WireCatalogEntry,
+  covered: EngineChannel[],
+  options: SourceOptions,
+  id: string,
+  suffix: string,
+): Source {
+  const primary =
+    covered.find((c) => c.speech_active) ?? covered.find((c) => modeOf(c.protocol) !== "unknown") ?? covered[0];
+  const mode = modeOf(primary.protocol) !== "unknown" ? modeOf(primary.protocol) : entry.mode;
+  const encryption = entry.encryption;
+  return {
+    id,
+    kind: entry.kind,
+    name: entry.name + suffix,
+    named: true,
+    summary: encryption === "encrypted" ? PRIVATE_SUMMARY : entry.description || modeWords[mode],
+    description: entry.description,
+    probableUser: entry.probable_user ?? null,
+    trafficKind: entry.traffic_kind ?? null,
+    mode,
+    encryption,
+    frequencyHz: primary.frequency_hz,
+    slot: primary.slot ?? null,
+    system: entry.system ?? null,
+    talkgroupId: entry.talkgroup_id ?? null,
+    channelIds: [primary.id, ...covered.filter((c) => c !== primary).map((c) => c.id)],
+    // Encrypted calls never decode to speech; a carrier is the only sign of a call.
+    talking: covered.some((c) => c.speech_active === true || (encryption === "encrypted" && c.rf_active === true)),
+    signal: covered.some((c) => c.rf_active === true),
+    levelDb: primary.level_db ?? null,
+    lastHeardAt: maxOf(covered.map((c) => seconds(c.last_heard) ?? seconds(c.last_rf))),
+    inRange: covered.some((c) => c.in_range !== false),
+    listenable: listenableFor(primary, encryption, options),
+  };
+}
+
 /**
  * Engine channels plus catalog labels → sources.
  *
@@ -120,36 +157,15 @@ export function toSources(
     const covered = visible.filter((c) => !claimed.has(c.id) && covers(entry, c));
     if (!covered.length) continue;
     covered.forEach((c) => claimed.add(c.id));
-    const primary =
-      covered.find((c) => c.speech_active) ??
-      covered.find((c) => modeOf(c.protocol) !== "unknown") ??
-      covered[0];
-    const mode = modeOf(primary.protocol) !== "unknown" ? modeOf(primary.protocol) : entry.mode;
-    const encryption = entry.encryption;
-    sources.push({
-      id: entry.id,
-      kind: entry.kind,
-      name: entry.name,
-      named: true,
-      summary: encryption === "encrypted" ? PRIVATE_SUMMARY : entry.description || modeWords[mode],
-      description: entry.description,
-      probableUser: entry.probable_user ?? null,
-      trafficKind: entry.traffic_kind ?? null,
-      mode,
-      encryption,
-      frequencyHz: primary.frequency_hz,
-      slot: primary.slot ?? null,
-      system: entry.system ?? null,
-      talkgroupId: entry.talkgroup_id ?? null,
-      channelIds: [primary.id, ...covered.filter((c) => c !== primary).map((c) => c.id)],
-      // Encrypted calls never decode to speech; a carrier is the only sign of a call.
-      talking: covered.some((c) => c.speech_active === true || (encryption === "encrypted" && c.rf_active === true)),
-      signal: covered.some((c) => c.rf_active === true),
-      levelDb: primary.level_db ?? null,
-      lastHeardAt: maxOf(covered.map((c) => seconds(c.last_heard) ?? seconds(c.last_rf))),
-      inRange: covered.some((c) => c.in_range !== false),
-      listenable: listenableFor(primary, encryption, options),
-    });
+    // The player follows one engine channel, and DMR's two timeslots are separate
+    // conversations: when a frequency-only entry covers both, give each its own row.
+    const slots = [...new Set(covered.filter((c) => modeOf(c.protocol) === "dmr").map((c) => c.slot ?? 1))].sort();
+    if (entry.slot == null && slots.length > 1) {
+      for (const slot of slots)
+        sources.push(
+          named(entry, covered.filter((c) => (c.slot ?? 1) === slot), options, `${entry.id}-line${slot}`, `, line ${slot}`),
+        );
+    } else sources.push(named(entry, covered, options, entry.id, ""));
   }
 
   for (const channel of visible) {

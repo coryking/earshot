@@ -87,6 +87,8 @@ export class Player {
   private monitorChain: Promise<unknown> = Promise.resolve();
   /** True once the engine's selection is ours (a monitor request succeeded). */
   private ownsSelection = false;
+  /** A monitor request for our channel has been sent and not yet answered. */
+  private selectionPending = false;
   private reselecting = false;
 
   private connection: Connection | null = null;
@@ -136,7 +138,7 @@ export class Player {
         if (nav.audioSession) nav.audioSession.type = "playback";
         const context = new AudioContext({ latencyHint: "interactive" });
         context.onstatechange = () => {
-          if (context.state !== "running" && this.state.get().kind === "live") void context.resume();
+          if (context.state === "suspended" && this.state.get().kind === "live") void context.resume().catch(() => {});
         };
         const gain = context.createGain();
         this.context = context;
@@ -176,11 +178,15 @@ export class Player {
   }
 
   private resumeAudio() {
-    void this.context?.resume();
+    if (this.context && this.context.state !== "closed") void this.context.resume().catch(() => {});
     const element = this.liveElement;
     if (!element) return;
     try {
-      void Promise.resolve(element.play()).catch(() => this.fallbackToSpeakers());
+      void Promise.resolve(element.play()).catch((error: unknown) => {
+        // A pause racing play() rejects with AbortError; only a real refusal means "use the speakers".
+        const name = error instanceof DOMException ? error.name : "";
+        if (name === "NotAllowedError" || name === "NotSupportedError") this.fallbackToSpeakers();
+      });
     } catch {
       this.fallbackToSpeakers();
     }
@@ -262,13 +268,19 @@ export class Player {
         this.patch({ phase: "error", error: "Audio didn't start on this device. Tap the channel to try again." });
       return;
     }
+    if (intent !== this.intent) return;
+    this.selectionPending = true;
     try {
       await this.sendMonitor(channelId);
     } catch (error) {
-      if (intent === this.intent) this.patch({ phase: "error", error: monitorMessage(error) });
+      if (intent === this.intent) {
+        this.selectionPending = false;
+        this.patch({ phase: "error", error: monitorMessage(error) });
+      }
       return;
     }
     if (intent !== this.intent) return;
+    this.selectionPending = false;
     this.ownsSelection = true;
     this.patch({ phase: "waiting" });
     this.openSocket();
@@ -305,7 +317,8 @@ export class Player {
       // Released: the engine restarted, or someone stopped. Quietly take it back,
       // retrying until the channel is in the engine's catalog again.
       this.releasedSince ??= now;
-      if (now - this.releasedSince < SETTLE_MS || this.reselecting || s.phase === "taken") return;
+      // Also after a takeover: the other device let go, so carry on listening.
+      if (now - this.releasedSince < SETTLE_MS || this.reselecting) return;
       this.reselecting = true;
       this.releasedSince = null;
       const intent = this.intent;
@@ -403,6 +416,8 @@ export class Player {
   /** Stop everything this player is doing, without touching the engine. */
   private teardown() {
     this.intent += 1;
+    this.ownsSelection = false;
+    this.selectionPending = false;
     this.stopCall();
     this.queue = [];
     this.dropSocket();
@@ -417,9 +432,10 @@ export class Player {
 
   async stop() {
     const s = this.state.get();
-    // A selection we made, or one still on its way, is ours to clear.
-    const clear = s.kind === "live" && (this.ownsSelection || s.phase === "starting");
+    // A selection we made, or one already sent and on its way, is ours to clear.
+    const clear = s.kind === "live" && (this.ownsSelection || this.selectionPending);
     this.ownsSelection = false;
+    this.selectionPending = false;
     this.teardown();
     this.patch({ ...idle });
     this.updateSession(null, "");
