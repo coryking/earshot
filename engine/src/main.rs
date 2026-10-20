@@ -7,7 +7,6 @@ use radio_engine::{
 use serde_json::json;
 use std::{
     io::Read,
-    net::TcpStream,
     thread,
     time::{Duration, Instant},
 };
@@ -46,6 +45,11 @@ enum Command {
         /// Memory held for recent call audio (older audio is served from state-dir).
         #[arg(long, default_value_t = 64)]
         call_memory_mb: usize,
+        /// The receiver supervisor's status file (radio-supervisor --status-file). With
+        /// --source, the engine then connects only while it says a producer is running, and
+        /// /api/status reports what the supervisor says.
+        #[arg(long)]
+        receiver_status: Option<std::path::PathBuf>,
     },
     /// Offline fixture only: mono 48 kHz discriminator signed16 raw input; '-' for stdin.
     Probe {
@@ -119,6 +123,7 @@ async fn main() -> Result<()> {
             labels,
             state_dir,
             call_memory_mb,
+            receiver_status,
         } => {
             anyhow::ensure!(
                 (3..=64).contains(&max_decoders),
@@ -142,40 +147,42 @@ async fn main() -> Result<()> {
                 labels,
                 state_dir,
                 call_memory_mb,
+                receiver_status: receiver_status.clone(),
                 ..radio_engine::runtime::AppConfig::new(max_decoders)
             });
             radio_engine::runtime::spawn_janitor(app.clone());
             let flush_app = app.clone();
             let ingest_app = app.clone();
-            thread::spawn(move || {
-                let run = || -> Result<()> {
-                    if let Some(source) = source {
-                        let address = source
-                            .strip_prefix("tcp:")
-                            .context("source must be tcp:HOST:PORT")?;
-                        let stream = TcpStream::connect(address)?;
-                        attach_control(&stream, &ingest_app)?;
-                        ingest(stream, ingest_app.clone())
-                    } else {
+            if let Some(source) = source {
+                let address = source
+                    .strip_prefix("tcp:")
+                    .context("source must be tcp:HOST:PORT")?
+                    .to_string();
+                // Reconnects with backoff for as long as the engine runs.
+                thread::spawn(move || {
+                    radio_engine::link::run_source(
+                        ingest_app,
+                        radio_engine::link::LinkConfig::new(address),
+                    )
+                });
+            } else {
+                thread::spawn(move || {
+                    let run = || -> Result<()> {
                         let listener = std::net::TcpListener::bind(("127.0.0.1", ingest_port))?;
                         for stream in listener.incoming() {
-                            match stream {
-                                Ok(s) => {
-                                    attach_control(&s, &ingest_app)?;
-                                    if let Err(error) = ingest(s, ingest_app.clone()) {
-                                        ingest_app.error(error.to_string());
-                                    }
-                                }
-                                Err(e) => return Err(e.into()),
+                            let s = stream?;
+                            attach_control(&s, &ingest_app)?;
+                            if let Err(error) = ingest(s, ingest_app.clone()) {
+                                ingest_app.error(error.to_string());
                             }
                         }
                         Ok(())
+                    };
+                    if let Err(e) = run() {
+                        ingest_app.error(e.to_string());
                     }
-                };
-                if let Err(e) = run() {
-                    ingest_app.error(e.to_string());
-                }
-            });
+                });
+            }
             let router = radio_engine::api::router(app, web_dir);
             let server = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
             eprintln!(

@@ -1,20 +1,23 @@
-"""Run the live radio for a bounded time on the service's port, then put everything back.
+"""A bounded live session with settings of your own (centre, rate, forwarded streams).
 
-For a listening session, not for acceptance testing (see live_acceptance.py for that). It
+The public service is live all the time now (amateur-radio-live + amateur-radio), so you only
+need this to listen with different settings than the service's. It runs under radio-borrow: the
+always-on receiver steps aside first and resumes afterwards. For acceptance testing see
+live_acceptance.py. The session
 
   1. takes /tmp/pluto-radio.lock (other agents' radio sessions wait),
   2. checks the Pluto's firmware, snapshots its receiver state, copies the ARM producer to the
      Pluto's volatile /tmp and starts it,
-  3. stops the fixture-mode `amateur-radio` user service and starts the live engine on its
+  3. stops the public `amateur-radio` engine service and starts a live engine on its
      port (127.0.0.1:8810, so the tailnet URL serves live data),
   4. waits for --minutes (or Ctrl-C / SIGTERM), then asks the engine to STOP (acknowledged
      RX restoration), stops the producer, reads the hardware back (corrective restore if
-     needed), and restarts the fixture-mode service.
+     needed), and restarts the public engine service.
 
     uv run python offload/live_session.py --binary ~/.cache/amateur-radio-arm/build/pluto-channel-source --minutes 60
 
-The engine does not reconnect to a lost producer, so a session ends when the producer or
-connection ends; the cleanup path still runs. RX only.
+The session ends when the producer or connection ends (this private engine is not
+supervised); the cleanup path still runs. RX only.
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).parent))
 import live_acceptance as la
 from pluto_readback import snapshot
-from radio_lock import radio_lock, raise_on_termination
+from radio_lock import ensure_borrowed, radio_lock, raise_on_termination
 
 SERVICE = "amateur-radio"
 
@@ -61,6 +64,7 @@ def main() -> int:
     args = ap.parse_args()
     if not 1 <= args.minutes <= 240:
         ap.error("--minutes must be 1..240")
+    ensure_borrowed()  # the always-on receiver steps aside, and resumes afterwards
     raise_on_termination()
     uri = f"ip:{args.host}"
     report: dict = {}
@@ -156,7 +160,7 @@ def main() -> int:
                     with contextlib.suppress(Exception):
                         log.close()
     finally:
-        # Always bring the fixture-mode service back, even if the radio session failed.
+        # Always bring the public engine service back, even if the radio session failed.
         if service_stopped or engine is not None:
             systemctl("start", SERVICE)
     print(json.dumps({"failures": failures, **report}, indent=1, default=str))
