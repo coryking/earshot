@@ -102,6 +102,44 @@ async fn monitor(
     e.listener["state"] = e.listener["status"].clone();
     Ok(Json(e.listener.clone()))
 }
+fn iq_snapshot(app: &App, id: &str) -> Result<Option<crate::iq::IqSnapshot>, (StatusCode, Json<Value>)> {
+    let e = app.engine();
+    let channel = e.channels.get(id).ok_or_else(|| api_error(StatusCode::GONE, "Channel is no longer in the catalog"))?;
+    Ok(channel["stream_id"].as_u64().and_then(|stream| e.iq_history.snapshot(stream as u32)))
+}
+async fn iq_status(State(app): State<App>, Path(id): Path<String>) -> ApiResult {
+    let snapshot = iq_snapshot(&app, &id)?;
+    let mut status = snapshot.map(|s| s.status(app.calibration)).unwrap_or(json!({"samples":0,"seconds":0,
+        "sample_rate_hz":null,"center_hz":null,"stream_id":null,"max_seconds":30,"last_received_at":null}));
+    let e = app.engine();
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+    status["collecting"] = json!(e.active && crate::runtime::wanted_ids(&e).contains(&id)
+        && status["last_received_at"].as_f64().is_some_and(|last| now - last < 2.));
+    Ok(Json(status))
+}
+static IQ_EXPORT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+async fn iq_download(State(app): State<App>, Path(id): Path<String>) -> axum::response::Response {
+    let permit = match IQ_EXPORT.try_acquire() {
+        Ok(p) => p,
+        Err(_) => return api_error(StatusCode::TOO_MANY_REQUESTS, "An IQ download is already being prepared; retry shortly").into_response(),
+    };
+    let snapshot = match iq_snapshot(&app, &id) {
+        Ok(Some(s)) => s,
+        Ok(None) => return api_error(StatusCode::GONE, "No IQ buffered yet; start listening to this channel first").into_response(),
+        Err(e) => return e.into_response(),
+    };
+    let frequency = app.engine().channels.get(&id).and_then(|c| c["frequency_hz"].as_f64()).unwrap_or(0.);
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        snapshot.archive(frequency, app.calibration)
+    }).await;
+    match result {
+        Ok(Ok(bytes)) => ([(header::CONTENT_TYPE, HeaderValue::from_static("application/x-tar")),
+            (header::CONTENT_DISPOSITION, HeaderValue::from_str(&format!("attachment; filename=iq_{frequency:.0}Hz.sigmf.tar")).unwrap()),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store"))], bytes).into_response(),
+        _ => api_error(StatusCode::INTERNAL_SERVER_ERROR, "Could not prepare IQ capture").into_response(),
+    }
+}
 async fn listener(State(app): State<App>) -> Json<Value> {
     let e = app.engine();
     let mut value = e.listener.clone();
@@ -764,6 +802,8 @@ pub fn router(app: App, web_dir: Option<PathBuf>) -> Router {
         .route("/api/listener", get(listener))
         .route("/api/monitor", post(monitor))
         .route("/api/tune", post(tune))
+        .route("/api/iq/{id}", get(iq_status))
+        .route("/api/iq/{id}/capture.sigmf", get(iq_download))
         .route("/api/stop", post(stop))
         .route("/api/source", post(configure_source))
         .route("/api/spectrum", get(spectrum))
@@ -789,6 +829,41 @@ pub fn router(app: App, web_dir: Option<PathBuf>) -> Router {
 mod tests {
     use super::*;
     /// Mirrors the required numeric fields of statusSchema in web/src/lib/radio.ts.
+    #[tokio::test]
+    async fn iq_download_contains_unmodified_samples_and_status_distinguishes_waiting() {
+        let app = App::new(8);
+        {
+            let mut e = app.engine();
+            e.active = true;
+            e.selected = Some("454000000-Raw-1".into());
+            e.channels.insert("454000000-Raw-1".into(), json!({"stream_id":7,"frequency_hz":454000000}));
+        }
+        let Json(empty) = iq_status(State(app.clone()), Path("454000000-Raw-1".into())).await.unwrap();
+        assert_eq!(empty["samples"], 0);
+        assert_eq!(empty["collecting"], false);
+        let response = iq_download(State(app.clone()), Path("454000000-Raw-1".into())).await;
+        assert_eq!(response.status(), StatusCode::GONE);
+        let frame = std::sync::Arc::new(crate::wire::Frame {kind:1,flags:0,generation:1,stream_id:7,
+            sequence:1,first_sample:100,rate:100000,center_hz:454000000,format:1,valid_bits:16,payload:vec![1,2,3,4]});
+        app.engine().iq_history.push(frame, 100000., SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64());
+        let Json(active) = iq_status(State(app.clone()), Path("454000000-Raw-1".into())).await.unwrap();
+        assert_eq!(active["samples"], 1);
+        assert_eq!(active["collecting"], true);
+        let response = iq_download(State(app.clone()), Path("454000000-Raw-1".into())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let mut archive = tar::Archive::new(body.as_ref());
+        let mut data = archive.entries().unwrap().filter_map(Result::ok)
+            .find(|e| e.path().unwrap().to_string_lossy().ends_with(".sigmf-data")).unwrap();
+        let mut samples = Vec::new();
+        std::io::Read::read_to_end(&mut data, &mut samples).unwrap();
+        assert_eq!(samples, vec![1,2,3,4]);
+        app.engine().selected = None;
+        let Json(stopped) = iq_status(State(app), Path("454000000-Raw-1".into())).await.unwrap();
+        assert_eq!(stopped["collecting"], false);
+        assert_eq!(stopped["samples"], 1, "Stop preserves the buffered capture");
+    }
+
     #[test]
     fn status_satisfies_the_browser_schema_before_and_after_a_source_connects() {
         let required = [

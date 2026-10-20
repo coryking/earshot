@@ -119,6 +119,7 @@ export class Player {
   private queue: Call[] = [];
   private nameFor: ((sourceId: string) => string) | undefined;
   private lastSource: Source | null = null;
+  private lastRaw = false;
   private blockName = "";
   private onVisible = () => {
     if (document.visibilityState === "visible" && this.state.get().kind === "live") this.resumeAudio();
@@ -283,6 +284,7 @@ export class Player {
     let channelId = raw ? null : source.channelIds[0] ?? null;
     this.capture = raw && source.frequencyHz !== null ? new RawCapture(source.frequencyHz) : null;
     this.lastSource = source;
+    this.lastRaw = raw;
     const unlocked = this.unlock();
     this.patch({ ...idle, kind: "live", raw, phase: "starting", sourceId: source.id, sourceName: source.name, frequencyHz: source.frequencyHz, mode: source.mode, slot: source.slot, channelId });
     this.updateSession(source.name, "Live");
@@ -482,7 +484,8 @@ export class Player {
     this.ownsSelection = false;
     this.selectionPending = false;
     this.teardown();
-    this.patch({ ...idle, captureSeconds: this.capture?.seconds ?? 0 });
+    this.patch({ ...idle, captureSeconds: this.capture?.seconds ?? 0,
+      frequencyHz: s.frequencyHz, channelId: s.channelId, sourceName: s.sourceName, mode: s.mode, slot: s.slot });
     this.updateSession(null, "");
     this.liveElement?.pause();
     if (clear) {
@@ -492,6 +495,10 @@ export class Player {
         /* nothing to undo */
       }
     }
+  }
+
+  resume() {
+    if (this.lastSource) return this.listen(this.lastSource, { raw: this.lastRaw });
   }
 
   listenRaw() {

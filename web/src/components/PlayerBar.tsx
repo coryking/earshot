@@ -21,9 +21,9 @@ export function playerLine(state: PlayerState, takenName: string | null): string
     case "starting":
       return "Tuning…";
     case "waiting":
-      return "Tuned · waiting for audio";
+      return state.raw ? "Listening · waiting for receiver samples" : "Listening · waiting for decoded voice";
     case "playing":
-      return "Playing live audio";
+      return state.raw ? "Playing FM signal audio" : "Playing live audio";
     case "reconnecting":
       return "Reconnecting…";
     case "taken":

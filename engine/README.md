@@ -133,10 +133,35 @@ Pre-roll and stale queued audio remain excluded. This is demodulated FM, not IQ,
 cannot preserve modulation outside the selected channel filter.
 
 The web UI defaults unidentified signals and manual tuning to raw listening, and offers
-**Listen to raw signal** for decoded channels. It keeps the latest 120 seconds in browser
-memory; **Save raw WAV** downloads a 48 kHz WAV with frequency, processing and transport-gap
+**Hear FM signal** for decoded channels. It keeps the latest 120 seconds in browser
+memory; **Save FM audio WAV** downloads a 48 kHz WAV with frequency, processing and transport-gap
 metadata in its RIFF INFO comment. Stop retains that buffer; a new tuning selection
 replaces it, and closing the page discards it. Mute changes speaker volume only.
+
+**Save IQ** exports the original channelized complex samples before host filtering or FM
+as an uncompressed tar containing `capture.sigmf-data` (`ci16_le`), `capture.sigmf-meta`
+([SigMF 1.2.6](https://sigmf.org/)), and packet provenance in `packets.json`. It includes
+sample rate, physical slice center, the selected target, source generation, sample counters,
+flags and host receipt times. Missing intervals become separate capture segments, never
+invented zero samples. Pre-roll and overlapping samples are excluded. ADC continuity is
+still unknown. The physical slice can contain neighboring channels; its center is usually
+different from the selected frequency. This is not full-band ADC IQ. The current FPGA
+producer sends physical slices at 100 kS/s.
+
+IQ retention runs before decoder queues: listened physical slices retain up to 30 seconds
+in server RAM, with a shared 32 MiB payload budget. Older packets are evicted first; Stop
+retains the remaining buffer, while later listening can evict it. A service restart loses
+it. Nothing is retained for spectrum-only activity before a listener selects the slice.
+`GET /api/iq/{channel_id}` reports samples, seconds, rate, center and whether samples are
+currently arriving; `GET /api/iq/{channel_id}/capture.sigmf` downloads the snapshot.
+An empty buffer returns 410; archive preparation is serialized with 429 on concurrent requests.
+
+Click or drag the full waterfall to listen. Dragging updates the marker immediately and
+submits changed targets at most once per 120 ms, with a final selection on release. The
+player discards obsolete pending selections. RF pinning and decoder startup still take
+time, so the panel shows tuning/waiting until samples arrive. Stop keeps the last frequency
+and offers Resume; audio never starts automatically from the stopped state. FM signal audio
+starts on receiver samples; normal voice listening waits for decoded voice.
 
 The full waterfall uses native bins without interpolation or temporal averaging, with
 frequency ticks above and elapsed sample-time ticks down the side. Its resolution badge

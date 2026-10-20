@@ -20,6 +20,17 @@ export interface CallQuery {
   sourceId?: string;
 }
 
+export interface IqCaptureStatus {
+  collecting: boolean;
+  samples: number;
+  seconds: number;
+  sample_rate_hz: number | null;
+  center_hz: number | null;
+  stream_id: number | null;
+  max_seconds: number;
+  last_received_at: number | null;
+}
+
 /** Feature endpoints from engine/README.md § "Frontend needs". */
 export type Need = "blocks" | "catalog" | "calls" | "activity" | "spectrumBinary";
 
@@ -38,6 +49,8 @@ export interface Backend {
   /** Operator: add a true-frequency target inside an advertised receiver slice. */
   tune?(frequencyHz: number, channelId?: string, raw?: boolean): Promise<EngineChannel>;
   listen(handlers: ListenHandlers): Connection;
+  iqCaptureStatus?(channelId: string): Promise<IqCaptureStatus | null>;
+  downloadIq?(channelId: string): Promise<Blob>;
   /** Operator: stop the receiver (not just the listener). */
   stopReceiver(): Promise<string>;
   /** Operator: retune via POST /api/source. */

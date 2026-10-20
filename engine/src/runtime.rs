@@ -98,6 +98,7 @@ pub(crate) struct Audio {
 }
 pub(crate) struct Engine {
     pub(crate) store: Store,
+    pub(crate) iq_history: crate::iq::IqHistory,
     pub(crate) source: Value,
     pub(crate) channels: HashMap<String, Value>,
     /// Operator-selected frequencies in the radio's reading frame. Re-map them to
@@ -150,6 +151,7 @@ impl App {
         Self {
             inner: Arc::new(Mutex::new(Engine {
                 store: Store::new(state_dir, call_memory_mb),
+                iq_history: crate::iq::IqHistory::default(),
                 source: json!({}),
                 channels: HashMap::new(),
                 host_targets: HashSet::new(),
@@ -1071,6 +1073,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
             }
             Err(e) => return Err(e.into()),
         };
+        let producer_flags = frame.flags;
         if frame.kind == 4 {
             activity_channels.clear();
             let config: Value = serde_json::from_slice(&frame.payload)?;
@@ -1302,6 +1305,25 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     }
                 }
                 let shared = Arc::new(frame);
+                {
+                    let mut e = app.engine();
+                    let wanted = wanted_ids(&e).iter().any(|id| e.channels.get(id)
+                        .is_some_and(|c| c["stream_id"] == shared.stream_id));
+                    if wanted {
+                        let rate = e.source["streams"].as_array().into_iter().flatten()
+                            .find(|cfg| cfg["stream_id"] == shared.stream_id)
+                            .and_then(|cfg| cfg["sample_rate_num_hz"].as_f64().zip(cfg["sample_rate_den"].as_f64()))
+                            .filter(|(_, den)| *den > 0.).map(|(num, den)| num / den)
+                            .unwrap_or(shared.rate as f64);
+                        // Decoder queue drops can add host DISCONTINUITY flags above;
+                        // they must not manufacture a gap in the original IQ archive.
+                        let mut captured = shared.clone();
+                        if captured.flags != producer_flags {
+                            Arc::make_mut(&mut captured).flags = producer_flags;
+                        }
+                        e.iq_history.push(captured, rate, now());
+                    }
+                }
                 let mut missed = false;
                 let queue_limit = input_queue_limit(&shared);
                 let uncalibrated = app.engine().source["activity_calibrated"] == false;
@@ -1957,7 +1979,11 @@ mod tests {
     }
     #[test]
     fn raw_listening_emits_48k_discriminator_without_voice_or_rf_confirmation() {
-        let (fm, ids, digital, calls) = fm_session_mode(App::new(8), false, true, false, false, true);
+        let app = App::new(8);
+        let (fm, ids, digital, calls) = fm_session_mode(app.clone(), false, true, false, false, true);
+        let iq = app.engine().iq_history.snapshot(1).expect("listening also buffers the original IQ");
+        assert!(iq.status(app.calibration)["samples"].as_u64().unwrap() > 0);
+        assert_eq!(iq.status(app.calibration)["sample_rate_hz"], 25000.);
         assert!(!ids.is_empty(), "unsquelched raw audio must reach the listener");
         assert!(ids.iter().all(|id| id == "454000000-Raw-1"), "{ids:?}");
         assert!(fm.is_none(), "raw audio is not analog voice");

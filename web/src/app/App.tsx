@@ -21,6 +21,7 @@ const OperatorScreen = lazy(() => import("@/screens/Operator").then((m) => ({ de
 function WideNow() {
   const { view } = useHome();
   const player = usePlayerInstance();
+  const tunedFrequencyHz = usePlayerSelect((s) => s.kind === "live" ? s.frequencyHz : null);
   const activeSourceId = usePlayerSelect((s) => (s.kind === "live" ? s.sourceId : null));
   return (
     <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
@@ -33,12 +34,13 @@ function WideNow() {
       <ResizablePanel defaultSize="62%" minSize="30%" className="min-h-0">
         <div className="flex h-full min-h-0 flex-col gap-3 p-3">
           <LiveSelection />
-          <p className="text-sm text-muted-foreground">Click a signal to tune. UHF tuning snaps to 6.25 kHz steps; hold Shift for an exact frequency.</p>
+          <p className="text-sm text-muted-foreground">Click or drag a signal to listen. UHF tuning snaps to 6.25 kHz steps; hold Shift for an exact frequency.</p>
           <Waterfall
             variant="full"
             sources={view.all}
             talking={view.talking}
             activeSourceId={activeSourceId}
+            tunedFrequencyHz={tunedFrequencyHz}
             onListen={(s) => void player.listen(s, { raw: !s.heardVoice || s.control || s.encryption === "encrypted" })}
             onUnnamed={(frequencyHz) => void player.listenFrequency(frequencyHz)}
             className="flex-1"

@@ -5,6 +5,7 @@ pub mod dsp;
 pub mod fm;
 pub mod freq;
 pub mod link;
+mod iq;
 pub mod runtime;
 pub mod store;
 pub mod voice;

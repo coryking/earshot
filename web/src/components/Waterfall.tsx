@@ -14,6 +14,7 @@ interface Props {
   /** Smoothed talking state from the home model (domain/calm.ts). */
   talking: ReadonlyMap<string, number>;
   activeSourceId: string | null;
+  tunedFrequencyHz?: number | null;
   /** Full view only: tapping a marked trace listens to it. */
   onListen?(source: Source): void;
   /** Full view only: tapped a trace with no source nearby. */
@@ -63,8 +64,9 @@ function stackLabels<T extends { source: Source; x: number; live: boolean }>(
  * Full view (desktop, landscape): history, a frequency readout, labelled
  * markers, and click-to-listen on a marked trace, where a pointer is precise.
  */
-export function Waterfall({ variant, sources, talking, activeSourceId, onListen, onUnnamed, className }: Props) {
+export function Waterfall({ variant, sources, talking, activeSourceId, tunedFrequencyHz, onListen, onUnnamed, className }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
+  const drag = useRef<{ pointerId: number; lastTune: number; frequency: number | null } | null>(null);
   const box = useRef<HTMLDivElement>(null);
   const meta = useSpectrumMeta();
   // Bumped when the GPU context is restored after the browser dropped it (common on backgrounded phones).
@@ -129,16 +131,24 @@ export function Waterfall({ variant, sources, talking, activeSourceId, onListen,
   const low = meta.centerHz !== null && meta.spanHz !== null ? meta.centerHz - meta.spanHz / 2 : null;
   const markers = useMemo(() => {
     if (low === null || !meta.spanHz) return [];
-    return sources
-      .filter((s) => s.frequencyHz !== null && s.inRange)
+    // Both TDMA slots and raw/unknown aliases occupy the same RF trace.
+    const unique = new Map<number, Source>();
+    const rank = (s: Source) => Number(s.id === activeSourceId) * 8 + Number(talking.has(s.id)) * 4 + Number(s.named) * 2 + Number(s.heardVoice);
+    for (const source of sources) {
+      if (source.frequencyHz === null || !source.inRange) continue;
+      const hz = Math.round(source.frequencyHz);
+      const existing = unique.get(hz);
+      if (!existing || rank(source) > rank(existing)) unique.set(hz, source);
+    }
+    return [...unique.values()]
       .map((s) => ({ source: s, x: (s.frequencyHz! - low) / meta.spanHz!, live: talking.has(s.id) }))
       .filter((m) => m.x >= 0 && m.x <= 1);
-  }, [sources, talking, low, meta.spanHz]);
+  }, [sources, talking, low, meta.spanHz, activeSourceId]);
 
   const frequencyAt = (clientX: number) => {
     const rect = box.current?.getBoundingClientRect();
     if (!rect || low === null || !meta.spanHz) return null;
-    return low + ((clientX - rect.left) / rect.width) * meta.spanHz;
+    return low + Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) * meta.spanHz;
   };
 
   const interactive = variant === "full" && !!onListen;
@@ -153,6 +163,8 @@ export function Waterfall({ variant, sources, talking, activeSourceId, onListen,
   const pick = (clientX: number, clientY: number, exact: boolean) => {
     const target = targetAt(clientX, clientY, exact);
     if (!target) return;
+    if (drag.current?.frequency === target.frequencyHz) return;
+    if (drag.current) { drag.current.frequency = target.frequencyHz; drag.current.lastTune = performance.now(); }
     if (target.source) onListen?.(target.source);
     else onUnnamed?.(target.frequencyHz);
   };
@@ -192,11 +204,30 @@ export function Waterfall({ variant, sources, talking, activeSourceId, onListen,
       ref={box}
       className={cn(
         "relative overflow-hidden bg-[#0f1a2b] select-none",
-        "min-h-0 flex-1",
+        "min-h-0 flex-1", interactive && "touch-none",
       )}
-      onPointerUp={interactive ? (e) => pick(e.clientX, e.clientY, e.shiftKey) : undefined}
-      onPointerMove={interactive ? (e) => setHover(targetAt(e.clientX, e.clientY, e.shiftKey)) : undefined}
-      onPointerLeave={interactive ? () => setHover(null) : undefined}
+      onPointerDown={interactive ? (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        drag.current = { pointerId: e.pointerId, lastTune: 0, frequency: null };
+        setHover(targetAt(e.clientX, e.clientY, e.shiftKey));
+        pick(e.clientX, e.clientY, e.shiftKey);
+      } : undefined}
+      onPointerMove={interactive ? (e) => {
+        setHover(targetAt(e.clientX, e.clientY, e.shiftKey));
+        if (drag.current?.pointerId === e.pointerId && performance.now() - drag.current.lastTune >= 120)
+          pick(e.clientX, e.clientY, e.shiftKey);
+      } : undefined}
+      onPointerUp={interactive ? (e) => {
+        if (drag.current?.pointerId !== e.pointerId) return;
+        pick(e.clientX, e.clientY, e.shiftKey);
+        drag.current = null;
+        if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+      } : undefined}
+      onPointerCancel={interactive ? () => { drag.current = null; setHover(null); } : undefined}
+      onLostPointerCapture={interactive ? () => { drag.current = null; } : undefined}
+      onPointerLeave={interactive ? () => { if (!drag.current) setHover(null); } : undefined}
       role="img"
       aria-label={
         empty
@@ -262,6 +293,9 @@ export function Waterfall({ variant, sources, talking, activeSourceId, onListen,
             <ChannelIdentity {...source} compact />
           </span>
         ))}
+      {variant === "full" && tunedFrequencyHz != null && low !== null && meta.spanHz && tunedFrequencyHz >= low && tunedFrequencyHz <= low + meta.spanHz && (
+        <span aria-hidden className="pointer-events-none absolute inset-y-0 w-0.5 bg-[#5eb8c9]" style={{ left: `${(tunedFrequencyHz - low) / meta.spanHz * 100}%` }} />
+      )}
       {variant === "full" && hover !== null && low !== null && meta.spanHz && (
         <span aria-hidden className="pointer-events-none absolute inset-y-0 w-px bg-white/70" style={{ left: `${(hover.frequencyHz - low) / meta.spanHz * 100}%` }} />
       )}

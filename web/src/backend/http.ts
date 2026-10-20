@@ -151,6 +151,19 @@ export class HttpBackend implements Backend {
     return engineChannelSchema.parse(await response.json());
   }
 
+  iqCaptureStatus(channelId: string) {
+    return optional(`/api/iq/${encodeURIComponent(channelId)}`, z.object({
+      collecting: z.boolean(), samples: z.number(), seconds: z.number(), sample_rate_hz: z.number().nullable(),
+      center_hz: z.number().nullable(), stream_id: z.number().nullable(), max_seconds: z.number(),
+      last_received_at: z.number().nullable(),
+    }));
+  }
+
+  async downloadIq(channelId: string) {
+    const response = await request(`/api/iq/${encodeURIComponent(channelId)}/capture.sigmf`, { signal: AbortSignal.timeout(30000) });
+    return response.blob();
+  }
+
   listen(handlers: ListenHandlers) {
     const socket = new WebSocket(wsUrl("/api/listen"));
     socket.binaryType = "arraybuffer";
