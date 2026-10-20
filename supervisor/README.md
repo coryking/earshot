@@ -19,6 +19,13 @@ in 512 bins of 50 kHz, with manual gain. There is no ARM fallback or image
 detection. If the runtime PL image is absent, the producer refuses to open the
 custom registers.
 
+The console's **Spectrum window** controls move by one RF bandwidth with
+**Previous / Next**, or jump to a **Center MHz** with **Go**. These retune the
+running producer with LO readback; rate and RF bandwidth stay fixed. Moving
+releases this browser's listening selection and resets spectrum history. The
+window is shared by all listeners. A producer restart returns to the supervisor's
+startup `--center`.
+
 Per cycle: take `/tmp/pluto-radio.lock` (waits if another session holds it), check the Pluto
 answers `iio_info`, stop leftover producers, snapshot the receiver (`iio_attr`), copy the
 producer to the Pluto's `/tmp` and start it over SSH, watch it. When it ends (exit, stall, or a

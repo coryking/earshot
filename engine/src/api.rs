@@ -460,7 +460,8 @@ async fn configure_source(State(app): State<App>, Json(config): Json<Value>) -> 
             "Invalid receive rate, bandwidth or frequency",
         ));
     }
-    source_request(&app,json!({"action":"configure","input_center_hz":center,"input_rate_hz":rate,"input_bandwidth_hz":bandwidth})).await
+    let reading = (center as f64 * (1. + app.calibration.ppm * 1e-6)).round() as u64;
+    source_request(&app,json!({"action":"configure","input_center_hz":reading,"input_rate_hz":rate,"input_bandwidth_hz":bandwidth})).await
 }
 #[derive(Deserialize)]
 struct ReceiverControl {
@@ -1253,6 +1254,33 @@ mod tests {
         }
         assert_eq!(accepted, MAX_LISTENERS, "exactly the cap is admitted ({refused} refused)");
         assert_eq!(app.engine().listeners.len(), MAX_LISTENERS);
+    }
+    #[tokio::test]
+    async fn configure_center_uses_calibrated_frequency_and_waits_for_readback() {
+        let app = App::configured(crate::runtime::AppConfig {
+            ppm: 23.3, ..crate::runtime::AppConfig::new(3)
+        });
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(1);
+        {
+            let mut e = app.engine();
+            e.control = Some(tx);
+            e.source = json!({"capabilities":{"configure_supported":true}});
+        }
+        let other = app.clone();
+        let producer = std::thread::spawn(move || {
+            let request = rx.recv().unwrap();
+            assert_eq!(request["input_center_hz"], 480011184u64);
+            assert_eq!(request["input_rate_hz"], 25600000u64);
+            assert_eq!(request["input_bandwidth_hz"], 20000000u64);
+            let mut e = other.engine();
+            e.source["input_center_hz"] = request["input_center_hz"].clone();
+            e.source["control_ack"] = json!({"request_id":request["request_id"],"ok":true});
+            e.source["receiver_state"] = json!("running");
+        });
+        let result = configure_source(State(app), Json(json!({"mode":"live",
+            "center_hz":480000000u64,"rate_hz":25600000u64,"bandwidth_hz":20000000u64}))).await.unwrap();
+        producer.join().unwrap();
+        assert_eq!(result.0["source"]["input_center_hz"], 480011184u64);
     }
     #[tokio::test]
     async fn missing_source_controls_never_report_applied() {
