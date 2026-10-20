@@ -463,6 +463,8 @@ module tb_chan;
       feed_done = 0;
     end
 
+    if (snapshot_at > 0) snapshot_check();
+
     wait (feed_done);
     wait_frames(frames);
 
