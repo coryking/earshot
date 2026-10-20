@@ -8,7 +8,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "offload"))
 
-import live_acceptance
 import pluto_readback
 import radio_lock
 import survey_wideband
@@ -98,60 +97,6 @@ def test_restore_attempts_every_write_even_after_a_failure(monkeypatch):
     assert len(errors) == 1 and errors[0].startswith("sampling_frequency")
     # Receive controls only: no TX attribute is ever written.
     assert all(c[0] != "-o" or c[3] == "altvoltage0" for c in calls)
-
-
-def test_producers_distinguishes_none_running_from_unknown(monkeypatch):
-    monkeypatch.setattr(live_acceptance, "pluto", lambda host, cmd, timeout=30: "0")
-    assert live_acceptance.producers("h") == 0
-    monkeypatch.setattr(live_acceptance, "pluto", lambda host, cmd, timeout=30: "<ssh failed: x>")
-    assert live_acceptance.producers("h") is None
-    monkeypatch.setattr(live_acceptance, "pluto", lambda host, cmd, timeout=30: "2")
-    assert live_acceptance.producers("h") == 2
-
-
-def _good_report():
-    return {
-        "browser_path": {
-            "spectrum": {"rows": 100},
-            "task_errors": [],
-            "poll_errors": 0,
-            "pcm_metadata_mismatches": 0,
-        },
-        "stop": {"http_status": 200, "body_status": "stopped"},
-        "post_stop_source": {"receiver_state": "stopped", "control_ack": {"ok": True}},
-    }
-
-
-def test_acceptance_passes_a_clean_run_and_fails_each_broken_path():
-    assert live_acceptance.acceptance_failures(_good_report()) == []
-    broken = _good_report()
-    broken["browser_path"]["spectrum"]["rows"] = 0
-    assert any("spectrum" in f for f in live_acceptance.acceptance_failures(broken))
-    broken = _good_report()
-    broken["browser_path"]["task_errors"] = ["listen websocket: boom"]
-    assert any("observer" in f for f in live_acceptance.acceptance_failures(broken))
-    broken = _good_report()
-    broken["stop"]["http_status"] = 504
-    assert any("STOP" in f for f in live_acceptance.acceptance_failures(broken))
-    broken = _good_report()
-    broken["post_stop_source"]["control_ack"] = {"ok": False}
-    assert any("acknowledge" in f for f in live_acceptance.acceptance_failures(broken))
-    assert live_acceptance.acceptance_failures({}) == ["no browser-path data collected"]
-
-
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["--binary", "b", "--out", "o", "--seconds", "500"],
-        ["--binary", "b", "--out", "o", "--forward", "1;rm -rf /"],
-        ["--binary", "b", "--out", "o", "--forward", "1,2,3,4,5,6,7,8,9"],
-    ],
-)
-def test_live_acceptance_rejects_unbounded_or_unsafe_arguments(monkeypatch, argv):
-    monkeypatch.setattr(sys, "argv", ["live_acceptance", *argv])
-    with pytest.raises(SystemExit) as exit_info:
-        live_acceptance.parse_args()
-    assert exit_info.value.code == 2
 
 
 def test_atsc_pilot_matches_the_uhf_pilot_grid_only():

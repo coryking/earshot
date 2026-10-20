@@ -291,7 +291,7 @@ def test_a_stale_lock_held_flag_is_not_trusted(world, monkeypatch):
         assert probe.returncode != 0, "the lock must be held inside the block"
 
 
-@pytest.mark.parametrize("script", ["live_session.py", "live_acceptance.py", "capture_wideband.py"])
+@pytest.mark.parametrize("script", ["capture_wideband.py"])
 def test_every_radio_script_steps_the_live_service_aside_before_taking_the_lock(script):
     source = (BORROW.parent / script).read_text()
     assert "ensure_borrowed()" in source

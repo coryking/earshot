@@ -28,29 +28,21 @@ use std::{
 struct Args {
     #[arg(long, default_value = "192.168.10.10")]
     host: String,
-    /// The stock-image ARM producer built by offload/arm/build-gcc.sh. Used for the built-in
-    /// "stock-arm" profile (see --profiles for other images).
+    /// pluto-fpga-source, built by fpga/sw/build.sh. The Pluto must run the channelizer
+    /// firmware (fpga/README.md); on any other image the producer exits and is retried.
     #[arg(long)]
     binary: PathBuf,
-    /// JSON file listing producers for other images, tried before the built-in stock profile:
-    /// {"profiles":[{"name":"fpga","match":["fw_version: x","some-device"],"binary":"/path",
-    /// "args":"--port 9010 ...","port":9010,"ready":"waiting on TCP"}]}. A profile is chosen when
-    /// every "match" string appears in the Pluto's `iio_info` output; first match wins. The
-    /// producer must listen on the port the engine dials (9010).
-    #[arg(long)]
-    profiles: Option<PathBuf>,
     #[arg(long, default_value_t = 9010)]
     port: u16,
-    #[arg(long, default_value_t = 800_000)]
-    rate: u32,
-    #[arg(long, default_value_t = 454_216_998)]
+    /// RX LO. The channelizer covers about 20 MHz around it in 512 bins of 50 kHz.
+    #[arg(long, default_value_t = 460_000_000)]
     center: u64,
-    /// Producer stream IDs to forward IQ for (at most 8).
-    #[arg(long, default_value = "1,50,57")]
+    /// Manual RX gain in dB (the activity detector needs manual gain).
+    #[arg(long, default_value_t = 40)]
+    gain: u32,
+    /// Stream IDs (FFT bin + 1) to forward IQ for from the start; the engine pins others.
+    #[arg(long, default_value = "1")]
     forward: String,
-    /// Firmware string the producer is built for; any other image is waited out.
-    #[arg(long, default_value = "v0.37")]
-    firmware: String,
     #[arg(long, default_value = "/tmp/pluto-radio.lock")]
     lock_file: PathBuf,
     /// Written for the engine and UI (radio-engine --receiver-status).
@@ -61,134 +53,18 @@ struct Args {
     engine: String,
 }
 
-/// One kind of image the Pluto may run, and the producer to start on it.
-#[derive(Clone, Debug, PartialEq)]
-struct Profile {
-    name: String,
-    /// Substrings that must all appear in `iio_info` output.
-    matches: Vec<String>,
-    /// Paths on the Pluto that must exist / must not exist for this profile to apply. `iio_info`
-    /// cannot tell a stock image from one with a different bitstream loaded (same firmware
-    /// string, same devices), so the image under test is recognised by what it leaves behind.
-    files_present: Vec<String>,
-    files_absent: Vec<String>,
-    binary: PathBuf,
-    /// File name on the Pluto, under /tmp.
-    remote_name: String,
-    /// Command-line arguments for the producer.
-    args: String,
-    port: u16,
-    /// Output line that means "listening, radio not yet opened".
-    ready: String,
-}
+/// The producer's file name on the Pluto, under /tmp.
+const REMOTE_NAME: &str = "pluto-fpga-source";
+/// Output line that means "listening, radio not yet opened".
+const READY: &str = "waiting on TCP";
+/// `ps | grep` pattern for the producer, written so grep does not match itself.
+const PROCESS_PATTERN: &str = "[p]luto-fpga-source";
 
-fn only_safe(text: &str, what: &str) -> Result<(), String> {
-    // These reach a remote shell: no quoting characters, no shell syntax.
-    if text.chars().all(|c| c.is_ascii_alphanumeric() || " -_.,:/=".contains(c)) {
-        Ok(())
-    } else {
-        Err(format!("{what} {text:?} has characters outside [A-Za-z0-9 -_.,:/=]"))
+fn producer_args(args: &Args) -> Result<String, String> {
+    if !args.forward.chars().all(|c| c.is_ascii_digit() || c == ',') {
+        return Err(format!("--forward {:?} must be stream IDs separated by commas", args.forward));
     }
-}
-
-/// A plain file name for /tmp on the Pluto.
-fn plain_file_name(name: &str) -> Result<(), String> {
-    let ok = !name.is_empty()
-        && name.len() <= 64
-        && !name.starts_with(['-', '.'])
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
-    if ok { Ok(()) } else { Err(format!("remote_name {name:?} must be a plain file name [A-Za-z0-9._-]+")) }
-}
-
-fn absolute_path(path: &str) -> Result<(), String> {
-    let ok = path.starts_with('/')
-        && path.len() <= 200
-        && !path.contains("..")
-        && path.chars().all(|c| c.is_ascii_alphanumeric() || "._-/@".contains(c));
-    if ok { Ok(()) } else { Err(format!("marker path {path:?} must be an absolute path of [A-Za-z0-9._-/@]")) }
-}
-
-fn load_profiles(args: &Args) -> Result<Vec<Profile>, String> {
-    let mut profiles = Vec::new();
-    // A missing file is fine: the unit always passes the path, and the file appears when an
-    // image other than stock needs a producer.
-    if let Some(path) = args.profiles.as_ref().filter(|p| p.exists()) {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let doc: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-        for p in doc["profiles"].as_array().ok_or("profiles file needs a \"profiles\" array")? {
-            let text = |k: &str| p[k].as_str().map(str::to_string);
-            let name = text("name").ok_or("profile without a name")?;
-            let binary = PathBuf::from(text("binary").ok_or_else(|| format!("profile {name}: no binary"))?);
-            let remote_name = text("remote_name").unwrap_or_else(|| {
-                binary.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
-            });
-            let matches: Vec<String> = p["match"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-                .unwrap_or_default();
-            if matches.is_empty() {
-                return Err(format!("profile {name}: \"match\" needs at least one string"));
-            }
-            let strings = |k: &str| -> Vec<String> {
-                p[k].as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-                    .unwrap_or_default()
-            };
-            let port = match p["port"].as_u64() {
-                None => 9010,
-                Some(n) if (1..=65535).contains(&n) => n as u16,
-                Some(n) => return Err(format!("profile {name}: port {n} out of range")),
-            };
-            let profile = Profile {
-                args: text("args").unwrap_or_default(),
-                files_present: strings("files_present"),
-                files_absent: strings("files_absent"),
-                port,
-                ready: text("ready").unwrap_or_else(|| "waiting on TCP".into()),
-                name,
-                matches,
-                binary,
-                remote_name,
-            };
-            plain_file_name(&profile.remote_name)?;
-            only_safe(&profile.args, "args")?;
-            for path in profile.files_present.iter().chain(&profile.files_absent) {
-                absolute_path(path)?;
-            }
-            profiles.push(profile);
-        }
-    }
-    profiles.push(Profile {
-        name: "stock-arm".into(),
-        matches: vec![format!("fw_version: {}\n", args.firmware), "ad9361-phy".into(), "cf-ad9361-lpc".into()],
-        // Markers of the channelizer image: /tmp/pl_is_chan after a runtime bitstream load, the
-        // reserved-memory node in a flashed image (the stock device tree has none).
-        files_present: vec![],
-        files_absent: vec!["/tmp/pl_is_chan".into(), "/proc/device-tree/reserved-memory".into()],
-        binary: args.binary.clone(),
-        remote_name: "pluto-channel-source".into(),
-        args: format!(
-            "--rate {} --bandwidth {} --center {} --port {} --forward-streams {}",
-            args.rate, args.rate, args.center, args.port, args.forward
-        ),
-        port: args.port,
-        ready: "waiting on TCP".into(),
-    });
-    Ok(profiles)
-}
-
-/// `ps | grep` pattern matching any profile's process, written so grep does not match itself.
-fn process_pattern(profiles: &[Profile]) -> String {
-    let mut names: Vec<String> = profiles
-        .iter()
-        .map(|p| {
-            let (head, tail) = p.remote_name.split_at(1);
-            format!("[{head}]{tail}")
-        })
-        .collect();
-    names.sort();
-    names.dedup();
-    names.join("|")
+    Ok(format!("--port {} --center {} --gain {} --forward-streams {}", args.port, args.center, args.gain, args.forward))
 }
 
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -281,19 +157,14 @@ fn attributes() -> Vec<(&'static str, Vec<&'static str>)> {
 struct Pluto {
     args: Args,
     password: String,
-    profiles: Vec<Profile>,
-    /// Index into `profiles` chosen by the last probe.
-    active: usize,
+    /// Producer command-line arguments (validated: they reach a remote shell).
+    producer_args: String,
 }
 
 impl Pluto {
-    fn new(args: Args, profiles: Vec<Profile>) -> Self {
+    fn new(args: Args, producer_args: String) -> Self {
         let password = std::env::var("PLUTO_SSH_PASSWORD").unwrap_or_else(|_| "analog".into());
-        let active = profiles.len() - 1;
-        Self { args, password, profiles, active }
-    }
-    fn profile(&self) -> &Profile {
-        self.profiles.get(self.active).unwrap_or_else(|| self.profiles.last().expect("stock profile"))
+        Self { args, password, producer_args }
     }
     fn target(&self) -> String {
         format!("root@{}", self.args.host)
@@ -339,21 +210,21 @@ impl Pluto {
             .ok_or_else(|| format!("iio_attr {} printed nothing", args.join(" ")))
     }
     fn producer_count(&self) -> Result<u32, String> {
-        let out = self.remote(&format!("ps | grep -c -E '{}'; true", process_pattern(&self.profiles)), Duration::from_secs(20))?;
+        let out = self.remote(&format!("ps | grep -c -E '{}'; true", PROCESS_PATTERN), Duration::from_secs(20))?;
         Ok(out.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0))
     }
     /// A client is or was just connected to the producer's port (any state but LISTEN), so the
     /// radio may be open or still closing.
     fn client_attached(&self) -> Result<bool, String> {
         let table = self.remote("cat /proc/net/tcp", Duration::from_secs(20))?;
-        Ok(client_in_table(&table, self.profile().port))
+        Ok(client_in_table(&table, self.args.port))
     }
     /// TERM so the producer restores the radio itself. A producer still waiting for its client
     /// ignores TERM (libc restarts accept()), but then the radio is not open and KILL is safe.
     fn stop_remote_producers(&self) -> Result<(), String> {
         let kill = |signal: &str| {
             self.remote(
-                &format!("kill -{signal} $(ps | grep -E '{}' | awk '{{print $1}}') 2>/dev/null; true", process_pattern(&self.profiles)),
+                &format!("kill -{signal} $(ps | grep -E '{}' | awk '{{print $1}}') 2>/dev/null; true", PROCESS_PATTERN),
                 Duration::from_secs(20),
             )
             .map(|_| ())
@@ -401,7 +272,7 @@ impl Pluto {
     }
     fn inspect_now(&self) -> Result<Inspection, String> {
         let out = self.remote(
-            &format!("cat /proc/sys/kernel/random/boot_id; ps | grep -c -E '{}'; true", process_pattern(&self.profiles)),
+            &format!("cat /proc/sys/kernel/random/boot_id; ps | grep -c -E '{}'; true", PROCESS_PATTERN),
             Duration::from_secs(20),
         )?;
         let mut lines = out.lines().map(str::trim);
@@ -429,15 +300,6 @@ fn differences(before: &Snapshot, after: &Snapshot) -> Vec<String> {
 
 impl Radio for Pluto {
     fn probe(&mut self) -> Probe {
-        // Picked up without a restart when the profiles file changes.
-        match load_profiles(&self.args) {
-            Ok(profiles) if profiles != self.profiles => {
-                println!("profiles reloaded: {:?}", profiles.iter().map(|p| p.name.as_str()).collect::<Vec<_>>());
-                self.profiles = profiles;
-            }
-            Ok(_) => {}
-            Err(e) => eprintln!("keeping the previous profiles: {e}"),
-        }
         let mut c = Command::new("iio_info");
         c.args(["-u", &self.uri()]);
         let out = match capture(c, Duration::from_secs(25)) {
@@ -455,45 +317,7 @@ impl Radio for Pluto {
             .filter(|l| keep.iter().any(|k| l.starts_with(k)))
             .collect::<Vec<_>>()
             .join("; ");
-        let candidates: Vec<usize> = (0..self.profiles.len())
-            .filter(|i| self.profiles[*i].matches.iter().all(|m| out.stdout.contains(m.as_str())))
-            .collect();
-        let candidates_seen = !candidates.is_empty();
-        let mut found = None;
-        if !candidates.is_empty() {
-            let mut paths: Vec<&str> = candidates
-                .iter()
-                .flat_map(|i| {
-                    let p = &self.profiles[*i];
-                    p.files_present.iter().chain(&p.files_absent).map(String::as_str)
-                })
-                .collect();
-            paths.sort_unstable();
-            paths.dedup();
-            let present = if paths.is_empty() {
-                Vec::new()
-            } else {
-                let script = format!("for f in {}; do [ -e $f ] && echo P:$f; done; echo END", paths.join(" "));
-                match self.remote(&script, Duration::from_secs(20)) {
-                    Ok(text) if text.contains("END") => {
-                        text.lines().filter_map(|l| l.strip_prefix("P:")).map(str::to_string).collect()
-                    }
-                    Ok(_) => return Probe::Unreachable("the marker check printed nothing".into()),
-                    Err(e) => return Probe::Unreachable(e),
-                }
-            };
-            found = candidates.into_iter().find(|i| {
-                let p = &self.profiles[*i];
-                p.files_present.iter().all(|f| present.contains(f)) && p.files_absent.iter().all(|f| !present.contains(f))
-            });
-        }
-        if let Some(index) = found {
-            self.active = index;
-            Probe::Ready(format!("{summary} [{}]", self.profiles[index].name))
-        } else {
-            let marked = if candidates_seen { "; test-image markers present" } else { "" };
-            Probe::WrongImage(if summary.is_empty() { "no firmware version reported".into() } else { format!("{summary}{marked}") })
-        }
+        Probe::Ready(summary)
     }
     fn inspect(&mut self) -> Result<Inspection, String> {
         self.inspect_now()
@@ -504,17 +328,14 @@ impl Radio for Pluto {
     fn snapshot(&mut self) -> Result<Snapshot, String> {
         self.read_snapshot()
     }
-    fn profile_name(&self) -> String {
-        self.profile().name.clone()
-    }
     fn start(&mut self) -> Result<Box<dyn Running>, String> {
-        let profile = self.profile().clone();
-        if !profile.binary.is_file() {
-            return Err(format!("producer binary for {} not found: {}", profile.name, profile.binary.display()));
+        let binary = &self.args.binary;
+        if !binary.is_file() {
+            return Err(format!("producer binary not found: {}", binary.display()));
         }
         let mut copy = Command::new("sshpass");
-        copy.args(["-e", "scp", "-O"]).args(Self::ssh_options()).arg(&profile.binary);
-        copy.arg(format!("{}:/tmp/{}", self.target(), profile.remote_name)).env("SSHPASS", &self.password);
+        copy.args(["-e", "scp", "-O"]).args(Self::ssh_options()).arg(binary);
+        copy.arg(format!("{}:/tmp/{REMOTE_NAME}", self.target())).env("SSHPASS", &self.password);
         let copied = capture(copy, Duration::from_secs(60))?;
         if copied.code != Some(0) {
             return Err(format!("copying the producer failed: {}", first_line(&copied.stderr)));
@@ -529,8 +350,8 @@ impl Radio for Pluto {
             "cd /tmp && chmod +x ./{name} && ./{name} {args} & \
              p=$!; trap 'kill -TERM $p 2>/dev/null' HUP INT TERM; rc=0; \
              while kill -0 $p 2>/dev/null; do wait $p; rc=$?; done; exit $rc",
-            name = profile.remote_name,
-            args = profile.args
+            name = REMOTE_NAME,
+            args = self.producer_args
         );
         let mut command = self.ssh(&remote);
         command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -551,10 +372,9 @@ impl Radio for Pluto {
             });
         }
         let mut run = PlutoRun { pluto: self.clone(), child, lines };
-        let ready = profile.ready.clone();
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if run.tail().contains(&ready) {
+            if run.tail().contains(READY) {
                 return Ok(Box::new(run));
             }
             if let Some(exit) = run.try_wait() {
@@ -640,8 +460,7 @@ impl Radio for Pluto {
         }
     }
     fn cleanup(&mut self) {
-        let files: Vec<String> = self.profiles.iter().map(|p| format!("/tmp/{}", p.remote_name)).collect();
-        let _ = self.remote(&format!("rm -f {}", files.join(" ")), Duration::from_secs(20));
+        let _ = self.remote(&format!("rm -f /tmp/{REMOTE_NAME}"), Duration::from_secs(20));
     }
 }
 
@@ -804,17 +623,11 @@ fn main() {
     for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         unsafe { libc::signal(signal, on_signal as *const () as libc::sighandler_t) };
     }
-    let profiles = load_profiles(&args).unwrap_or_else(|e| {
-        // Never go dark over a half-written profiles file: run with the stock profile only, and
-        // pick the file up once it parses (profiles are re-read at every check).
-        eprintln!("ignoring the profiles file for now: {e}");
-        let without = Args { profiles: None, ..args.clone() };
-        load_profiles(&without).expect("stock profile")
+    let producer = producer_args(&args).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2);
     });
-    for profile in &profiles {
-        let note = if profile.binary.is_file() { "" } else { "  (binary missing: that image will fail to start)" };
-        println!("profile {}: match {:?} -> {}{note}", profile.name, profile.matches, profile.binary.display());
-    }
+    println!("producer: {} {producer}", args.binary.display());
     let engine = (!args.engine.is_empty()).then(|| args.engine.clone());
     let env = RealEnv { status_file: args.status_file.clone(), engine, logged: None };
     let lock = FileLock { path: args.lock_file.clone(), held: None, logged: None };
@@ -829,7 +642,7 @@ fn main() {
             }
         }
     });
-    let mut supervisor = Supervisor::new(Pluto::new(args, profiles), lock, env, Policy::default());
+    let mut supervisor = Supervisor::new(Pluto::new(args, producer), lock, env, Policy::default());
     supervisor.run();
 }
 
@@ -837,61 +650,12 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn args(profiles: Option<PathBuf>) -> Args {
-        Args::parse_from(["x", "--binary", "/b/stock", "--status-file", "/s"]).with_profiles(profiles)
-    }
-    impl Args {
-        fn with_profiles(mut self, p: Option<PathBuf>) -> Self {
-            self.profiles = p;
-            self
-        }
-    }
-
     #[test]
-    fn the_stock_profile_is_always_last_and_fpga_profiles_win_when_they_match() {
-        let dir = std::env::temp_dir().join(format!("sup-prof-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("p.json");
-        std::fs::write(
-            &file,
-            r#"{"profiles":[{"name":"fpga","match":["fw_version: fpga-1"],"binary":"/b/pluto-fpga-source","args":"--port 9010 --x 1"}]}"#,
-        )
-        .unwrap();
-        let profiles = load_profiles(&args(Some(file))).unwrap();
-        assert_eq!(profiles.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["fpga", "stock-arm"]);
-        assert_eq!(profiles[0].remote_name, "pluto-fpga-source");
-        assert_eq!(profiles[1].matches, ["fw_version: v0.37\n", "ad9361-phy", "cf-ad9361-lpc"]);
-        assert!(profiles[1].args.contains("--forward-streams 1,50,57"));
-        // grep patterns cover every producer name without matching grep itself
-        assert_eq!(process_pattern(&profiles), "[p]luto-channel-source|[p]luto-fpga-source");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn stock_profile_requires_the_exact_firmware_line_and_no_test_image_markers() {
-        let profiles = load_profiles(&args(None)).unwrap();
-        let stock = &profiles[0];
-        assert_eq!(stock.matches[0], "fw_version: v0.37\n");
-        assert!(stock.files_absent.contains(&"/tmp/pl_is_chan".to_string()));
-        assert!(stock.files_absent.contains(&"/proc/device-tree/reserved-memory".to_string()));
-        let info = "\thw_model: Analog Devices PlutoSDR Rev.B\n\tfw_version: v0.37\n";
-        assert!(info.contains(&stock.matches[0]));
-        assert!(!"\tfw_version: v0.37-dirty\n".contains(&stock.matches[0]));
-        assert!(!"\tfw_version: v0.370\n".contains(&stock.matches[0]));
-    }
-
-    #[test]
-    fn remote_names_and_marker_paths_are_strictly_validated() {
-        for ok in ["pluto-fpga-source", "a.b_c-1"] {
-            assert!(plain_file_name(ok).is_ok(), "{ok}");
-        }
-        for bad in ["", "-x", ".x", "a b", "../x", "x/y", "a;b", "x\n"] {
-            assert!(plain_file_name(bad).is_err(), "{bad:?}");
-        }
-        assert!(absolute_path("/tmp/pl_is_chan").is_ok());
-        for bad in ["tmp/x", "/tmp/../etc", "/tmp/a b", "/tmp/$x", "/tmp/x;y"] {
-            assert!(absolute_path(bad).is_err(), "{bad}");
-        }
+    fn producer_arguments_default_to_the_wide_window_and_reject_shell_text() {
+        let args = Args::parse_from(["x", "--binary", "/b/pluto-fpga-source", "--status-file", "/s"]);
+        assert_eq!(producer_args(&args).unwrap(), "--port 9010 --center 460000000 --gain 40 --forward-streams 1");
+        let bad = Args::parse_from(["x", "--binary", "/b", "--status-file", "/s", "--forward", "1;reboot"]);
+        assert!(producer_args(&bad).is_err());
     }
 
     #[test]
@@ -906,28 +670,5 @@ mod tests {
         }
         let other = format!("{header}{}", row("0A0AA8C0:1F90", "01"));
         assert!(!client_in_table(&other, 9010), "a different port");
-    }
-
-    #[test]
-    fn profile_text_that_reaches_the_remote_shell_is_restricted() {
-        let dir = std::env::temp_dir().join(format!("sup-bad-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        for bad in [
-            r#""args":"--x; reboot""#,
-            r#""args":"$(reboot)""#,
-            r#""remote_name":"a b;c""#,
-            r#""remote_name":"x /mnt/jffs2/config.txt""#,
-            r#""remote_name":"../mnt/jffs2/x""#,
-            r#""remote_name":"""#,
-            r#""files_absent":["/tmp/../etc"]"#,
-            r#""port":70000"#,
-        ] {
-            let file = dir.join("p.json");
-            std::fs::write(&file, format!(r#"{{"profiles":[{{"name":"f","match":["m"],"binary":"/b/f",{bad}}}]}}"#)).unwrap();
-            assert!(load_profiles(&args(Some(file))).is_err(), "{bad}");
-        }
-        std::fs::write(dir.join("p.json"), r#"{"profiles":[{"name":"f","match":[],"binary":"/b/f"}]}"#).unwrap();
-        assert!(load_profiles(&args(Some(dir.join("p.json")))).is_err(), "empty match");
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -211,14 +211,11 @@ under the engine lock); a failed write is retried and counted in `persistence.wr
 a state file that cannot be parsed is moved aside as `.corrupt`; shutdown (SIGTERM or Ctrl-C)
 closes open calls and flushes. Without `--state-dir` everything is in memory.
 
-## Live acceptance and status
+## Live source and status
 
-`offload/live_acceptance.py` runs the bounded Pluto to engine to browser-path acceptance
-under the shared `/tmp/pluto-radio.lock` (see offload/arm/README.md for the cross-build and
-the exact command). It checks the Pluto's reported firmware first, then records spectrum
-rows, WebSocket events and audio, freshness, gaps, pinning, and the acknowledged STOP with
-receiver readbacks. Pass criteria are the delivered path and restoration; audio and RF
-activity are reported, since the air may be quiet.
+The live source is `pluto-fpga-source` on the Pluto (FPGA channelizer, `fpga/README.md`),
+kept running by `supervisor/`. Anything else that needs the radio goes through
+`offload/radio-borrow`.
 
 Endpoint notes: `/api/status` always reports numeric `received_seconds`,
 `source_position_s`, `decode_latency_s`, `center_hz`, `rate_hz` and `bandwidth_hz`, because
