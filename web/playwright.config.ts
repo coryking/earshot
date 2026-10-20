@@ -3,7 +3,7 @@ import { defineConfig, devices } from "@playwright/test";
 // Tests run against the production build (vite preview) with /api proxied to a
 // private dev engine on 8830 started by e2e/global-setup.ts. Never the
 // production service (8810).
-const port = 5190;
+const port = Number(process.env.E2E_PORT ?? 5190);
 const launch = {
   args: ["--autoplay-policy=no-user-gesture-required", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
 };

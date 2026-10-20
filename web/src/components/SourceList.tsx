@@ -1,9 +1,9 @@
 import { ChevronDown, Info, Lock, Star } from "lucide-react";
 import { memo, useEffect, useRef, useState, type ReactNode } from "react";
-import { usePlayerInstance, usePlayerSelect } from "@/app/player-context";
+import { usePlayerSelect } from "@/app/player-context";
 import { openSheet } from "@/app/ui";
 import { CallLane, LevelMeter } from "@/components/bits";
-import { heardAgo, type CalmGroups } from "@/domain/calm";
+import { heardAgo, MAX_BARS, type CalmGroups } from "@/domain/calm";
 import type { Call, Source } from "@/domain/model";
 import { cn } from "@/lib/utils";
 
@@ -13,7 +13,11 @@ export interface ListProps {
   labels: ReadonlyMap<string, string>;
   callsBySource: Map<string, Call[]>;
   followed: ReadonlySet<string>;
+  /** Signal bars for the rows in Other activity. */
+  bars: ReadonlyMap<string, number>;
   now: number;
+  /** Listen to a source by id; the id is resolved when the tap happens. */
+  onListen(id: string): void;
 }
 
 type Variant = "card" | "row" | "quiet";
@@ -25,7 +29,25 @@ interface RowProps {
   label: string | undefined;
   followed: boolean;
   calls?: Call[];
+  /** 1 to MAX_BARS signal bars, for rows in Other activity. */
+  bars?: number;
   now: number;
+  onListen(id: string): void;
+}
+
+/** Signal strength as bars: no words, fixed width, so a changing level never moves the row. */
+function Bars({ level }: { level: number }) {
+  return (
+    <span className="flex h-4 w-5 shrink-0 items-end gap-0.5" role="img" aria-label={`Signal ${level} of ${MAX_BARS}`}>
+      {Array.from({ length: MAX_BARS }, (_, i) => (
+        <span
+          key={i}
+          className={cn("w-[3px] rounded-[1px]", i < level ? "bg-signal" : "bg-muted-foreground/25")}
+          style={{ height: `${5 + i * 3}px` }}
+        />
+      ))}
+    </span>
+  );
 }
 
 /**
@@ -33,8 +55,7 @@ interface RowProps {
  * playing source again stops it); "About" is a separate, clearly bounded button
  * on the right. There is no long-press or tap-for-info on the main target.
  */
-const SourceRow = memo(function SourceRow({ source, variant, talking, label, followed, calls, now }: RowProps) {
-  const player = usePlayerInstance();
+const SourceRow = memo(function SourceRow({ source, variant, talking, label, followed, calls, bars, now, onListen }: RowProps) {
   const playing = usePlayerSelect((s) => s.kind === "live" && s.sourceId === source.id);
   const isPrivate = source.encryption === "encrypted";
   const right = talking ? (
@@ -47,6 +68,8 @@ const SourceRow = memo(function SourceRow({ source, variant, talking, label, fol
       {isPrivate && <Lock className="size-3" aria-label="Private" />}
       {source.inRange ? (heardAgo(source.lastHeardAt, now) ?? "") : "Out of range"}
     </span>
+  ) : variant === "quiet" && bars !== undefined && source.inRange ? (
+    <Bars level={bars} />
   ) : null;
   // Names say what a source is; the second line only tells apart rows that share a name.
   const second = playing ? "Listening" : (label ?? null);
@@ -71,7 +94,7 @@ const SourceRow = memo(function SourceRow({ source, variant, talking, label, fol
           "flex min-h-14 min-w-0 flex-1 flex-col justify-center gap-0.5 pr-2 pl-4 text-left focus-visible:-outline-offset-2",
           variant === "quiet" ? "py-2" : "py-3",
         )}
-        onClick={() => void player.listen(source)}
+        onClick={() => onListen(source.id)}
       >
         <span className="sr-only">{playing ? "Stop listening to" : "Listen to"}</span>{" "}
         <span className="flex min-w-0 items-center gap-2">
@@ -106,23 +129,54 @@ const SourceRow = memo(function SourceRow({ source, variant, talking, label, fol
 
 /**
  * Keeps a leaving item on screen briefly so it can fade and fold away instead
- * of vanishing. Order follows `items`; leavers stay where they were.
+ * of vanishing. The leaver is worked out during the render in which it drops
+ * out of `items`, so its element never unmounts: it only gains the leaving
+ * class. Order follows `items`; leavers stay where they were. Each leaver has
+ * its own removal timer, which only unmounting or the item coming back cancels.
  */
-function usePresence<T extends { id: string }>(items: T[], ms = 320) {
+export function usePresence<T extends { id: string }>(items: T[], ms = 320) {
   const [leaving, setLeaving] = useState<Map<string, T>>(new Map());
-  const previous = useRef<T[]>(items);
-  useEffect(() => {
+  const [seen, setSeen] = useState(items);
+  if (items !== seen) {
+    setSeen(items);
     const current = new Set(items.map((i) => i.id));
-    const gone = previous.current.filter((i) => !current.has(i.id));
-    previous.current = items;
-    if (!gone.length) return;
-    setLeaving((m) => new Map([...m, ...gone.map((g) => [g.id, g] as const)]));
-    const t = setTimeout(
-      () => setLeaving((m) => new Map([...m].filter(([id]) => !gone.some((g) => g.id === id)))),
-      ms,
-    );
-    return () => clearTimeout(t);
-  }, [items, ms]);
+    const gone = seen.filter((i) => !current.has(i.id));
+    if (gone.length || [...leaving.keys()].some((id) => current.has(id))) {
+      setLeaving((m) => {
+        const next = new Map([...m].filter(([id]) => !current.has(id)));
+        for (const g of gone) next.set(g.id, g);
+        return next;
+      });
+    }
+  }
+  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  useEffect(() => {
+    for (const [id, t] of timers.current)
+      if (!leaving.has(id)) {
+        clearTimeout(t);
+        timers.current.delete(id);
+      }
+    for (const id of leaving.keys())
+      if (!timers.current.has(id))
+        timers.current.set(
+          id,
+          setTimeout(() => {
+            timers.current.delete(id);
+            setLeaving((m) => {
+              const next = new Map(m);
+              next.delete(id);
+              return next;
+            });
+          }, ms),
+        );
+  }, [leaving, ms]);
+  useEffect(() => {
+    const all = timers.current;
+    return () => {
+      for (const t of all.values()) clearTimeout(t);
+      all.clear();
+    };
+  }, []);
   const present = new Set(items.map((i) => i.id));
   return [
     ...items.map((item) => ({ item, leaving: false })),
@@ -136,12 +190,17 @@ export const TalkingNow = memo(function TalkingNow({
   labels,
   followed,
   now,
-}: Pick<ListProps, "groups" | "labels" | "followed" | "now">) {
+  onListen,
+}: Pick<ListProps, "groups" | "labels" | "followed" | "now" | "onListen">) {
   const shown = usePresence(groups.talking);
   return (
     <section aria-labelledby="talking-now-title" className="px-4 pb-1">
-      <h2 id="talking-now-title" className="flex h-6 items-center text-sm font-semibold text-muted-foreground">
+      <h2
+        id="talking-now-title"
+        className="flex h-6 items-center justify-between text-sm font-semibold text-muted-foreground"
+      >
         Talking now
+        {groups.moreTalking > 0 && <span className="tabular font-normal">+{groups.moreTalking}</span>}
       </h2>
       <div className="min-h-[4.25rem]">
         {groups.talking.length === 0 && !shown.length ? (
@@ -161,6 +220,7 @@ export const TalkingNow = memo(function TalkingNow({
                       label={labels.get(item.id)}
                       followed={followed.has(item.id)}
                       now={now}
+                      onListen={onListen}
                     />
                   </div>
                 </div>
@@ -169,18 +229,28 @@ export const TalkingNow = memo(function TalkingNow({
           </ul>
         )}
       </div>
-      {groups.moreTalking > 0 && (
-        <p className="tabular h-5 text-xs text-muted-foreground">+{groups.moreTalking} more</p>
-      )}
     </section>
   );
 });
 
 /** The quiet list: followed and recently heard channels in a stable order, then the folded groups. */
-export const SourceList = memo(function SourceList({ groups, talking, labels, callsBySource, followed, now }: ListProps) {
-  const [showOther, setShowOther] = useState(false);
+export const SourceList = memo(function SourceList({
+  groups,
+  talking,
+  labels,
+  callsBySource,
+  followed,
+  bars,
+  now,
+  onListen,
+}: ListProps) {
+  // With no voice channels yet, Other activity is all there is: start it open, and keep it as it is.
+  const [otherChoice, setOtherChoice] = useState<boolean | null>(null);
+  const [otherLatch, setOtherLatch] = useState(false);
+  if (!otherLatch && !groups.channels.length && groups.other.length) setOtherLatch(true);
+  const showOther = otherChoice ?? otherLatch;
   const [showMuted, setShowMuted] = useState(false);
-  const row = (s: Source, variant: Variant) => (
+  const row = (s: Source, variant: Variant, withBars = false) => (
     <SourceRow
       key={s.id}
       source={s}
@@ -189,7 +259,9 @@ export const SourceList = memo(function SourceList({ groups, talking, labels, ca
       label={labels.get(s.id)}
       followed={followed.has(s.id)}
       calls={callsBySource.get(s.id)}
+      bars={withBars ? bars.get(s.id) : undefined}
       now={now}
+      onListen={onListen}
     />
   );
   return (
@@ -210,10 +282,10 @@ export const SourceList = memo(function SourceList({ groups, talking, labels, ca
         <Folded
           title={`Other activity (${groups.other.length})`}
           open={showOther}
-          onToggle={() => setShowOther((v) => !v)}
+          onToggle={() => setOtherChoice(!showOther)}
         >
           <ul aria-label="Other activity" className="divide-y divide-border/40" data-source-list>
-            {groups.other.map((s) => row(s, "quiet"))}
+            {groups.other.map((s) => row(s, "quiet", true))}
           </ul>
         </Folded>
       )}

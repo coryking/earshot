@@ -233,7 +233,7 @@ export function useCatalog() {
     const known = new Set(engine.map((e) => e.id));
     return [...engine, ...saved.filter((e) => !known.has(e.id))];
   }, [engine, saved]);
-  return { entries, onDevice: query.data === null, engineEntries: engine };
+  return { entries, onDevice: query.data === null, engineEntries: engine, settled: !query.isPending };
 }
 
 /**
@@ -372,7 +372,7 @@ export function useActivity(): { activity: Activity | null; learned: boolean } {
 }
 
 /** Blocks from the engine, or the one the receiver reports, unnamed. */
-export function useBlocks(): { blocks: Block[]; current: Block | null; canChange: boolean } {
+export function useBlocks(): { blocks: Block[]; current: Block | null; canChange: boolean; canSwitch: boolean } {
   const backend = useBackend();
   const status = useStatus();
   const query = useQuery({ queryKey: keys.blocks, queryFn: () => backend.blocks(), staleTime: 60_000 });
@@ -385,13 +385,13 @@ export function useBlocks(): { blocks: Block[]; current: Block | null; canChange
         centerHz: b.center_hz,
         spanHz: b.span_hz,
       }));
-      return { blocks, current: blocks.find((b) => b.id === query.data?.current_id) ?? null, canChange: true };
+      return { blocks, current: blocks.find((b) => b.id === query.data?.current_id) ?? null, canChange: true, canSwitch: blocks.length > 1 };
     }
     // The engine reports 0 (newer builds) or null (older) before the first CONFIG.
     const known = (v: number | null | undefined) => (v ? v : null);
     const center = known(status.data?.center_hz);
     const span = known(status.data?.bandwidth_hz) ?? known(status.data?.rate_hz);
-    if (center === null || span === null) return { blocks: [], current: null, canChange: false };
+    if (center === null || span === null) return { blocks: [], current: null, canChange: false, canSwitch: false };
     const lowMHz = Math.floor((center - span / 2) / 1e6);
     const highMHz = Math.ceil((center + span / 2) / 1e6);
     const current: Block = {
@@ -401,7 +401,7 @@ export function useBlocks(): { blocks: Block[]; current: Block | null; canChange
       centerHz: center,
       spanHz: span,
     };
-    return { blocks: [current], current, canChange: false };
+    return { blocks: [current], current, canChange: false, canSwitch: false };
   }, [query.data, status.data]);
 }
 
