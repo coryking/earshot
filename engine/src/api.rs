@@ -1,4 +1,4 @@
-use crate::runtime::{App, sync_pins};
+use crate::runtime::{App, retain_host_targets, sync_pins};
 use crate::store::AudioSource;
 use axum::{
     Json, Router,
@@ -87,6 +87,7 @@ async fn monitor(
         return Ok(Json(e.listener.clone()));
     }
     e.selected = m.channel_id;
+    retain_host_targets(&mut e, None);
     e.selected_at = Instant::now();
     e.decoder_generation += 1;
     sync_pins(&mut e);
@@ -109,6 +110,50 @@ async fn listener(State(app): State<App>) -> Json<Value> {
     value["dropped_blocks"] = json!(e.drops);
     value["input_dropped"] = json!(e.drops);
     Json(value)
+}
+/// Operator tuning uses true Hz, unlike the producer's radio-reading CONFIG frame.
+async fn tune(State(app): State<App>, Json(request): Json<Value>) -> ApiResult {
+    let frequency = request["frequency_hz"].as_f64().filter(|v| v.is_finite() && (70e6..=6e9).contains(v))
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "frequency_hz must be a receive frequency in true Hz"))?;
+    let reading = (frequency * (1. + app.calibration.ppm * 1e-6)).round() as u64;
+    let mut e = app.engine();
+    if !e.active {
+        return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, "Receiver is disconnected or stopped"));
+    }
+    let cfg = crate::runtime::target_slice(&e.source, reading as f64)
+        .ok_or_else(|| api_error(StatusCode::UNPROCESSABLE_ENTITY, "Frequency is outside the receive window or no slice contains its channel"))?;
+    let display = app.display_frequency(reading as f64).0;
+    e.host_targets.retain(|old| app.display_frequency(*old as f64).0 != display);
+    e.host_targets.insert(reading);
+    let stream = cfg["stream_id"].as_u64().unwrap() as u32;
+    let channel = crate::runtime::make_channel(&app, stream, reading as f64, "Unknown", 1);
+    let id = channel["id"].as_str().unwrap().to_string();
+    let entry = e.channels.entry(id.clone()).or_insert(channel);
+    entry["stream_id"] = json!(stream);
+    entry["logical_hz"] = json!(reading);
+    entry["reading_hz"] = json!(reading);
+    entry["in_range"] = json!(true);
+    // Identified siblings use the same nominal channel identity. Retarget them
+    // together so an explicit DMR-slot listener cannot keep the replaced offset.
+    for c in e.channels.values_mut() {
+        if c["logical_hz"].as_f64().is_some_and(|r| app.display_frequency(r).0 == display) {
+            c["logical_hz"] = json!(reading);
+            c["reading_hz"] = json!(reading);
+            c["stream_id"] = json!(stream);
+            c["in_range"] = json!(true);
+        }
+    }
+    retain_host_targets(&mut e, Some(reading));
+    let channel = e.channels[&id].clone();
+    drop(e);
+    let _ = app.events.send(json!({"type":"channel","channel":channel}));
+    Ok(Json(channel))
+}
+
+fn spectrum_geometry(source: &Value, calibration: crate::freq::Calibration) -> (f64, f64) {
+    let center = source["psd"]["center_hz"].as_f64().or_else(|| source["input_center_hz"].as_f64()).unwrap_or(0.);
+    let span = source["psd"]["span_hz"].as_f64().or_else(|| source["input_bandwidth_hz"].as_f64()).unwrap_or(0.);
+    (calibration.true_hz(center), calibration.true_hz(span))
 }
 #[derive(Deserialize)]
 struct After {
@@ -155,7 +200,7 @@ async fn spectrum(State(app): State<App>, Query(q): Query<After>) -> Json<Value>
         .take(60)
         .collect();
     Json(
-        json!({"sequence":rows.last().map(|x|x.0).unwrap_or(e.psd_seq),"generation":e.generation,"rows":rows.iter().map(|x|&x.2).collect::<Vec<_>>(),"times":rows.iter().map(|x|x.1).collect::<Vec<_>>(),"center_hz":app.calibration.true_hz(e.source["input_center_hz"].as_f64().unwrap_or(0.)),"center_reading_hz":e.source["input_center_hz"],"span_hz":e.source["input_bandwidth_hz"],"low_db":low_db,"high_db":high_db,"unit":unit,"source":if e.active{"live"}else{"disconnected"}}),
+        json!({"sequence":rows.last().map(|x|x.0).unwrap_or(e.psd_seq),"generation":e.generation,"rows":rows.iter().map(|x|&x.2).collect::<Vec<_>>(),"times":rows.iter().map(|x|x.1).collect::<Vec<_>>(),"center_hz":spectrum_geometry(&e.source, app.calibration).0,"center_reading_hz":e.source["psd"]["center_hz"].as_f64().or_else(|| e.source["input_center_hz"].as_f64()),"span_hz":spectrum_geometry(&e.source, app.calibration).1,"low_db":low_db,"high_db":high_db,"unit":unit,"source":if e.active{"live"}else{"disconnected"}}),
     )
 }
 #[derive(Deserialize)]
@@ -184,6 +229,7 @@ async fn ws(State(app): State<App>, Query(q): Query<Listen>, ws: WebSocketUpgrad
             return None;
         }
         e.listeners.insert(connection, id.clone());
+        retain_host_targets(&mut e, None);
         sync_pins(&mut e);
         Some(ListenerGuard { app: app.clone(), connection })
     });
@@ -205,6 +251,7 @@ impl Drop for ListenerGuard {
     fn drop(&mut self) {
         let mut e = self.app.engine();
         e.listeners.remove(&self.connection);
+        retain_host_targets(&mut e, None);
         sync_pins(&mut e);
     }
 }
@@ -364,8 +411,10 @@ async fn stop(State(app): State<App>) -> ApiResult {
         e.active = false;
         e.decoder_generation += 1;
         e.selected = None;
+        e.host_targets.clear();
         sync_pins(&mut e);
         e.listener["status"] = json!("stopped");
+        e.listener["channel_id"] = Value::Null;
         e.listener["state"] = json!("stopped");
         e.listener["voice_active"] = json!(false);
         e.source["capabilities"]["stop_supported"]
@@ -623,8 +672,9 @@ async fn spectrum_bin(State(app): State<App>, Query(q): Query<SpectrumBin>) -> i
     out.extend_from_slice(b"RSP1");
     out.extend_from_slice(&(bins as u16).to_le_bytes());
     out.extend_from_slice(&(rows.len() as u16).to_le_bytes());
-    out.extend_from_slice(&app.calibration.true_hz(e.source["input_center_hz"].as_f64().unwrap_or(0.)).to_le_bytes());
-    out.extend_from_slice(&e.source["input_bandwidth_hz"].as_f64().unwrap_or(0.).to_le_bytes());
+    let (center, span) = spectrum_geometry(&e.source, app.calibration);
+    out.extend_from_slice(&center.to_le_bytes());
+    out.extend_from_slice(&span.to_le_bytes());
     out.extend_from_slice(&(low as f32).to_le_bytes());
     out.extend_from_slice(&(high as f32).to_le_bytes());
     out.extend_from_slice(&e.psd_seq.to_le_bytes());
@@ -698,6 +748,7 @@ pub fn router(app: App, web_dir: Option<PathBuf>) -> Router {
         .route("/api/status", get(status))
         .route("/api/listener", get(listener))
         .route("/api/monitor", post(monitor))
+        .route("/api/tune", post(tune))
         .route("/api/stop", post(stop))
         .route("/api/source", post(configure_source))
         .route("/api/spectrum", get(spectrum))
@@ -1095,5 +1146,91 @@ mod tests {
         });
         let result = stop(State(app)).await.unwrap();
         assert_eq!(result.0["status"], "stopped");
+    }
+}
+
+#[cfg(test)]
+mod fpga_tests {
+    use super::*;
+    use crate::runtime::AppConfig;
+
+    #[tokio::test]
+    async fn repeated_tuning_releases_targets_and_stopped_catalog_entries_can_be_reselected() {
+        let app = App::new(8);
+        {
+            let mut e = app.engine();
+            e.active = true;
+            e.source = json!({"input_center_hz":460000000,"input_bandwidth_hz":20000000,
+                "streams":(0..512).map(|k| json!({"stream_id":k+1,
+                    "center_hz":460000000i64 + if k<256 {k as i64} else {k as i64-512}*50000,
+                    "sample_rate_num_hz":25600000,"sample_rate_den":256})).collect::<Vec<_>>()});
+        }
+        let mut first_id = String::new();
+        for n in 0..80 {
+            let Json(channel) = tune(State(app.clone()), Json(json!({"frequency_hz":459012345+n*12500}))).await.unwrap();
+            let id = channel["id"].as_str().unwrap().to_string();
+            if n == 0 { first_id = id.clone(); }
+            assert!(app.engine().host_targets.len() <= 2, "current listener plus pending replacement");
+            let _ = monitor(State(app.clone()), Json(Monitor { channel_id: Some(id) })).await.unwrap();
+            assert_eq!(app.engine().host_targets.len(), 1);
+        }
+        let _ = monitor(State(app.clone()), Json(Monitor { channel_id: None })).await.unwrap();
+        assert!(app.engine().host_targets.is_empty());
+        assert!(app.engine().channels.contains_key(&first_id), "stopping preserves the catalog");
+        let _ = monitor(State(app.clone()), Json(Monitor { channel_id: Some(first_id.clone()) })).await.unwrap();
+        assert!(app.engine().host_targets.contains(&459012345), "reselecting restores fine tuning");
+        let dmr = {
+            let mut e = app.engine();
+            let stream = e.channels[&first_id]["stream_id"].as_u64().unwrap() as u32;
+            let channel = crate::runtime::make_channel(&app, stream, 459012345., "DMR", 2);
+            let id = channel["id"].as_str().unwrap().to_string();
+            e.channels.insert(id.clone(), channel);
+            e.listeners.insert(1, id.clone());
+            id
+        };
+        // Replacing a target within the same display-frequency identity is also bounded.
+        let _ = tune(State(app.clone()), Json(json!({"frequency_hz":459012400}))).await.unwrap();
+        assert_eq!(app.engine().host_targets.len(), 1);
+        assert!(app.engine().host_targets.contains(&459012400));
+        assert_eq!(app.engine().channels[&dmr]["logical_hz"], 459012400);
+        let _ = monitor(State(app.clone()), Json(Monitor { channel_id: None })).await.unwrap();
+        assert_eq!(app.engine().host_targets.len(), 1, "an explicit listener still owns its target");
+        drop(ListenerGuard { app: app.clone(), connection: 1 });
+        assert!(app.engine().host_targets.is_empty(), "last listener releases its target");
+        let _ = tune(State(app.clone()), Json(json!({"frequency_hz":459012345}))).await.unwrap();
+        let _ = stop(State(app.clone())).await.unwrap();
+        assert!(app.engine().host_targets.is_empty(), "receiver stop clears a pending tune too");
+        assert!(app.engine().listener["channel_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn operator_tuning_uses_reading_frame_and_rejects_outside_rf_filter() {
+        let app = App::configured(AppConfig { ppm: 23.3, ..AppConfig::new(8) });
+        {
+            let mut e = app.engine();
+            e.active = true;
+            e.source = json!({"input_center_hz":454216998,"input_bandwidth_hz":20000000,
+                "streams":[{"stream_id":509,"center_hz":454016998,"sample_rate_num_hz":25600000,"sample_rate_den":256}]});
+        }
+        let Json(channel) = tune(State(app.clone()), Json(json!({"frequency_hz":454029223. / 1.0000233}))).await.unwrap();
+        assert_eq!(channel["stream_id"], 509);
+        assert_eq!(channel["logical_hz"], 454029223.);
+        assert!(app.engine().host_targets.contains(&454029223));
+        let error = tune(State(app.clone()), Json(json!({"frequency_hz":470000000}))).await.unwrap_err();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        app.engine().active = false;
+        assert_eq!(tune(State(app), Json(json!({"frequency_hz":454018750}))).await.unwrap_err().0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn spectrum_uses_measured_span_with_the_same_frequency_calibration_as_markers() {
+        let source = json!({"input_center_hz":460000000,"input_bandwidth_hz":20000000,
+            "psd":{"center_hz":459000000,"span_hz":25600000}});
+        let cal = crate::freq::Calibration { ppm: 23.3 };
+        let (center, span) = spectrum_geometry(&source, cal);
+        assert_eq!(center, cal.true_hz(459000000.));
+        assert_eq!(span, cal.true_hz(25600000.));
+        assert_eq!(spectrum_geometry(&json!({"input_center_hz":460000000,"input_bandwidth_hz":20000000}), cal),
+            (cal.true_hz(460000000.), cal.true_hz(20000000.)));
     }
 }

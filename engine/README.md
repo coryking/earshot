@@ -90,10 +90,19 @@ the pinned stream, then streams the source actually forwards IQ for (CONFIG
 lower frequency. Metadata-only streams never take decoder budget, however RF-active
 their activity looks (`source.metadata_only_streams` counts them). A source that does
 not publish `iq_forwarded` is assumed to forward every stream it declares. Each stream has a
-four-packet input queue; overflow is counted and resets DSP and codec state on
+bounded input queue: four packets for the legacy 100 ms framing, up to sixteen
+for FPGA 10 ms framing (160 ms), accommodating DMA publication bursts without
+requiring a continuous arrival clock. Overflow is counted and resets DSP and codec state on
 the next accepted packet. Catalog entries survive silence, retuning, and source
 loss. `available`/`decoder_admitted` describe the bounded decode budget;
 `rf_active`, `decoded`, and `speech_active` remain separate.
+
+When the source explicitly reports `activity_calibrated: false`, raw activity
+does not rank decoder admission. A slice containing an operator-selected target
+decodes the selected targets only, so an uncalibrated coarse-bin probe cannot
+compete with their IQ processing. Other forwarded slices retain discovery, and
+multiple explicit listeners on one slice retain their own targets. Activity
+metadata and producer-measured spectrum remain visible independently of decoding.
 
 Confirmed protocols are cached; unused probes are dropped while the confirmed
 decoder keeps its state. RF-idle metadata suppresses audio immediately.
@@ -328,3 +337,48 @@ seconds; ids are strings.
 Dev feeder: `web/dev/fixture_feed.py` sends the DMR fixture plus PSD rows
 measured from the 6 Msps recording it was cut from, so the waterfall shows
 real recorded RF. It is a development tool, not a data path.
+
+### FPGA slice tuning and replay
+
+`POST /api/tune {"frequency_hz":454018750}` adds an operator target and returns a
+channel entry. Frequencies here are calibrated true Hz. The engine converts once
+back into the producer's reading frame, picks the nearest advertised slice that
+contains the whole channel, and uses the existing fine mixer and listener pins.
+Select the returned id with `/api/monitor` (the browser's **Operator tools → Listen
+at MHz** does both). Stop listening with the player stop button; **Stop receiver**
+also asks the producer to stop RX. Fine targets are retained for active listeners
+and the latest pending tune, then released on stop or replacement. Catalog entries
+and operator edits retain their existing persistence behavior; selecting a prior
+catalog entry restores its fine tuning. A source generation change remaps active targets to its new
+slices. Targets outside the RF filter bandwidth are refused even when the PSD
+covers a wider span.
+
+The Operator Listen form starts or keeps listening at the requested frequency;
+channel rows retain their tap-again-to-stop behavior. A producer that advertises
+`configure_supported: false` disables the browser's receive-window form; change
+its startup settings instead. Operator receiver stop ends the current receive
+session and stops this browser's player. A supervisor may start RX again, so this
+is not a persistent service stop.
+
+Both spectrum endpoints use the producer's `psd.center_hz` and `psd.span_hz`, with
+legacy input-center/bandwidth fallback. Center and span share the channel-marker
+ppm correction; the receiver's RF bandwidth remains a separate status field.
+No host FFT supplies the displayed waterfall.
+
+For offline development, prepare signed16 interleaved I/Q at 100 ksps, mixed to
+the chosen FPGA bin center (for center 454216998, stream 509 is 454016998 Hz).
+Keep recordings private. Run an isolated engine and replay driver:
+
+```sh
+cargo build --release --locked --example fpga_ingress
+./target/release/radio-engine serve --port 18810 --ingest-port 18811 \
+  --freq-correction-ppm 23.3 --web-dir ../web/dist
+./target/release/examples/fpga_ingress /private/slice100k.ci16 \
+  --ingest 127.0.0.1:18811 --center 454216998 --stream 509 --loops 0
+```
+
+The driver advertises 512 streams without `targets`, emits continuous sample
+counters and two seconds of silence between repetitions, and acknowledges
+pin/get-config/stop. Only the recorded stream has IQ. `--psd FILE` can replay
+producer-captured 512-float spectrum rows; without it no spectrum is emitted.
+The driver is development evidence, not live receiver acceptance.

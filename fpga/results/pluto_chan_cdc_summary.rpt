@@ -1,0 +1,25 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
+---------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2026.1 (lin64) Build 6511674 Tue Jun 16 11:01:26 MDT 2026
+| Date         : Mon Oct 19 19:58:13 2026
+| Host         : wigglebutt running 64-bit Ubuntu 26.04 LTS
+| Command      : report_cdc -details -file reports/cdc.rpt
+| Design       : system_top
+| Device       : 7z010-clg225
+| Speed File   : -1  PRODUCTION 1.12 2019-11-22
+| Design State : Routed
+---------------------------------------------------------------------------------------------------------------------------------------------
+
+CDC Report
+
+ID      Severity  Count  Description
+------  --------  -----  -------------------------------------------------------
+CDC-1   Critical     55  1-bit unknown CDC circuitry
+CDC-3   Info         69  1-bit synchronized with ASYNC_REG property
+CDC-6   Warning       7  Multi-bit synchronized with ASYNC_REG property
+CDC-9   Info          4  Asynchronous reset synchronized with ASYNC_REG property
+CDC-13  Critical     12  1-bit CDC path on a non-FD primitive
+CDC-15  Warning     907  Clock enable controlled CDC structure detected
+CDC-17  Warning      19  MUX hold controlled CDC structure detected
+
+Source Clock: input port clock

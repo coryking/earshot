@@ -48,7 +48,9 @@ PATH=~/.cache/amateur-radio-arm/tc/arm-gnu-toolchain-13.3.rel1-x86_64-arm-none-l
 ## The Pluto is live all the time
 
 On wigglebutt the `amateur-radio-live` user service (supervisor/, `radio-supervisor`) runs the
-producer on the Pluto and holds `/tmp/pluto-radio.lock` while it does. Anything else that needs the
+FPGA producer (`fpga/sw/pluto-fpga-source`) on the Pluto and holds
+`/tmp/pluto-radio.lock` while it does. The ARM producer documented in this
+directory is retained for historical captures, not the live service. Anything else that needs the
 radio goes through `offload/radio-borrow [--lock] <command...>`: it stops the live service
 (producer stopped, radio read back and restored, lock released), runs the command, and starts live
 again however the command ends. The three scripts below do this themselves (`ensure_borrowed()`);

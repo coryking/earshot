@@ -93,6 +93,20 @@ afterEach(() => {
 });
 
 describe("Player live listening", () => {
+  it("keeps explicit Listen playing when the same frequency is submitted again", async () => {
+    const f = fakeBackend();
+    const player = new Player(f.backend);
+    await player.listen(source("a"), { toggle: false });
+    f.socket().onAudio(audio("a-DMR-1"), new Int16Array([1, 2]));
+    await player.listen(source("a"), { toggle: false });
+    expect(player.state.get()).toMatchObject({ kind: "live", phase: "playing", channelId: "a-DMR-1" });
+    expect(f.monitor).toHaveBeenCalledTimes(1);
+    expect(f.backend.listen).toHaveBeenCalledTimes(1);
+    // Ordinary channel rows keep their existing tap-again-to-stop behavior.
+    await player.listen(source("a"));
+    expect(f.monitor).toHaveBeenLastCalledWith(null);
+    expect(player.state.get().kind).toBe("idle");
+  });
   it("selects the channel, plays audio, and clears its own selection on stop", async () => {
     const f = fakeBackend();
     const player = new Player(f.backend);

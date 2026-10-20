@@ -12,6 +12,23 @@ concatenated `qspi-complete-32MiB.bin` covers all 32 MiB without gaps. The origi
 firmware FIT is also extracted separately. The runtime archive contains `/etc`,
 `/mnt/jffs2`, and `/root`; the live device tree is saved separately.
 
+The device currently boots a reservation-only FIT in the Linux/FPGA/rootfs
+partition, SHA256 `b3ae872c10413f654990c7baa2bf74a476ce422973e1632a22ecf6887f377ecc`.
+Its stock FPGA, kernel and ramdisk data match this backup byte for byte. Only
+three DTBs reserve `0x04000000–0x07ffffff` as `dma_probe@4000000` with `no-map`;
+the channelizer PL is loaded separately at runtime. The installed FIT can be
+reproduced exactly, without a device write or U-Boot environment change:
+
+```sh
+python3 fpga/sw/make_reserved_stock_itb.py \
+  output/pluto-backups/20261019T221101Z/firmware-original.itb \
+  output/fpga-mvp/reproduced-reserved.itb
+```
+
+The output must hash to the installed SHA above. `make_frm.py` instead makes a
+channelizer-in-FIT image for a different boot path; do not use its `chan_dma`
+reservation node as proof that custom PL is running.
+
 Recheck the backup and prepare original DFU files on the Mac:
 
 ```sh
@@ -35,7 +52,7 @@ Confirmed from live `/proc/mtd`, `/sys/class/mtd`, and this device's saved
 | boot | `0x000000` | `0x100000` | `boot.dfu` | `original-boot.dfu` |
 | environment | `0x100000` | `0x020000` | `uboot-env.dfu` | `original-uboot-env.dfu` |
 | NVM filesystem | `0x120000` | `0x0e0000` | `spare.dfu` | `original-nvmfs.dfu` |
-| Linux/FPGA/rootfs FIT | `0x200000` | `0x1e00000` | `firmware.dfu` | `original-linux.dfu` |
+| Linux/FPGA/rootfs FIT | `0x200000` | `0x1e00000` | `firmware.dfu` | FIT-only `firmware-original.dfu` (see below) |
 
 `uboot-extra-env.dfu` is a 4 KiB region at `0x0ff000` inside the boot partition;
 the full boot backup already includes it. Do not restore an extra environment
@@ -68,7 +85,7 @@ bootloader or partition layout changes; a saved map alone is insufficient.
 To leave DFU without writing anything:
 
 ```sh
-dfu-util -d 0456:b674 -a firmware.dfu -e
+dfu-util -d 0456:b673,0456:b674 -a firmware.dfu -e
 ```
 
 Wait for the normal USB/network device, verify identity, and restore the prior
@@ -77,17 +94,32 @@ erase/rewrite flash simply to test recovery entry.
 
 ## Restore only when needed
 
-First revalidate the backup with the preparation command. In DFU mode, the
-following commands restore this unit's original content. They are recovery
+First revalidate the backup with the preparation command. Prepare a FIT-only
+firmware payload from the verified backup (the full partition stays useful as
+an archival readback):
+
+```sh
+cd /Users/coryking/projects/amateur-radio/output/pluto-backups/20261019T221101Z
+cp firmware-original.itb recovery/firmware-original.dfu
+dfu-suffix -a recovery/firmware-original.dfu -v 0456 -p b673
+```
+
+Do not download `original-linux.dfu`, the full 30 MiB partition. On this unit it
+failed at 23,044,096 bytes with DFU status 14; the FIT-only payload restored
+successfully. The runtime/DFU ID pair below also accepts the prepared files'
+runtime-ID suffix. These corrections were verified during the recovery in
+[issue #1](https://github.com/coryking/amateur-radio/issues/1#issuecomment-6294107020).
+
+In DFU mode, the following commands restore this unit's original content. They are recovery
 instructions, not a sequence to run for routine experiments:
 
 ```sh
 cd /Users/coryking/projects/amateur-radio/output/pluto-backups/20261019T221101Z/recovery
-dfu-util -d 0456:b674 -a firmware.dfu -D original-linux.dfu
+dfu-util -d 0456:b673,0456:b674 -a firmware.dfu -D firmware-original.dfu
 # Restore the following only if their contents were changed/damaged:
-dfu-util -d 0456:b674 -a boot.dfu -D original-boot.dfu
-dfu-util -d 0456:b674 -a spare.dfu -D original-nvmfs.dfu
-dfu-util -d 0456:b674 -a uboot-env.dfu -D original-uboot-env.dfu
+dfu-util -d 0456:b673,0456:b674 -a boot.dfu -D original-boot.dfu
+dfu-util -d 0456:b673,0456:b674 -a spare.dfu -D original-nvmfs.dfu
+dfu-util -d 0456:b673,0456:b674 -a uboot-env.dfu -D original-uboot-env.dfu
 ```
 
 Read restored partitions back with `dfu-util -U` and compare their payload

@@ -1,0 +1,147 @@
+{
+  "block_frames": 256,
+  "block_ms": 2.56,
+  "welch_equivalent_dof": 500.8290737281819,
+  "independent_frame_equivalent": 250.41453686409096,
+  "min_window_blocks": 512,
+  "min_window_s": 1.31072,
+  "floor_draws_max": 640,
+  "expected_min_bias_db": -0.8894343171223577,
+  "pfa_on": 1e-08,
+  "pfa_off": 0.01,
+  "open_threshold_above_floor_db": 2.597283034552547,
+  "close_threshold_above_floor_db": 1.5653536423028884,
+  "expected_false_opens_per_hour_whole_band": 7.2,
+  "on_q8": 221,
+  "off_q8": 133,
+  "hang_blocks": 39,
+  "pd_vs_snr": [
+    {
+      "in_bin_snr_db": -6,
+      "pd": 0.0022852369109822423
+    },
+    {
+      "in_bin_snr_db": -5,
+      "pd": 0.023150085344874442
+    },
+    {
+      "in_bin_snr_db": -4,
+      "pd": 0.16135295404467428
+    },
+    {
+      "in_bin_snr_db": -3,
+      "pd": 0.5789527284942575
+    },
+    {
+      "in_bin_snr_db": -2,
+      "pd": 0.9449733423662308
+    },
+    {
+      "in_bin_snr_db": -1,
+      "pd": 0.9993941046753447
+    },
+    {
+      "in_bin_snr_db": 0,
+      "pd": 0.999999866421708
+    }
+  ],
+  "monte_carlo": {
+    "pfa_1e-4": {
+      "threshold_db": 1.985700609868194,
+      "predicted_pfa_at_max_window": 9.999999999999926e-05,
+      "measured_open_rate": 7.91015625e-05,
+      "trials": 10240000
+    },
+    "operating": {
+      "threshold_db": 2.597283034552547,
+      "predicted_pfa_at_max_window": 9.999999999999927e-09,
+      "measured_open_rate": 0.0,
+      "trials": 10240000
+    }
+  },
+  "off_air": {
+    "seconds": 12.0,
+    "bins": 109,
+    "blocks": 4687,
+    "busy_bins": [
+      {
+        "offset_hz": 149999.99999999997,
+        "rf_hz": 454366998.0,
+        "occupancy": 1.0
+      },
+      {
+        "offset_hz": 99999.99999999999,
+        "rf_hz": 454316998.0,
+        "occupancy": 1.0
+      },
+      {
+        "offset_hz": 249999.99999999997,
+        "rf_hz": 454466998.0,
+        "occupancy": 1.0
+      },
+      {
+        "offset_hz": 199999.99999999997,
+        "rf_hz": 454416998.0,
+        "occupancy": 1.0
+      },
+      {
+        "offset_hz": 299999.99999999994,
+        "rf_hz": 454516998.0,
+        "occupancy": 1.0
+      },
+      {
+        "offset_hz": 349999.99999999994,
+        "rf_hz": 454566998.0,
+        "occupancy": 1.0
+      },
+      {
+        "offset_hz": 449999.99999999994,
+        "rf_hz": 454666998.0,
+        "occupancy": 1.0
+      },
+      {
+        "offset_hz": 399999.99999999994,
+        "rf_hz": 454616998.0,
+        "occupancy": 1.0
+      },
+      {
+        "offset_hz": 599999.9999999999,
+        "rf_hz": 454816998.0,
+        "occupancy": 1.0
+      },
+      {
+        "offset_hz": 649999.9999999999,
+        "rf_hz": 454866998.0,
+        "occupancy": 1.0
+      },
+      {
+        "offset_hz": 499999.99999999994,
+        "rf_hz": 454716998.0,
+        "occupancy": 1.0
+      },
+      {
+        "offset_hz": 549999.9999999999,
+        "rf_hz": 454766998.0,
+        "occupancy": 1.0
+      },
+      {
+        "offset_hz": 699999.9999999999,
+        "rf_hz": 454916998.0,
+        "occupancy": 1.0
+      },
+      {
+        "offset_hz": 749999.9999999999,
+        "rf_hz": 454966998.0,
+        "occupancy": 1.0
+      },
+      {
+        "offset_hz": 849999.9999999999,
+        "rf_hz": 455066998.0,
+        "occupancy": 1.0
+      }
+    ],
+    "bins_never_or_rarely_active": 0,
+    "floor_variation_db_median": 3.939259708884129,
+    "hidden_hold_note": "hang_blocks keeps a bin open across DMR TDMA gaps"
+  }
+}

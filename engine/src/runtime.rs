@@ -100,6 +100,9 @@ pub(crate) struct Engine {
     pub(crate) store: Store,
     pub(crate) source: Value,
     pub(crate) channels: HashMap<String, Value>,
+    /// Operator-selected frequencies in the radio's reading frame. Re-map them to
+    /// physical slices after each CONFIG; producer metadata remains unchanged.
+    pub(crate) host_targets: HashSet<u64>,
     worker_epochs: HashMap<u64, u64>,
     pub(crate) selected_at: Instant,
     /// Browser sockets listening to a specific channel (`/api/listen?channel_id=`), by
@@ -149,6 +152,7 @@ impl App {
                 store: Store::new(state_dir, call_memory_mb),
                 source: json!({}),
                 channels: HashMap::new(),
+                host_targets: HashSet::new(),
                 worker_epochs: HashMap::new(),
                 selected: None,
                 selected_at: Instant::now(),
@@ -237,6 +241,25 @@ fn wanted_logicals(e: &Engine) -> HashSet<u64> {
         .map(|v| v.round() as u64)
         .collect()
 }
+/// Keep active listeners and the latest tune awaiting /api/monitor. Historical
+/// catalog entries remain selectable; reselecting one restores its fine target.
+pub(crate) fn retain_host_targets(e: &mut Engine, pending: Option<u64>) {
+    let wanted = wanted_logicals(e);
+    let mut advertised = HashSet::new();
+    for stream in e.source["streams"].as_array().into_iter().flatten() {
+        let targets = stream["targets"].as_array().cloned().unwrap_or_else(|| vec![stream.clone()]);
+        for target in targets {
+            if let Some(hz) = target["target_hz"].as_f64().or_else(|| target["center_hz"].as_f64())
+                .or_else(|| stream["center_hz"].as_f64())
+            {
+                advertised.insert(hz.round() as u64);
+            }
+        }
+    }
+    e.host_targets.retain(|hz| wanted.contains(hz) || pending == Some(*hz));
+    e.host_targets.extend(wanted.difference(&advertised).copied());
+    e.host_targets.extend(pending);
+}
 static PIN_REQUEST: AtomicU64 = AtomicU64::new(1);
 /// Make the source forward IQ for exactly the streams the wanted channels live on:
 /// pin new ones, unpin streams nobody wants any more. Idempotent.
@@ -294,7 +317,7 @@ fn refresh_rf(c: &mut Value) {
 }
 /// Catalog source id of a channel: its id's nominal frequency plus the slot.
 use crate::api::source_id;
-fn make_channel(app: &App, stream: u32, reading: f64, protocol: &str, slot: u8) -> Value {
+pub(crate) fn make_channel(app: &App, stream: u32, reading: f64, protocol: &str, slot: u8) -> Value {
     let (frequency, snapped) = app.display_frequency(reading);
     let mut channel = make_channel_json(stream, reading, frequency, snapped, protocol, slot);
     if let (Some(fields), Some(extra)) = (
@@ -321,6 +344,75 @@ fn fits_slice(cfg: &Value, frequency: f64) -> bool {
         (Some(rate), Some(center)) => (frequency - center).abs() + band / 2. <= rate / 2.,
         _ => true,
     }
+}
+
+/// Map a requested reading to the nearest advertised slice that contains the entire
+/// channel. The RF filter width bounds reception; the wider PSD span does not.
+pub(crate) fn target_slice(source: &Value, reading: f64) -> Option<Value> {
+    let center = source["input_center_hz"].as_f64()?;
+    let bandwidth = source["input_bandwidth_hz"].as_f64()?;
+    if source["receiver_state"] == "stopped"
+        || (reading - center).abs() + ChannelSpec::CHANNEL_12_5.band_hz / 2. > bandwidth / 2.
+    {
+        return None;
+    }
+    source["streams"].as_array()?.iter()
+        .filter(|s| fits_slice(s, reading))
+        .filter_map(|s| Some(((s["center_hz"].as_f64()? - reading).abs(), s)))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, s)| {
+            let mut cfg = s.clone();
+            cfg.as_object_mut().unwrap().remove("targets");
+            cfg["target_hz"] = json!(reading);
+            cfg["protocol"] = json!("Unknown");
+            cfg
+        })
+}
+
+/// Add host tuning requests to the normal logical-target pipeline. Called on CONFIG
+/// and the scheduler tick, so pin acknowledgements cannot erase fine tuning.
+fn merge_host_targets(app: &App, base: &HashMap<u64, Value>, configs: &mut HashMap<u64, Value>) -> bool {
+    // Rebuild from the producer's logical targets so releasing a fine target also
+    // removes its DSP/meter configuration and restores an overridden bin center.
+    let mut next = base.clone();
+    let mut e = app.engine();
+    let targets: Vec<_> = e.host_targets.iter().copied().collect();
+    for logical in targets {
+        let Some(cfg) = target_slice(&e.source, logical as f64) else { continue };
+        let stream = cfg["stream_id"].as_u64().unwrap() as u32;
+        let id = channel_id(app.display_frequency(logical as f64).0, "Unknown", 1);
+        let c = e.channels.entry(id).or_insert_with(|| make_channel(app, stream, logical as f64, "Unknown", 1));
+        c["stream_id"] = json!(stream);
+        c["logical_hz"] = json!(logical);
+        c["reading_hz"] = json!(logical);
+        c["in_range"] = json!(true);
+        // A bin center and a nearby operator target can snap to the same channel
+        // identity. Keep one worker for that identity, at the requested frequency.
+        let display = app.display_frequency(logical as f64).0;
+        for c in e.channels.values_mut() {
+            if c["logical_hz"].as_f64().is_some_and(|r| app.display_frequency(r).0 == display) {
+                c["stream_id"] = json!(stream);
+                c["logical_hz"] = json!(logical);
+                c["reading_hz"] = json!(logical);
+                c["in_range"] = json!(true);
+            }
+        }
+        next.retain(|key, _| *key == logical || app.display_frequency(*key as f64).0 != display);
+        next.insert(logical, cfg);
+    }
+    let mut counts = HashMap::<u32, usize>::new();
+    for cfg in next.values() {
+        *counts.entry(cfg["stream_id"].as_u64().unwrap_or(0) as u32).or_default() += 1;
+    }
+    for c in e.channels.values_mut() {
+        if let Some(count) = counts.get(&(c["stream_id"].as_u64().unwrap_or(0) as u32)) {
+            c["slice_targets"] = json!(count);
+            refresh_rf(c);
+        }
+    }
+    let changed = *configs != next;
+    *configs = next;
+    changed
 }
 /// RIQ1 interleaved signed16 I/Q payload to complex samples.
 fn iq_from_payload(payload: &[u8]) -> Vec<Complex32> {
@@ -351,6 +443,13 @@ fn modes(cfg: &Value) -> Vec<&'static str> {
     }
 }
 static WORKER_EPOCH: AtomicU64 = AtomicU64::new(1);
+const MAX_INPUT_PACKETS: usize = 16;
+/// DMA and activity publication can bunch short FPGA packets together. Keep the
+/// legacy four-packet allowance for long packets, and up to 160 ms for 10 ms IQ.
+fn input_queue_limit(frame: &Frame) -> usize {
+    (frame.rate as usize * 160 / 1000 / (frame.payload.len() / 4).max(1))
+        .clamp(4, MAX_INPUT_PACKETS)
+}
 fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
     let stream = cfg["stream_id"].as_u64().context("stream_id missing")? as u32;
     let epoch = WORKER_EPOCH.fetch_add(1, Ordering::Relaxed);
@@ -366,7 +465,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
     let worker_cost = cost.clone();
     let queued = Arc::new(AtomicUsize::new(0));
     let worker_queued = queued.clone();
-    let (tx, rx) = mpsc::sync_channel::<Work>(4);
+    let (tx, rx) = mpsc::sync_channel::<Work>(MAX_INPUT_PACKETS);
     let decoder_options = app.voice.decoder_options();
     thread::spawn(move || {
         let mut decoders = Vec::new();
@@ -710,26 +809,39 @@ fn schedule(
     let e = app.engine();
     let wanted = wanted_logicals(&e);
     let pin_pending = e.listen_changed_at.elapsed() < PIN_GRACE;
-    let mut effective = configs.clone();
-    for (&stream, cfg) in &mut effective {
-        if cfg["protocol"].as_str().unwrap_or("Unknown") == "Unknown"
-            && let Some(protocol) = e
-                .channels
-                .values()
-                .find(|c| {
-                    c["logical_hz"].as_f64().map(|v| v.round() as u64) == Some(stream)
-                        && c["in_range"] == true
-                        && c["decoded"] == true
-                        && c["persisted"] != true
-                        && matches!(c["protocol"].as_str(), Some("DMR" | "NXDN48"))
-                })
-                .and_then(|c| c["protocol"].as_str())
+    let uncalibrated = e.source["activity_calibrated"] == false;
+    let selected_slices: HashSet<u32> = configs.iter()
+        .filter(|(logical, _)| wanted.contains(logical))
+        .filter_map(|(_, cfg)| cfg["stream_id"].as_u64().map(|s| s as u32))
+        .collect();
+    // Producer-shaped CONFIG has 512 slices. Index channel evidence once rather
+    // than scanning the whole catalog for every slice while holding the worker lock.
+    let mut known = HashMap::new();
+    let mut active = HashSet::new();
+    for c in e.channels.values() {
+        let Some(logical) = c["logical_hz"].as_f64().map(|v| v.round() as u64) else { continue };
+        if !uncalibrated && c["rf_active"] == true { active.insert(logical); }
+        if c["in_range"] == true && c["decoded"] == true && c["persisted"] != true
+            && matches!(c["protocol"].as_str(), Some("DMR" | "NXDN48"))
         {
-            cfg["protocol"] = json!(protocol);
+            known.insert(logical, c["protocol"].clone());
+        }
+    }
+    let mut effective = configs.clone();
+    for (&logical, cfg) in &mut effective {
+        if cfg["protocol"].as_str().unwrap_or("Unknown") == "Unknown"
+            && let Some(protocol) = known.get(&logical)
+        {
+            cfg["protocol"] = protocol.clone();
         }
     }
     let candidates: Vec<Candidate> = effective
         .iter()
+        // An uncalibrated coarse slice can look active across its whole width.
+        // Once a listener chooses a frequency there, spend its IQ processing on
+        // the requested target(s), not another probe at the coarse bin center.
+        .filter(|(logical, cfg)| !uncalibrated || wanted.contains(logical)
+            || !selected_slices.contains(&(cfg["stream_id"].as_u64().unwrap_or(0) as u32)))
         .map(|(&logical, cfg)| {
             let physical = cfg["stream_id"].as_u64().unwrap_or(0) as u32;
             // CONFIG's `iq_forwarded`/`pinned` is the source forwarding mask; a source
@@ -749,10 +861,7 @@ fn schedule(
                 selected: wanted.contains(&logical),
                 pin_pending,
                 forwarded: declared || received,
-                rf_active: e.channels.values().any(|c| {
-                    c["logical_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
-                        && c["rf_active"] == true
-                }),
+                rf_active: active.contains(&logical),
                 cost: workers
                     .get(&logical)
                     .map(|w| w.cost.load(Ordering::Relaxed))
@@ -883,12 +992,15 @@ pub fn attach_control(stream: &TcpStream, app: &App) -> Result<()> {
 pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
     let mut workers = HashMap::new();
     let mut configs = HashMap::new();
+    let mut base_configs = HashMap::new();
     let mut config_generation = None;
     let mut scheduled = Instant::now();
     let mut transport_sequences = HashMap::new();
     let mut pending_gaps = HashSet::new();
     let mut iq_seen: HashMap<u32, Instant> = HashMap::new();
     let mut meters: HashMap<u32, SliceMeter> = HashMap::new();
+    let mut activity_channels: HashMap<u32, Vec<String>> = HashMap::new();
+    let mut indexed_channels = 0;
 
     loop {
         let mut frame = match Frame::read(&mut input) {
@@ -923,19 +1035,19 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
             Err(e) => return Err(e.into()),
         };
         if frame.kind == 4 {
+            activity_channels.clear();
             let config: Value = serde_json::from_slice(&frame.payload)?;
             let streams = config["streams"]
                 .as_array()
                 .context("CONFIG requires streams")?;
             anyhow::ensure!(streams.len() <= 4096, "CONFIG exceeds 4096 streams");
             let changed = config_generation != Some(frame.generation);
+            configs.clear();
             if config["receiver_state"] == "stopped" {
                 workers.clear();
-                configs.clear();
             }
             if changed {
                 workers.clear();
-                configs.clear();
                 transport_sequences.clear();
                 pending_gaps.clear();
                 iq_seen.clear();
@@ -1057,6 +1169,8 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
             let _ = app.events.send(
                 json!({"type":"source_config","generation":frame.generation,"source":config}),
             );
+            base_configs = configs.clone();
+            merge_host_targets(&app, &base_configs, &mut configs);
             schedule(&app, &configs, &mut workers, &iq_seen)?;
             sync_pins(&mut app.engine());
             rebuild_meters(&configs, &mut meters);
@@ -1088,7 +1202,11 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
             }
         }
         if scheduled.elapsed() > Duration::from_millis(100) {
+            if merge_host_targets(&app, &base_configs, &mut configs) {
+                rebuild_meters(&configs, &mut meters);
+            }
             schedule(&app, &configs, &mut workers, &iq_seen)?;
+            activity_channels.clear();
             scheduled = Instant::now();
         }
         match frame.kind {
@@ -1147,9 +1265,10 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                 }
                 let shared = Arc::new(frame);
                 let mut missed = false;
+                let queue_limit = input_queue_limit(&shared);
                 for worker in workers.values().filter(|w| w.stream == shared.stream_id) {
-                    worker.queued.fetch_add(1, Ordering::Relaxed);
-                    if worker
+                    let queued = worker.queued.fetch_add(1, Ordering::Relaxed);
+                    if queued >= queue_limit || worker
                         .sender
                         .try_send(Work {
                             frame: shared.clone(),
@@ -1209,11 +1328,20 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
                     }
                 }
                 let mut e = app.engine();
-                for c in e
-                    .channels
-                    .values_mut()
-                    .filter(|c| c["stream_id"] == frame.stream_id)
-                {
+                // FPGA activity can report all 512 bins every 100 ms. Index once
+                // per scheduler tick or catalog growth instead of scanning the
+                // entire catalog under the decoder lock for every metadata frame.
+                if activity_channels.is_empty() || indexed_channels != e.channels.len() {
+                    activity_channels.clear();
+                    for (id, c) in &e.channels {
+                        if let Some(stream) = c["stream_id"].as_u64() {
+                            activity_channels.entry(stream as u32).or_default().push(id.clone());
+                        }
+                    }
+                    indexed_channels = e.channels.len();
+                }
+                for id in activity_channels.get(&frame.stream_id).into_iter().flatten() {
+                    let Some(c) = e.channels.get_mut(id) else { continue };
                     let before = c["rf_active"].clone();
                     c["slice_rf_active"] = json!(slice_active);
                     c["slice_level_db"] = slice_level.clone();
@@ -2245,5 +2373,119 @@ mod tests {
         assert_eq!(e.channels.len(), 2);
         assert_eq!(e.channels["454029200-Unknown-1"]["in_range"], false);
         assert_eq!(e.channels["452685500-Unknown-1"]["in_range"], true);
+    }
+}
+
+#[cfg(test)]
+mod fpga_tests {
+    use super::*;
+
+    #[test]
+    fn releasing_a_fine_target_restores_the_producer_target_and_removes_its_meter_config() {
+        let app = App::new(8);
+        let coarse = 454000000;
+        let fine = 454000100;
+        let source = json!({"input_center_hz":coarse,"input_bandwidth_hz":20000000,
+            "streams":[{"stream_id":1,"center_hz":coarse,"target_hz":coarse,"rate_hz":100000}]});
+        let base = HashMap::from([(coarse, source["streams"][0].clone())]);
+        let mut configs = base.clone();
+        app.engine().source = source;
+        app.engine().host_targets.insert(fine);
+        assert!(merge_host_targets(&app, &base, &mut configs));
+        assert!(configs.contains_key(&fine));
+        assert!(!configs.contains_key(&coarse), "same display identity uses one target");
+        app.engine().host_targets.clear();
+        assert!(merge_host_targets(&app, &base, &mut configs));
+        assert_eq!(configs, base);
+        let mut meters = HashMap::new();
+        rebuild_meters(&configs, &mut meters);
+        assert_eq!(meters[&1].targets.iter().map(|t| t.logical).collect::<Vec<_>>(), vec![coarse]);
+    }
+
+    fn producer_config() -> Value {
+        json!({"input_center_hz":454216998,"input_rate_hz":25600000,"input_bandwidth_hz":20000000,
+            "streams":(0..512).map(|k| json!({"stream_id":k+1,
+                "center_hz":454216998i64 + if k<256 {k as i64} else {k as i64-512}*50000,
+                "sample_rate_num_hz":25600000,"sample_rate_den":256,"protocol":"Unknown",
+                "iq_forwarded":false,"pinned":false})).collect::<Vec<_>>()})
+    }
+
+    #[test]
+    fn target_maps_to_nearest_fft_bin_and_survives_pin_config_refresh() {
+        let app = App::new(8);
+        let cfg = producer_config();
+        let target = target_slice(&cfg, 454029223.).unwrap();
+        assert_eq!(target["stream_id"], 509);
+        assert_eq!(target["center_hz"], 454016998i64);
+        assert_eq!(target["target_hz"], 454029223.);
+        // Equal-distance boundary is safe because each slice covers twice its spacing.
+        assert!(target_slice(&cfg, 454041998.).is_some());
+        // PSD covers 25.6 MHz but the RF filter only covers 20 MHz.
+        assert!(target_slice(&cfg, 465216998.).is_none());
+        {
+            let mut e = app.engine();
+            e.source = cfg.clone();
+            e.host_targets.insert(454029223);
+        }
+        let mut configs = HashMap::new();
+        assert!(merge_host_targets(&app, &HashMap::new(), &mut configs));
+        assert!(!merge_host_targets(&app, &HashMap::new(), &mut configs));
+        let mut refreshed = cfg;
+        refreshed["streams"][508]["iq_forwarded"] = json!(true);
+        app.engine().source = refreshed;
+        assert!(merge_host_targets(&app, &HashMap::new(), &mut configs));
+        assert_eq!(configs[&454029223]["target_hz"], 454029223.);
+        assert_eq!(configs[&454029223]["iq_forwarded"], true);
+    }
+}
+
+#[cfg(test)]
+mod activity_flood_tests {
+    use super::*;
+
+    #[test]
+    fn short_fpga_packets_get_a_bounded_burst_allowance() {
+        let mut frame = Frame { kind:1,flags:0,generation:1,stream_id:1,sequence:0,first_sample:0,
+            rate:100000,center_hz:454000000,format:1,valid_bits:16,payload:vec![0;4000] };
+        assert_eq!(input_queue_limit(&frame), 16);
+        frame.payload.resize(40000, 0);
+        assert_eq!(input_queue_limit(&frame), 4);
+        frame.payload.clear();
+        assert_eq!(input_queue_limit(&frame), MAX_INPUT_PACKETS);
+    }
+
+    #[test]
+    fn uncalibrated_shared_slice_probes_cannot_compete_with_selected_targets() {
+        let app = App::new(8);
+        let bin = 454016998u64;
+        let target = 454029329u64;
+        let physical = 509;
+        let configs: HashMap<_, _> = [bin, target].into_iter().map(|logical|
+            (logical, json!({"stream_id":physical,"center_hz":bin,"target_hz":logical,
+                "rate_hz":100000,"protocol":"Unknown","iq_forwarded":true}))).collect();
+        let selected = channel_id(app.display_frequency(target as f64).0, "Unknown", 1);
+        {
+            let mut e = app.engine();
+            e.source = json!({"activity_calibrated":false});
+            for logical in [bin, target] {
+                let c = make_channel(&app, physical, logical as f64, "Unknown", 1);
+                e.channels.insert(c["id"].as_str().unwrap().into(), c);
+            }
+            e.selected = Some(selected);
+        }
+        let mut workers = HashMap::new();
+        schedule(&app, &configs, &mut workers, &HashMap::new()).unwrap();
+        assert_eq!(workers.keys().copied().collect::<Vec<_>>(), vec![target]);
+        let epoch = app.engine().worker_epochs[&target];
+        // Raw detector activity must neither move the worker nor add a bin-center probe.
+        for c in app.engine().channels.values_mut() { c["rf_active"] = json!(true); }
+        schedule(&app, &configs, &mut workers, &HashMap::new()).unwrap();
+        assert_eq!(app.engine().worker_epochs[&target], epoch);
+        assert_eq!(app.engine().source["active_decoders"], 2);
+        // Explicit listeners on another target still get their own decoder budget.
+        let bin_id = channel_id(app.display_frequency(bin as f64).0, "Unknown", 1);
+        app.engine().listeners.insert(1, bin_id);
+        schedule(&app, &configs, &mut workers, &HashMap::new()).unwrap();
+        assert_eq!(workers.len(), 2);
     }
 }
