@@ -11,6 +11,7 @@ struct Codec {
     int read_fd = -1;
     int slot;
     std::vector<short> audio;
+    std::vector<short> audio_b;
     std::string diagnostics;
     explicit Codec(int protocol, int selected_slot): slot(selected_slot) {
         int fd[2];
@@ -39,17 +40,23 @@ struct Codec {
 extern "C" {
 void *radio_codec_new(int protocol, int slot) { try { return new Codec(protocol,slot); } catch(...) { return nullptr; } }
 void radio_codec_free(void *p) { delete static_cast<Codec*>(p); }
-size_t radio_codec_push(void *p, const short *in, size_t count, short *out, size_t capacity, char *log, size_t log_capacity) {
-    auto &c=*static_cast<Codec*>(p); c.audio.clear(); c.diagnostics.clear();
+// One DSDcc DMR instance decodes both TDMA slots; audio for slot 1 and slot 2 is returned
+// separately. NXDN only produces slot 1.
+size_t radio_codec_push2(void *p, const short *in, size_t count, short *out1, size_t cap1, short *out2, size_t cap2, size_t *n2, char *log, size_t log_capacity) {
+    auto &c=*static_cast<Codec*>(p); c.audio.clear(); c.audio_b.clear(); c.diagnostics.clear();
     for(size_t i=0;i<count;i++) {
         c.d.run(in[i]);
-        int n=0; short *pcm=c.slot==2?c.d.getAudio2(n):c.d.getAudio1(n);
-        if(n>0 && pcm && c.audio.size()+n<=capacity) c.audio.insert(c.audio.end(),pcm,pcm+n);
+        int n=0; short *pcm=c.d.getAudio1(n);
+        if(n>0 && pcm && c.audio.size()+n<=cap1) c.audio.insert(c.audio.end(),pcm,pcm+n);
+        n=0; pcm=c.d.getAudio2(n);
+        if(n>0 && pcm && c.audio_b.size()+n<=cap2) c.audio_b.insert(c.audio_b.end(),pcm,pcm+n);
         c.d.resetAudio1(); c.d.resetAudio2();
         if(i%480==479) c.drain();
     }
     c.drain();
-    std::copy(c.audio.begin(),c.audio.end(),out);
+    std::copy(c.audio.begin(),c.audio.end(),out1);
+    std::copy(c.audio_b.begin(),c.audio_b.end(),out2);
+    *n2=c.audio_b.size();
     if(log_capacity) { size_t n=std::min(log_capacity-1,c.diagnostics.size()); std::copy_n(c.diagnostics.data(),n,log);log[n]=0; }
     return c.audio.size();
 }

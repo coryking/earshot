@@ -178,11 +178,13 @@ fn spec_for(protocol: &str) -> ChannelSpec {
         ChannelSpec::CHANNEL_12_5
     }
 }
-fn modes(cfg: &Value) -> Vec<(&'static str, u8)> {
+/// Decoder instances a stream needs: one DSDcc instance per protocol. A DMR instance
+/// decodes both TDMA slots, so a DMR channel costs one.
+fn modes(cfg: &Value) -> Vec<&'static str> {
     match cfg["protocol"].as_str() {
-        Some("DMR") => vec![("DMR", 1), ("DMR", 2)],
-        Some("NXDN48") => vec![("NXDN48", 1)],
-        _ => vec![("DMR", 1), ("DMR", 2), ("NXDN48", 1)],
+        Some("DMR") => vec!["DMR"],
+        Some("NXDN48") => vec!["NXDN48"],
+        _ => vec!["DMR", "NXDN48"],
     }
 }
 static WORKER_EPOCH: AtomicU64 = AtomicU64::new(1);
@@ -235,7 +237,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
             if gap || decoders.is_empty() {
                 decoders = modes
                     .iter()
-                    .filter_map(|&(p, s)| Decoder::new(p, s).ok().map(|d| (p, s, d)))
+                    .filter_map(|&p| Decoder::new(p).ok().map(|d| (p, d)))
                     .collect();
                 let input_rate = cfg["sample_rate_num_hz"]
                     .as_f64()
@@ -246,7 +248,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                 // One channel filter per channel class: NXDN48 (6.25 kHz) must not
                 // share the 12.5 kHz filter or its 6.25 kHz neighbors leak in.
                 dsps.clear();
-                for &(protocol, _) in &modes {
+                for &protocol in &modes {
                     let spec = spec_for(protocol);
                     if !dsps.iter().any(|(s, _)| *s == spec) {
                         dsps.push((
@@ -277,7 +279,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
             let iq = iq_from_payload(payload);
             let mut outputs: Vec<(ChannelSpec, Vec<i16>)> = Vec::new();
             for (spec, dsp) in &mut dsps {
-                if decoders.iter().any(|(p, _, _)| spec_for(p) == *spec) {
+                if decoders.iter().any(|(p, _)| spec_for(p) == *spec) {
                     outputs.push((*spec, dsp.push(&iq)));
                 }
             }
@@ -289,14 +291,21 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                 live_samples += produced as u64;
             }
             let mut protocol_evidence = None;
-            for (protocol, slot, decoder) in &mut decoders {
+            for (protocol, decoder) in &mut decoders {
                 let spec = spec_for(protocol);
                 let Some((_, pcm)) = outputs.iter().find(|(s, _)| *s == spec) else {
                     continue;
                 };
-                let (audio, confirmed) = decoder.push(pcm);
+                let decoded = decoder.push(pcm);
+                let confirmed = decoded.confirmed;
+                let slots: Vec<(u8, Vec<i16>)> = if *protocol == "DMR" {
+                    vec![(1, decoded.slot1), (2, decoded.slot2)]
+                } else {
+                    vec![(1, decoded.slot1)]
+                };
+                for (slot, audio) in slots {
                 let speech = confirmed && !audio.is_empty() && frame.flags & PREROLL == 0;
-                let id = channel_id(frequency, protocol, *slot);
+                let id = channel_id(frequency, protocol, slot);
                 let mut e = app.inner.lock().unwrap();
                 if frame.generation != e.generation
                     || !e.active
@@ -324,7 +333,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                     let entry = e
                         .channels
                         .entry(id.clone())
-                        .or_insert_with(|| make_channel(stream, frequency, protocol, *slot));
+                        .or_insert_with(|| make_channel(stream, frequency, protocol, slot));
                     if let Some(sibling) = &sibling {
                         for key in [
                             "slice_rf_active",
@@ -375,9 +384,10 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                     e.listener = json!({"status":"listening","state":"listening","channel_id":id,"voice_active":true,"generation":decoder_generation,"source_generation":source_generation,"sequence":sequence,"audio_chunks":sequence,"last_audio_at":now(),"ingress_age_ms":ingress,"ingress_age_basis":"host ingress receipt; device speech alignment unknown","dropped_blocks":e.drops,"input_dropped":e.drops,"queue_blocks":0,"error":null});
                     let _=app.audio.send(Audio{meta:json!({"type":"audio","encoding":"s16le","channels":1,"rate_hz":8000,"samples":audio.len(),"channel_id":id,"generation":decoder_generation,"source_generation":source_generation,"sequence":sequence,"ingress_age_ms":ingress,"ingress_age_basis":"host ingress receipt; device speech alignment unknown"}),pcm:bytes,created:Instant::now()});
                 }
+                }
             }
             if let Some(protocol) = protocol_evidence {
-                decoders.retain(|(p, _, _)| *p == protocol);
+                decoders.retain(|(p, _)| *p == protocol);
                 worker_cost.store(decoders.len(), Ordering::Relaxed);
             }
         }
@@ -1138,6 +1148,38 @@ mod tests {
         release.send(()).unwrap();
         runner.join().unwrap().unwrap();
         assert_eq!(admitted, vec![1, 3]);
+    }
+    #[test]
+    fn a_dmr_channel_costs_one_decoder_and_an_unknown_stream_two() {
+        let cost = |protocol: &str| modes(&json!({"protocol": protocol})).len();
+        assert_eq!(cost("DMR"), 1, "one DSDcc instance decodes both slots");
+        assert_eq!(cost("NXDN48"), 1);
+        assert_eq!(cost("Unknown"), 2);
+        // A budget of 3 holds three known DMR channels.
+        let streams: Vec<Value> = (1..=4)
+            .map(|id| json!({"stream_id":id,"center_hz":454000000u64+id*12500,"protocol":"DMR","iq_forwarded":true}))
+            .collect();
+        let config = json!({"input_center_hz":454216998,"input_rate_hz":800000,"input_bandwidth_hz":800000,"streams":streams,"psd":{"unit":"dBFS"}});
+        let mut bytes = Vec::new();
+        frame(4, 1, 0, 0, 0, config.to_string().into_bytes()).write(&mut bytes).unwrap();
+        let (release, rx) = mpsc::channel();
+        let app = App::new(3);
+        let runner = {
+            let app = app.clone();
+            let input = HeldOpen { data: std::io::Cursor::new(bytes), release: rx };
+            thread::spawn(move || ingest(input, app))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let admitted = loop {
+            let n = app.inner.lock().unwrap().channels.values().filter(|c| c["decoder_admitted"] == true).count();
+            if n >= 3 || Instant::now() > deadline {
+                break n;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        release.send(()).unwrap();
+        runner.join().unwrap().unwrap();
+        assert_eq!(admitted, 3);
     }
     #[test]
     fn rf_active_metadata_only_streams_do_not_starve_forwarded_stream() {

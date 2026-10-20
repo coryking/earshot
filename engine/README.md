@@ -63,8 +63,9 @@ voice evidence with parity-error checks. An accidental sync does not directly
 unmute audio. Data-only channels are not promoted to voice by an empty codec
 output.
 
-`--max-decoders 8` limits actual codec instances. Unknown RF streams cost three
-instances; known DMR streams cost two and NXDN streams cost one. Admission order is
+`--max-decoders 8` limits actual codec instances. Unknown RF streams cost two
+instances (DMR and NXDN48); a known DMR channel costs one, because one DSDcc instance
+decodes both TDMA slots, and a known NXDN stream costs one. Admission order is
 the pinned stream, then streams the source actually forwards IQ for (CONFIG
 `iq_forwarded`/`pinned`, or IQ received in the last 2 s; RF-active before quiet), then
 lower frequency. Metadata-only streams never take decoder budget, however RF-active

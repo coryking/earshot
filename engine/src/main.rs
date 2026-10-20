@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
             } else {
                 Box::new(std::fs::File::open(input)?)
             };
-            let mut decoder = Decoder::new(&protocol, slot)?;
+            let mut decoder = Decoder::new(&protocol)?;
             let start = Instant::now();
             let (mut chunks, mut samples, mut frames, mut first) = (0, 0, 0, None);
             let mut bytes = [0u8; 9600];
@@ -75,7 +75,8 @@ async fn main() -> Result<()> {
                     .map(|x| i16::from_le_bytes([x[0], x[1]]))
                     .collect();
                 frames += pcm.len();
-                let (audio, _) = decoder.push(&pcm);
+                let decoded = decoder.push(&pcm);
+                let audio = if slot == 2 { decoded.slot2 } else { decoded.slot1 };
                 if !audio.is_empty() {
                     chunks += 1;
                     samples += audio.len();
