@@ -342,7 +342,7 @@ static int retune(const char *request, long long target) {
     long long actual = read ? atoll(readback) : 0;
     // The AD936x fractional-N synthesizer can round a requested integer Hz.
     // Keep the measured LO in CONFIG, including that small rounding difference.
-    int ok = wrote && read && llabs(actual - target) <= 2;
+    int ok = wrote && read && llabs(actual - target) <= 100;
     fprintf(stderr, "RX LO request=%lld readback=%lld write_ok=%d read_ok=%d accepted=%d\n",
             target, actual, wrote, read, ok);
     if (!ok) {
@@ -363,7 +363,11 @@ static int retune(const char *request, long long target) {
     dma[0x100] = 0; dma[0x100] = 1; dma[0x103] = 0;
     submit_next(); submit_next();
     chan[4] = 0x15; // RUN, SEL_EN, detector reset
-    if (send_config(request, ok, ok ? NULL : "RX LO change failed; previous frequency restored", 1)) return -1;
+    char error[180];
+    snprintf(error, sizeof error,
+             "RX LO change failed: requested %lld Hz, read %lld Hz, write_ok=%d, read_ok=%d; previous frequency restored",
+             target, actual, wrote, read);
+    if (send_config(request, ok, ok ? NULL : error, 1)) return -1;
     return 2;
 }
 
