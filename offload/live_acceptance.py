@@ -192,6 +192,11 @@ class Observer:
                                     "stream_id",
                                     "decoder_admitted",
                                     "kind",
+                                    "frequency_hz",
+                                    "frequency_snapped",
+                                    "reading_hz",
+                                    "carrier_offset_hz",
+                                    "label",
                                 )
                             }
                             for c in s["channels"]

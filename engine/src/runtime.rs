@@ -401,6 +401,8 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                             "last_rf",
                             "level_db",
                             "carrier_offset_hz",
+                            "carrier_hz",
+                            "carrier_snapped",
                             "frequency_hz",
                             "frequency_snapped",
                             "label",
@@ -630,20 +632,28 @@ fn rebuild_meters(configs: &HashMap<u64, Value>, meters: &mut HashMap<u32, Slice
         meters.insert(stream, SliceMeter::new(targets));
     }
 }
-/// Record a measured carrier on a channel entry: the calibrated frequency (snapped to the
-/// raster when close), and the plain-name label for that frequency. Returns whether the
-/// published frequency or label changed.
+/// Record a measured carrier on a channel entry. `carrier_hz` always holds the calibrated
+/// estimate. The published `frequency_hz` follows it only when the estimate lands on a
+/// raster point (`frequency_snapped`): a coarse 12.5 kHz producer bin can contain several
+/// overlapping emitters, and then the spectral centroid is not a carrier, so the entry
+/// keeps its nominal frequency instead of a misleading one. Returns whether the published
+/// frequency or label changed.
 fn apply_carrier(app: &App, c: &mut Value, reading_hz: f64, offset_hz: f64) -> bool {
     let truth = app.calibration.true_hz(reading_hz);
     let (frequency, snapped) = snap(truth);
-    let label = app.labels.lookup(truth).cloned();
     let before = (c["frequency_hz"].clone(), c["label"].clone());
     c["carrier_offset_hz"] = json!(offset_hz.round());
     c["carrier_hz"] = json!(truth.round());
-    c["frequency_hz"] = json!(frequency);
-    c["frequency_snapped"] = json!(snapped);
-    if let (Some(fields), Some(extra)) = (c.as_object_mut(), label_fields(label.as_ref()).as_object()) {
-        fields.extend(extra.clone());
+    c["carrier_snapped"] = json!(snapped);
+    if snapped {
+        let label = app.labels.lookup(truth).cloned();
+        c["frequency_hz"] = json!(frequency);
+        c["frequency_snapped"] = json!(true);
+        if let (Some(fields), Some(extra)) =
+            (c.as_object_mut(), label_fields(label.as_ref()).as_object())
+        {
+            fields.extend(extra.clone());
+        }
     }
     before != (c["frequency_hz"].clone(), c["label"].clone())
 }
