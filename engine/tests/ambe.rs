@@ -12,6 +12,7 @@ const EXPECTED: &[(&str, u64)] = &[
     ("fixture", 0x8181ed6d2c94c0db),
     ("fixture-concealed", 0x2e393bf158a76491),
     ("random", 0x71b073ae1fbc834c),
+    ("resets", 0xc032fa97af76e97f),
     ("edge", 0x7ea4e2ddf3ee3d3c),
     ("harvard-0010", 0x207c0042cbd145af),
     ("harvard-0011", 0xd0c963708cfb2c91),
