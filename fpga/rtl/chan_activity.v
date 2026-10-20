@@ -22,6 +22,7 @@ module chan_activity #(
   parameter BLOCK_LOG2 = 8,
   parameter SUB_BLOCKS = 128,
   parameter PSD_LOG2 = 13,
+  parameter HOLD_SUBS = 90,            // floor frozen while active, <= 90 sub-windows
   parameter LOG_TABLE = "chan_log2_table.mem"
 ) (
   input  wire         clk,
@@ -50,6 +51,8 @@ module chan_activity #(
 );
 
   localparam [15:0] EMPTY = 16'hFFFF;
+  reg        clearing = 1'b1;          // state RAM sweep after reset (see below)
+  reg  [8:0] clr_addr = 9'd0;
 
   // ---------------------------------------------------------------------------
   // frame position counters (control)
@@ -63,7 +66,7 @@ module chan_activity #(
   always @(posedge clk) begin
     if (rst) begin
       fib <= 0; bis <= 0; pfc <= 0;
-    end else if (pw_valid & pw_last) begin
+    end else if (pw_valid & pw_last & ~clearing) begin   // a frame cut by the sweep is not counted
       fib <= fib + 1'b1;
       pfc <= pfc + 1'b1;
       if (blk_end0) bis <= sub_end0 ? 8'd0 : bis + 8'd1;
@@ -74,17 +77,18 @@ module chan_activity #(
   // Two RAMs (simple dual port, read latency 1), both read-modify-written once per
   // bin per frame. A bin recurs every 512 words, so neither RMW can alias.
   //  ACC   {psd_acc[47:0], acc[42:0]}: read at stage 0, written back at stage 2
-  //  STATE {hang[7:0], active, sub_min[15:0], min3..min0 (min0 newest)}: read with
-  //        the stage-2 address, used from stage 3, written back after the decision
-  localparam [88:0] STATE_INIT = {8'd0, 1'b0, EMPTY, {4{EMPTY}}};
+  //  STATE {held[7:0], hang[7:0], active, sub_min[15:0], min3..min0 (min0 newest)}:
+  //        read with the stage-2 address, used from stage 3, written back after the
+  //        decision. held counts sub-window ends spent active.
+  localparam [96:0] STATE_INIT = {8'd0, 8'd0, 1'b0, EMPTY, {4{EMPTY}}};
   reg  [90:0] ram_acc [0:511];
-  reg  [88:0] ram_s   [0:511];
+  reg  [96:0] ram_s   [0:511];
   reg  [90:0] acc1;
-  reg  [88:0] st3;
+  reg  [96:0] st3;
 
   reg         we_w;
   reg  [8:0]  k_w;
-  reg  [88:0] s_w;
+  reg  [96:0] s_w;
 
   integer i;
   initial begin
@@ -96,8 +100,6 @@ module chan_activity #(
 
   // After any reset both RAMs are swept back to their initial contents (512
   // cycles). The first frame cannot arrive sooner: the PFB needs 4096 samples.
-  reg        clearing = 1'b1;
-  reg  [8:0] clr_addr = 9'd0;
   always @(posedge clk) begin
     if (rst) begin
       clearing <= 1'b1;
@@ -159,39 +161,43 @@ module chan_activity #(
   end
 
   // stage 3b: state from RAM (st3, valid in stage 3), minimum of the stored minima
-  reg        v3b = 1'b0, blk3b, sub3b, psd3b, last3b, act3b;
+  reg        v3b = 1'b0, blk3b, sub3b, psd3b, last3b, act3b, track3b;
   reg [8:0]  k3b;
   reg [15:0] smin3b, mmin3b;
-  reg [7:0]  hang3b;
+  reg [7:0]  hang3b, held3b;
   reg [63:0] mins3b;
   always @(posedge clk) begin
     k3b <= k3; blk3b <= blk3; sub3b <= sub3; psd3b <= psd3; last3b <= last3;
-    hang3b <= st3[88:81]; act3b <= st3[80]; smin3b <= st3[79:64]; mins3b <= st3[63:0];
+    held3b <= st3[96:89]; hang3b <= st3[88:81]; act3b <= st3[80]; smin3b <= st3[79:64];
+    mins3b <= st3[63:0];
+    // an active bin stops feeding its own floor until it has held HOLD_SUBS sub-windows
+    track3b <= ~st3[80] | (st3[96:89] >= HOLD_SUBS);
     mmin3b <= min16(min16(st3[15:0], st3[31:16]), min16(st3[47:32], st3[63:48]));
   end
 
-  reg        v4 = 1'b0, blk4, sub4, psd4, last4, act4;
+  reg        v4 = 1'b0, blk4, sub4, psd4, last4, act4, track4;
   reg [8:0]  k4;
   reg [15:0] smin4, mmin4;
-  reg [7:0]  hang4;
+  reg [7:0]  hang4, held4;
   reg [63:0] mins4;
   always @(posedge clk) begin
     k4 <= k3b; blk4 <= blk3b; sub4 <= sub3b; psd4 <= psd3b; last4 <= last3b;
     smin4 <= smin3b; act4 <= act3b; hang4 <= hang3b; mins4 <= mins3b; mmin4 <= mmin3b;
+    held4 <= held3b; track4 <= track3b;
   end
 
   // stage 4b: minimum statistics (two compares), registered
-  reg        v4b = 1'b0, blk4b, sub4b, psd4b, last4b, act4b;
+  reg        v4b = 1'b0, blk4b, sub4b, psd4b, last4b, act4b, track4b;
   reg [8:0]  k4b;
   reg [15:0] lvl4b, plv4b, smin4b, sminold4b, floor_raw4b;
-  reg [7:0]  hang4b;
+  reg [7:0]  hang4b, held4b;
   reg [63:0] mins4b;
   always @(posedge clk) begin
     k4b <= k4; blk4b <= blk4; sub4b <= sub4; psd4b <= psd4; last4b <= last4; act4b <= act4;
     lvl4b <= lvl4; plv4b <= plv4; sminold4b <= smin4;
-    smin4b <= min16(smin4, lvl4);
-    floor_raw4b <= min16(min16(smin4, lvl4), mmin4);
-    hang4b <= hang4; mins4b <= mins4;
+    smin4b <= track4 ? min16(smin4, lvl4) : smin4;
+    floor_raw4b <= min16(track4 ? min16(smin4, lvl4) : smin4, mmin4);
+    hang4b <= hang4; mins4b <= mins4; held4b <= held4; track4b <= track4;
   end
 
   // stage 5: bias (saturating) and thresholds, registered
@@ -202,14 +208,15 @@ module chan_activity #(
   reg [8:0]  k5;
   reg [15:0] lvl5, plv5, floor5, smin5, sminold5;
   reg [17:0] thr_on5, thr_off5;
-  reg [7:0]  hang5;
+  reg [7:0]  hang5, held5;
+  reg        track5;
   reg [63:0] mins5;
   always @(posedge clk) begin
     k5 <= k4b; blk5 <= blk4b; sub5 <= sub4b; psd5 <= psd4b; last5 <= last4b; act5 <= act4b;
     lvl5 <= lvl4b; plv5 <= plv4b; floor5 <= floor_v; smin5 <= smin4b; sminold5 <= sminold4b;
     thr_on5 <= {2'b0, floor_v} + {2'b0, on_q8};
     thr_off5 <= {2'b0, floor_v} + {2'b0, off_q8};
-    hang5 <= hang4b; mins5 <= mins4b;
+    hang5 <= hang4b; mins5 <= mins4b; held5 <= held4b; track5 <= track4b;
   end
 
   // stage 6: CFAR decision with hysteresis and hang; write-back
@@ -220,12 +227,16 @@ module chan_activity #(
   wire        hold   = act5 & ~above_off & (hang5 != 8'd0);
   wire [7:0]  hang_n = (opened | keep) ? hang_blocks : (hold ? hang5 - 8'd1 : 8'd0);
   wire        act_n  = opened | keep | hold;
+  wire [7:0]  held_n = act_n ? ((held5 == 8'hFF) ? 8'hFF : held5 + 8'd1) : 8'd0;
 
   always @(posedge clk) begin
     k_w <= k5;
-    if (blk5) s_w <= {hang_n, act_n, (sub5 ? EMPTY : smin5),
-                      (sub5 ? {mins5[47:0], smin5} : mins5)};
-    else      s_w <= {hang5, act5, sminold5, mins5};
+    if (blk5 & sub5 & track5)
+      s_w <= {held_n, hang_n, act_n, EMPTY, mins5[47:0], smin5};
+    else if (blk5)
+      s_w <= {(sub5 ? held_n : held5), hang_n, act_n, smin5, mins5};
+    else
+      s_w <= {held5, hang5, act5, sminold5, mins5};
   end
 
   // activity bitmap: written per bin at block end (cleared during the RAM sweep)

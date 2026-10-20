@@ -31,7 +31,7 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 # Small detector constants so a simulation covers several blocks, sub-window
 # rotations and long-PSD periods; the RTL takes the same values as parameters.
 SIM_DET = act.DetectorConfig(block_log2=2, sub_blocks=2, sub_windows=4, bias_q8=20,
-                             on_q8=300, off_q8=150, hang=2, psd_log2=3)
+                             on_q8=300, off_q8=150, hang=2, psd_log2=3, hold_subs=3)
 
 
 def hexfile(path: Path, values, width_bits: int) -> None:

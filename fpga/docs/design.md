@@ -100,7 +100,7 @@ Comparison with open designs:
 | Coefficients | 18-bit, Σh = 2^25 | |
 | Branch sum | 30-bit products, 34-bit sum, round-half-up >> 14, saturate 16 | max 0.555 FS for any 12-bit input |
 | FFT (xfft, unscaled) | 16-bit in, 18-bit twiddles, convergent rounding, 26-bit out | Σ\|h\|·2048·√2/2^14 = 2^23.2 < 2^25 |
-| Slice | round >> out_shift (default 7), saturate 16 | gain ×16 ADC units, no saturation for 12-bit input |
+| Slice | round >> out_shift (default 7), saturate 16 | gain ×16 ADC units: no saturation for any 12-bit sinusoid; hard-clipped I/Q (about 1.27× full scale in a bin) saturates, counted and flagged |
 | Power word | round >> 6, saturate 18, I²+Q² | 35-bit |
 
 Gain from the ADC to the FFT output is exactly 2^11. The 16-bit FIR output keeps one
@@ -156,6 +156,13 @@ Per coarse bin k, from the power word P_k = |Y_k|²:
    the current sub-window plus V = 4 retained sub-window minima of U = 128 blocks.
    That window is 1.3–1.6 s, so the floor follows slow changes and never needs the
    bin to be empty at any particular moment.
+   - **Frozen while active.** While a bin is active, its own levels stop feeding the
+     minimum and its sub-window minima stop rotating. Without that, a carrier
+     longer than the window (FM voice, two-slot DMR, control channels) becomes the
+     floor and the bin closes after about 1.5 s.
+   - **Bounded.** The freeze lasts at most 90 sub-windows (about 30 s) of
+     continuous activity. Tracking then resumes, so a genuine floor rise cannot
+     latch a bin open.
 4. **Order-statistic CFAR decision** [rohling83; richards14].
    - Open when L > N + T_on. Stay open while L > N + T_off, then for `hang` more
      blocks (39 blocks = 100 ms, which bridges DMR TDMA gaps).

@@ -25,7 +25,8 @@ module chan_top #(
   parameter [7:0]  DEFAULT_HANG = 8'd39,
   parameter BLOCK_LOG2 = 8,             // detector block = 2^8 frames (2.56 ms)
   parameter SUB_BLOCKS = 128,           // minimum-statistics sub-window, blocks
-  parameter PSD_LOG2 = 13               // long PSD = 2^13 frames (81.9 ms)
+  parameter PSD_LOG2 = 13,              // long PSD = 2^13 frames (81.9 ms)
+  parameter HOLD_SUBS = 90              // floor frozen while active, <= 90 sub-windows
 ) (
   // AXI4-Lite (ADI up_axi), clock and reset for the whole core
   (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 s_axi_aclk CLK" *)
@@ -128,6 +129,7 @@ module chan_top #(
   );
 
   reg  [13:0]  raddr2 = 14'd0;       // read address, registered (see read pipeline)
+  reg          dp_rst = 1'b1;        // datapath soft reset (RUN = 0 or system reset)
   reg  [31:0]  scratch = 32'd0;
   reg          run = 1'b0, hist_en = 1'b0, sel_en = 1'b0, auto_fwd = 1'b0;
   reg  [3:0]   out_shift = 4'd7;
@@ -166,7 +168,6 @@ module chan_top #(
   end
 
   // datapath soft reset while not running (also during system reset)
-  reg dp_rst = 1'b1;
   always @(posedge clk) dp_rst <= srst | ~run;
   wire hist_fifo_empty, sel_fifo_empty;
 
@@ -263,6 +264,7 @@ module chan_top #(
 
   chan_activity #(
     .BLOCK_LOG2(BLOCK_LOG2), .SUB_BLOCKS(SUB_BLOCKS), .PSD_LOG2(PSD_LOG2),
+    .HOLD_SUBS(HOLD_SUBS),
     .LOG_TABLE(LOG_TABLE)
   ) i_activity (
     .clk (clk), .rst (dp_rst | det_clear),

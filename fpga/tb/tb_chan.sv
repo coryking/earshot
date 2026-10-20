@@ -63,7 +63,7 @@ module tb_chan;
 
   chan_top #(
     .ID(7), .COEF_FILE_PREFIX("pfb_coef_p"), .LOG_TABLE("chan_log2_table.mem"),
-    .BLOCK_LOG2(2), .SUB_BLOCKS(2), .PSD_LOG2(3)   // = golden.SIM_DET
+    .BLOCK_LOG2(2), .SUB_BLOCKS(2), .PSD_LOG2(3), .HOLD_SUBS(3)   // = golden.SIM_DET
   ) dut (
     .s_axi_aclk (clk), .s_axi_aresetn (aresetn),
     .s_axi_awvalid (awvalid), .s_axi_awaddr (awaddr), .s_axi_awprot (3'd0),

@@ -108,7 +108,7 @@ module chan_pack #(
   reg  [8:0]  rb;
   reg  [31:0] even_word;
 
-  wire start = ~busy & ~rst & (pend | fd_valid);
+  wire start = ~busy & ~rst & ~rst_req & (pend | fd_valid);
   wire [47:0] start_frame = pend ? pend_frame : fd_frame;
   wire        start_sat   = pend ? pend_sat : fd_sat;
   wire        start_bank  = start_frame[0];
@@ -121,7 +121,11 @@ module chan_pack #(
   // A soft reset (RUN = 0) waits for the record being written to finish, so the
   // output streams never carry a truncated record (the history ring's fixed
   // record size depends on it). New frames are not admitted meanwhile.
-  wire rst_now = rst & ~busy;
+  // The request is latched so a RUN=0 pulse shorter than a record still resets.
+  reg  rst_req = 1'b0;
+  wire rst_now = (rst | rst_req) & ~busy;
+  always @(posedge clk) rst_req <= rst_now ? 1'b0 : (rst_req | rst);
+
   always @(posedge clk) begin
     if (rst_now) begin
       busy <= 1'b0; pend <= 1'b0; b <= 10'd0; rv <= 1'b0;
@@ -135,17 +139,19 @@ module chan_pack #(
       hw_en <= 1'b0;
       sw_en <= 1'b0;
 
-      // A loss affects every frame whose 4096-sample window (16 hops) spans it.
+      // A loss affects every frame whose 4096-sample window (16 hops) spans it. Up to
+      // five more frames can already be in flight between the CDC FIFO and here
+      // (FIFO backlog, FIR, xfft, pending slot), so flag 21 to cover them all.
       if (ovf_new) begin
         ovf_seen <= adc_overflow_count;
-        ovf_frames <= 5'd16;
+        ovf_frames <= 5'd21;
       end else if (start && ovf_frames != 5'd0) begin
         ovf_frames <= ovf_frames - 5'd1;
       end
       if (!hist_en) hist_armed <= 1'b1;
 
       // queue a frame that arrives while busy; a third one is an overrun
-      if (fd_valid & ~start & ~rst) begin
+      if (fd_valid & ~start & ~rst & ~rst_req) begin
         if (pend) begin
           overruns <= overruns + 32'd1;
           hist_disc <= hist_disc | hist_en;

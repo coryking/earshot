@@ -61,6 +61,7 @@ class DetectorConfig:
     off_q8: int = 0            # close threshold above floor
     hang: int = 39             # blocks kept open after falling below off (100 ms)
     psd_log2: int = 13         # long PSD: 8192 frames = 81.9 ms
+    hold_subs: int = 90        # floor frozen while active, for at most 90 sub-windows (~30 s)
 
     @property
     def frames_per_block(self) -> int:
@@ -82,6 +83,7 @@ class DetectorState:
     hang: np.ndarray
     psd_acc: np.ndarray
     psd_frames: int
+    held: np.ndarray           # consecutive sub-window ends spent active (saturates at 255)
 
 
 FLOOR_INIT = (1 << 16) - 1     # an empty minimum (16-bit all ones)
@@ -91,7 +93,7 @@ def initial_state(bins: int, cfg: DetectorConfig) -> DetectorState:
     z = np.zeros(bins, dtype=np.int64)
     return DetectorState(z.copy(), 0, 0, np.full(bins, FLOOR_INIT, np.int64),
                          np.full((cfg.sub_windows, bins), FLOOR_INIT, np.int64),
-                         np.zeros(bins, bool), z.copy(), z.copy(), 0)
+                         np.zeros(bins, bool), z.copy(), z.copy(), 0, z.copy())
 
 
 @dataclass
@@ -117,7 +119,11 @@ def step(state: DetectorState, power: np.ndarray, cfg: DetectorConfig
         level = log2_q8(state.acc)
         state.acc[:] = 0
         state.frames = 0
-        state.sub_min = np.minimum(state.sub_min, level)
+        # An active bin stops feeding its own floor, so a long transmission is not
+        # absorbed into the noise estimate; after hold_subs sub-windows of continuous
+        # activity tracking resumes, so a real floor rise cannot latch a bin open.
+        track = ~state.active | (state.held >= cfg.hold_subs)
+        state.sub_min = np.where(track, np.minimum(state.sub_min, level), state.sub_min)
         floor_raw = np.minimum(state.sub_min, state.mins.min(axis=0))
         floor = np.minimum(floor_raw + cfg.bias_q8, FLOOR_INIT)
         above_on = level > floor + cfg.on_q8
@@ -130,9 +136,10 @@ def step(state: DetectorState, power: np.ndarray, cfg: DetectorConfig
         block = BlockOutput(level, floor, state.active.copy())
         state.blocks_in_sub += 1
         if state.blocks_in_sub == cfg.sub_blocks:
-            state.mins[1:] = state.mins[:-1]
-            state.mins[0] = state.sub_min
-            state.sub_min = np.full_like(state.sub_min, FLOOR_INIT)
+            shifted = np.vstack([state.sub_min[None, :], state.mins[:-1]])
+            state.mins = np.where(track[None, :], shifted, state.mins)
+            state.sub_min = np.where(track, FLOOR_INIT, state.sub_min)
+            state.held = np.where(state.active, np.minimum(state.held + 1, 255), 0)
             state.blocks_in_sub = 0
     return block, psd
 
