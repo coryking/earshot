@@ -56,8 +56,8 @@ export type EngineLink = z.infer<typeof engineLinkSchema>;
 
 /** What the receiver supervisor says (radio-supervisor status file); null when there is none. */
 export const engineReceiverSchema = z.looseObject({
-  /** "starting" | "running" | "waiting" | "borrowed" | "stopped" */
-  state: z.string().catch("stopped"),
+  /** "starting" | "running" | "waiting" | "borrowed" | "stopped" | "unknown" (no status file) */
+  state: z.string().catch("unknown"),
   /** "lock-held" | "unreachable" | "wrong-image" | "producer-failed" | "radio-state" | "shutdown" | null */
   reason: str,
   detail: str,

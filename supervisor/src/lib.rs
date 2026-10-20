@@ -299,7 +299,8 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
                 return Next::Retry(wait);
             }
             Probe::Ready(summary) => {
-                self.unreachable_n = 0;
+                // unreachable_n is not reset here: a Pluto that answers iio_info but refuses
+                // ssh must still back off. It resets once a producer has started.
                 self.wrong_image_n = 0;
                 self.pluto = summary;
                 self.profile = self.radio.profile_name();
@@ -314,6 +315,9 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
             if let Err(e) = self.radio.stop_leftovers() {
                 return self.failed(&format!("could not stop a leftover producer: {e}"));
             }
+        }
+        if self.env.stopping() {
+            return Next::Stop;
         }
         let before = match self.radio.snapshot() {
             Ok(s) => s,
@@ -331,16 +335,24 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
             );
             return Next::Retry(wait);
         }
+        if self.env.stopping() {
+            return Next::Stop;
+        }
         self.deployed = true;
         let mut running = match self.radio.start() {
             Ok(r) => r,
             Err(e) => {
                 // A failed start may still have opened the radio before dying.
-                let restore = self.radio.verify_restored(&before, &inspection.boot_id, false);
+                let stopping = self.env.stopping();
+                let restore = self.radio.verify_restored(&before, &inspection.boot_id, stopping);
                 self.last_restore = Some(restore.describe());
+                if stopping {
+                    return Next::Stop;
+                }
                 return self.failed(&format!("could not start: {e}"));
             }
         };
+        self.unreachable_n = 0;
         let started = self.env.now();
         self.starts += 1;
         self.producer_started_at = Some(started);
@@ -350,6 +362,8 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
         let mut stale_polls = 0u32;
         let ended = loop {
             if self.env.stopping() {
+                // Close the engine's gate before the producer goes away.
+                self.set("starting", None, "Stopping and putting the radio back.", None);
                 break (running.stop(), "asked to stop");
             }
             if let Some(exit) = running.try_wait() {
@@ -393,7 +407,8 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
         if stopping {
             return Next::Stop;
         }
-        if ran >= self.policy.stable_run.as_secs_f64() {
+        // A run that never delivered data does not count as healthy, however long it lasted.
+        if ran >= self.policy.stable_run.as_secs_f64() && why != "no data arriving" {
             self.crash_n = 0;
         }
         self.failed(&format!("the producer {why} after {ran:.0} s"))
@@ -493,6 +508,13 @@ mod tests {
         statuses: Vec<Value>,
         snapshot: Snapshot,
         leftovers: u32,
+        /// The fake radio is only legal to touch while the lock is held.
+        held: bool,
+        inspect_errors: u32,
+        snapshot_errors: u32,
+        start_errors: u32,
+        /// Seconds the snapshot call takes (a slow Pluto).
+        snapshot_takes: f64,
     }
     type Shared = Rc<RefCell<World>>;
 
@@ -507,49 +529,74 @@ mod tests {
     impl Running for FakeRunning {
         fn try_wait(&mut self) -> Option<ExitInfo> {
             let w = self.world.borrow();
+            assert!(w.held, "producer polled without the lock");
             self.ends_at
                 .filter(|t| w.now >= *t)
                 .map(|_| ExitInfo { code: Some(1), output: "boom\n".into() })
         }
         fn stop(&mut self) -> ExitInfo {
-            self.world.borrow_mut().calls.push("producer.stop".into());
+            let mut w = self.world.borrow_mut();
+            assert!(w.held, "producer stopped without the lock");
+            w.calls.push("producer.stop".into());
             ExitInfo { code: Some(0), output: "{\"status\":\"stopped\"}\n".into() }
         }
     }
     impl Radio for FakeRadio {
         fn probe(&mut self) -> Probe {
             let mut w = self.0.borrow_mut();
+            assert!(w.held, "probe without the lock");
             w.calls.push("probe".into());
             w.probes.pop_front().unwrap_or(Probe::Ready("Pluto v0.37".into()))
         }
         fn inspect(&mut self) -> Result<Inspection, String> {
             let mut w = self.0.borrow_mut();
+            assert!(w.held, "inspect without the lock");
             w.calls.push("inspect".into());
+            if w.inspect_errors > 0 {
+                w.inspect_errors -= 1;
+                return Err("ssh failed".into());
+            }
             Ok(Inspection { boot_id: "boot-1".into(), leftover_producers: std::mem::take(&mut w.leftovers) })
         }
         fn stop_leftovers(&mut self) -> Result<(), String> {
-            self.0.borrow_mut().calls.push("stop_leftovers".into());
+            let mut w = self.0.borrow_mut();
+            assert!(w.held, "stop_leftovers without the lock");
+            w.calls.push("stop_leftovers".into());
             Ok(())
         }
         fn snapshot(&mut self) -> Result<Snapshot, String> {
             let mut w = self.0.borrow_mut();
+            assert!(w.held, "snapshot without the lock");
             w.calls.push("snapshot".into());
+            w.now += w.snapshot_takes;
+            if w.snapshot_errors > 0 {
+                w.snapshot_errors -= 1;
+                return Err("iio_attr failed".into());
+            }
             Ok(w.snapshot.clone())
         }
         fn start(&mut self) -> Result<Box<dyn Running>, String> {
             let mut w = self.0.borrow_mut();
+            assert!(w.held, "start without the lock");
             w.calls.push("start".into());
+            if w.start_errors > 0 {
+                w.start_errors -= 1;
+                return Err("scp failed".into());
+            }
             let life = w.lifetimes.pop_front().unwrap_or(None);
             let ends_at = life.map(|l| w.now + l);
             Ok(Box::new(FakeRunning { world: self.0.clone(), ends_at }))
         }
         fn verify_restored(&mut self, _: &Snapshot, _: &str, stopping: bool) -> Restore {
             let mut w = self.0.borrow_mut();
+            assert!(w.held, "verify_restored without the lock");
             w.calls.push(format!("verify_restored(stopping={stopping})"));
             w.restores.pop_front().unwrap_or(Restore::Verified)
         }
         fn cleanup(&mut self) {
-            self.0.borrow_mut().calls.push("cleanup".into());
+            let mut w = self.0.borrow_mut();
+            assert!(w.held, "cleanup without the lock");
+            w.calls.push("cleanup".into());
         }
     }
     impl Lock for FakeLock {
@@ -561,10 +608,13 @@ mod tests {
                 return false;
             }
             w.calls.push("lock".into());
+            w.held = true;
             true
         }
         fn release(&mut self) {
-            self.0.borrow_mut().calls.push("unlock".into());
+            let mut w = self.0.borrow_mut();
+            w.held = false;
+            w.calls.push("unlock".into());
         }
     }
     impl Env for FakeEnv {
@@ -826,5 +876,96 @@ mod tests {
         let w = shared.borrow();
         let s = w.statuses.iter().find(|s| s["last_restore"].as_str().is_some_and(|r| r.starts_with("UNVERIFIED"))).unwrap();
         assert!(s["last_restore"].as_str().unwrap().contains("tx_lo differs"));
+    }
+
+    #[test]
+    fn a_failed_start_checks_the_radio_then_backs_off() {
+        let mut w = world(60.);
+        w.start_errors = 2;
+        let (mut sup, shared) = rig(w);
+        sup.run();
+        let w = shared.borrow();
+        assert!(count(&w, "verify_restored(stopping=false)") >= 2, "a start that failed may have opened the radio: {:?}", w.calls);
+        assert!(w.statuses.iter().any(|s| s["detail"].as_str().is_some_and(|d| d.contains("could not start: scp failed"))));
+        assert_eq!(count(&w, "start"), 3, "third attempt succeeds");
+    }
+
+    #[test]
+    fn a_pluto_that_answers_iio_but_not_ssh_backs_off_instead_of_hammering() {
+        let mut w = world(300.);
+        w.inspect_errors = 4;
+        let (mut sup, shared) = rig(w);
+        sup.run();
+        let w = shared.borrow();
+        let waits: Vec<u64> = w
+            .statuses
+            .iter()
+            .filter(|s| s["reason"] == "unreachable")
+            .map(|s| s["retry_in_s"].as_f64().unwrap() as u64)
+            .fold(Vec::new(), |mut acc, x| {
+                if acc.last() != Some(&x) {
+                    acc.push(x);
+                }
+                acc
+            });
+        assert_eq!(waits, vec![5, 10, 20, 30], "probe success must not reset the backoff");
+        assert_eq!(count(&w, "start"), 1);
+    }
+
+    #[test]
+    fn snapshot_failures_are_unreachable_not_producer_crashes() {
+        let mut w = world(60.);
+        w.snapshot_errors = 1;
+        let (mut sup, shared) = rig(w);
+        sup.run();
+        let w = shared.borrow();
+        assert!(states(&w).contains(&"waiting/unreachable".to_string()));
+        assert_eq!(count(&w, "start"), 1);
+    }
+
+    #[test]
+    fn a_stop_requested_during_a_slow_setup_never_starts_a_producer() {
+        let mut w = world(50.);
+        w.snapshot_takes = 100.; // the Pluto is slow; the stop request lands meanwhile
+        let (mut sup, shared) = rig(w);
+        sup.run();
+        let w = shared.borrow();
+        assert_eq!(count(&w, "start"), 0, "{:?}", w.calls);
+        assert_eq!(w.statuses.last().unwrap()["state"], "stopped");
+    }
+
+    #[test]
+    fn a_producer_that_never_delivers_data_backs_off_instead_of_cycling_every_minute() {
+        let mut w = world(900.);
+        w.samples_age = (0..400).map(|_| Some(500.)).collect();
+        let (mut sup, shared) = rig(w);
+        sup.run();
+        let w = shared.borrow();
+        let waits: Vec<u64> = w
+            .statuses
+            .iter()
+            .filter(|s| s["reason"] == "producer-failed")
+            .map(|s| s["retry_in_s"].as_f64().unwrap() as u64)
+            .fold(Vec::new(), |mut acc, x| {
+                if acc.last() != Some(&x) {
+                    acc.push(x);
+                }
+                acc
+            });
+        assert!(waits.len() >= 3 && waits[0] == 3 && waits[1] == 6 && waits[2] == 12, "{waits:?}");
+    }
+
+    #[test]
+    fn the_engine_gate_closes_before_the_producer_is_stopped() {
+        let (mut sup, shared) = rig(world(30.));
+        sup.run();
+        let w = shared.borrow();
+        let last_running = w.statuses.iter().rposition(|s| s["state"] == "running").unwrap();
+        let stopped_state = w.statuses.iter().position(|s| s["detail"] == "Stopping and putting the radio back.").unwrap();
+        assert!(stopped_state > last_running);
+        // producer.stop is recorded in calls, statuses are separate: the status change is
+        // published by set() before running.stop() is called, so a running status is never the
+        // last one published before the stop.
+        assert_ne!(w.statuses[stopped_state - 1]["state"], "stopped");
     }
 }

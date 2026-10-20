@@ -28,8 +28,8 @@ pub(crate) fn now() -> f64 {
         .unwrap_or(0.)
 }
 
-/// The supervisor rewrites its status file at least every 10 s; older than this means the
-/// supervisor is gone and nothing it said can be relied on.
+/// The supervisor refreshes its status file every few seconds (even while busy); older than
+/// this means the supervisor process is gone and nothing it said can be relied on.
 pub const RECEIVER_FRESH_S: f64 = 45.;
 
 /// Where the engine stands with its source, as reported in `/api/status` under `link`.
@@ -169,9 +169,14 @@ fn receiver_ready(status: &Option<Value>) -> bool {
 }
 
 impl App {
-    /// The supervisor's status (see `read_receiver`), when a status file is configured.
+    /// The supervisor's status (see `read_receiver`). `None` only when no status file is
+    /// configured; a configured file that is missing or unreadable reads as state `unknown`, so
+    /// the UI can tell "no supervisor wired up" from "supervisor not answering".
     pub(crate) fn receiver_status(&self) -> Option<Value> {
-        read_receiver(self.receiver_file.as_deref()?, now())
+        let path = self.receiver_file.as_deref()?;
+        Some(read_receiver(path, now()).unwrap_or_else(|| {
+            json!({"state": "unknown", "reason": null, "detail": "No status from the receiver supervisor.", "fresh": false})
+        }))
     }
     fn link_update(&self, f: impl FnOnce(&mut Link)) {
         f(&mut self.engine().link);
@@ -180,9 +185,10 @@ impl App {
 
 /// Connect, ingest until the source goes away, back off, repeat. Never returns.
 ///
-/// `gate` is the supervisor status file; when `Some`, a connection is attempted only while it
-/// says a producer is running.
-pub fn run_source(app: App, config: LinkConfig, gate: bool) -> ! {
+/// When the app has a supervisor status file, a connection is attempted only while it says a
+/// producer is running.
+pub fn run_source(app: App, config: LinkConfig) -> ! {
+    let gate = app.receiver_file.is_some();
     app.link_update(|l| *l = Link::tcp(&config.address));
     let mut failures = 0u32;
     loop {
@@ -329,9 +335,9 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
     }
-    fn start(app: &App, config: LinkConfig, gate: bool) {
+    fn start(app: &App, config: LinkConfig) {
         let app = app.clone();
-        thread::spawn(move || run_source(app, config, gate));
+        thread::spawn(move || run_source(app, config));
     }
 
     #[test]
@@ -349,26 +355,40 @@ mod tests {
     fn a_dropped_source_is_reconnected_and_the_outage_is_reported() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
+        let (drop_first, first_may_drop) = mpsc::channel::<()>();
         let (release, held) = mpsc::channel::<()>();
         thread::spawn(move || {
-            // First producer: sends CONFIG then dies. Second: sends CONFIG and stays.
+            // First producer: sends CONFIG and dies when told to. Second: sends CONFIG and stays.
             let (mut first, _) = listener.accept().unwrap();
             first.write_all(&config_frame()).unwrap();
-            thread::sleep(Duration::from_millis(100));
+            let _ = first_may_drop.recv();
             drop(first);
             let (mut second, _) = listener.accept().unwrap();
             second.write_all(&config_frame()).unwrap();
             let _ = held.recv();
         });
         let app = App::new(3);
-        start(&app, fast(address.clone()), false);
+        let mut config = fast(address.clone());
+        config.backoff_base = Duration::from_millis(400); // a window long enough to observe
+        config.backoff_cap = Duration::from_millis(400);
+        config.stable_after = Duration::from_millis(50); // the first connection counts as healthy
+        start(&app, config);
         wait_for("the first connection", &app, |l| l["state"] == "connected" && l["connects"] == 1);
-        // The source drops: the outage is visible, then the engine is back by itself.
-        let lost = wait_for("a reconnect", &app, |l| l["connects"] == 2 && l["state"] == "connected");
-        assert!(lost["offline_since"].is_null(), "no outage once reconnected: {lost}");
-        let e = app.engine();
-        assert!(e.active, "second CONFIG must reactivate the source");
-        assert_eq!(e.source["input_rate_hz"], 800000);
+        wait_for("CONFIG ingested", &app, |_| app.engine().active);
+        drop_first.send(()).unwrap();
+        // The outage is visible while the engine waits to retry.
+        let down = wait_for("the outage", &app, |l| l["state"] == "reconnecting");
+        assert!(down["offline_since"].is_number() && down["offline_s"].is_number(), "{down}");
+        assert_eq!(down["last_error"], "the receiver closed the connection");
+        // A healthy connection that ended resets the backoff: one failure, so the base delay.
+        assert_eq!(down["failures"], 1, "{down}");
+        assert!(down["next_retry_s"].as_f64().unwrap() <= 0.5, "{down}");
+        assert!(!app.engine().active, "a lost source must not look active");
+        // Then it is back by itself.
+        let back = wait_for("a reconnect", &app, |l| l["connects"] == 2 && l["state"] == "connected");
+        assert!(back["offline_since"].is_null(), "no outage once reconnected: {back}");
+        wait_for("CONFIG ingested again", &app, |_| app.engine().active);
+        assert_eq!(app.engine().source["input_rate_hz"], 800000);
         drop(release);
     }
 
@@ -378,7 +398,7 @@ mod tests {
         let address = listener.local_addr().unwrap().to_string();
         drop(listener); // nothing listens: connection refused
         let app = App::new(3);
-        start(&app, fast(address.clone()), false);
+        start(&app, fast(address.clone()));
         let link = wait_for("repeated failures", &app, |l| l["failures"].as_u64().unwrap_or(0) >= 3);
         assert_eq!(link["mode"], "tcp");
         assert_eq!(link["address"], json!(address));
@@ -407,7 +427,7 @@ mod tests {
             }
         });
         let app = App::new(3);
-        start(&app, fast(address), false);
+        start(&app, fast(address));
         assert_eq!(seen.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
         // Stall timeout is 400 ms: the engine abandons the dead connection and dials again.
         assert_eq!(seen.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
@@ -435,7 +455,7 @@ mod tests {
             ..crate::runtime::AppConfig::new(3)
         });
         write("borrowed");
-        start(&app, fast(address), true);
+        start(&app, fast(address));
         let waiting = wait_for("waiting state", &app, |l| l["state"] == "waiting");
         thread::sleep(Duration::from_millis(700));
         assert!(
@@ -470,6 +490,14 @@ mod tests {
         assert_eq!(stale["fresh"], false);
         assert!(!receiver_ready(&Some(stale)));
         assert!(!receiver_ready(&read_receiver(&dir.join("missing.json"), now())));
+        // A configured but missing file is reported as unknown, not as "no supervisor".
+        let app = App::configured(crate::runtime::AppConfig {
+            receiver_status: Some(dir.join("missing.json")),
+            ..crate::runtime::AppConfig::new(3)
+        });
+        let unknown = app.receiver_status().unwrap();
+        assert_eq!((unknown["state"].as_str(), unknown["fresh"].as_bool()), (Some("unknown"), Some(false)));
+        assert!(App::new(3).receiver_status().is_none(), "no file configured means null");
         std::fs::write(&file, "not json").unwrap();
         assert!(read_receiver(&file, now()).is_none());
         std::fs::remove_dir_all(&dir).ok();

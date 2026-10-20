@@ -29,25 +29,36 @@ BORROW = Path(__file__).resolve().parent / "radio-borrow"
 def radio_lock(timeout_s: float = 3600.0) -> Iterator[None]:
     """Block (polling) until the lock is free; raise TimeoutError after `timeout_s`.
 
-    A no-op under `radio-borrow --lock`, which already holds the lock around this process.
+    Under `radio-borrow --lock` (PLUTO_RADIO_LOCK_HELD=1) the lock is held around this process;
+    that claim is checked, not trusted: if nobody actually holds the lock the usual path runs.
+    PLUTO_RADIO_LOCK (the lock file path) exists for tests; every real user must share the default.
     """
-    if os.environ.get("PLUTO_RADIO_LOCK_HELD") == "1":
-        yield
-        return
     with open(LOCK_PATH, "a") as handle:
-        deadline = time.monotonic() + timeout_s
-        while True:
+        if os.environ.get("PLUTO_RADIO_LOCK_HELD") == "1":
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
             except BlockingIOError:
-                if time.monotonic() > deadline:
-                    raise TimeoutError(f"{LOCK_PATH} still held after {timeout_s:.0f} s") from None
-                time.sleep(1.0)
+                yield  # held by our parent, as claimed
+                return
+            # Nobody holds it: the flag is stale. We now hold the lock; fall through and keep it.
+        else:
+            _acquire(handle, timeout_s)
         try:
             yield
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _acquire(handle: object, timeout_s: float) -> None:
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"{LOCK_PATH} still held after {timeout_s:.0f} s") from None
+            time.sleep(1.0)
 
 
 def raise_on_termination() -> None:

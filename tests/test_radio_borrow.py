@@ -25,6 +25,7 @@ state="$FAKE_DIR/state"; log="$FAKE_DIR/calls"
 shift  # --user
 case "$1" in
   show)
+    [ -e "$FAKE_DIR/no-bus" ] && { echo "Failed to connect to bus" >&2; exit 1; }
     case "$3" in
       LoadState) [ -e "$FAKE_DIR/not-installed" ] && echo not-found || echo loaded ;;
       ActiveState) cat "$state" ;;
@@ -195,3 +196,103 @@ def test_ensure_borrowed_reruns_the_script_under_radio_borrow_once(monkeypatch):
     monkeypatch.setenv("PLUTO_RADIO_BORROWED", "1")
     radio_lock.ensure_borrowed(["python", "script.py"])
     assert executed == [], "already under radio-borrow: no second wrapper"
+
+
+def wait_for_file(path: Path, timeout: float = 20) -> str:
+    deadline = time.monotonic() + timeout
+    while not path.exists() or not path.read_text().strip():
+        assert time.monotonic() < deadline, f"{path} never appeared"
+        time.sleep(0.05)
+    return path.read_text()
+
+
+CHILD = """
+import os, signal, sys, time
+marker = sys.argv[1]
+open(marker + ".pid", "w").write(str(os.getpid()))
+try:
+    open(marker + ".ready", "w").write("up")
+    time.sleep(60)
+except KeyboardInterrupt:
+    open(marker, "w").write("keyboard-interrupt")
+    sys.exit(3)
+"""
+
+
+def test_ctrl_c_reaches_the_command_so_its_own_cleanup_runs(world):
+    marker = world.tmp / "marker"
+    proc = subprocess.Popen(
+        [str(BORROW), sys.executable, "-c", CHILD, str(marker)],
+        env=world.env,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    wait_for_file(Path(f"{marker}.ready"))
+    proc.send_signal(signal.SIGINT)
+    proc.wait(timeout=30)
+    assert marker.read_text() == "keyboard-interrupt", (
+        "Python must see KeyboardInterrupt, not an ignored SIGINT"
+    )
+    assert calls(world) == ["stop", "start"]
+
+
+def test_lock_mode_signals_reach_the_command_itself_not_just_flock(world):
+    marker = world.tmp / "marker"
+    proc = subprocess.Popen(
+        [str(BORROW), "--lock", sys.executable, "-c", CHILD, str(marker)],
+        env=world.env,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    pid = int(wait_for_file(Path(f"{marker}.pid")))
+    wait_for_file(Path(f"{marker}.ready"))
+    proc.send_signal(signal.SIGTERM)
+    proc.wait(timeout=30)
+    time.sleep(0.3)
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)  # no orphan left holding the radio lock
+    assert calls(world) == ["stop", "start"]
+
+
+def test_the_commands_exit_status_survives_even_when_it_fails_instantly(world):
+    assert borrow(world, "false").returncode == 1
+    assert borrow(world, "definitely-not-a-command-xyz").returncode == 127
+    assert borrow(world, "bash", "-c", "exit 9").returncode == 9
+
+
+def test_a_missing_user_manager_is_an_error_not_a_reason_to_run_unprotected(world):
+    (world.fake / "no-bus").touch()
+    marker = world.tmp / "ran"
+    result = borrow(world, "touch", str(marker))
+    assert result.returncode == 125
+    assert not marker.exists()
+    assert "cannot reach the systemd user manager" in result.stderr
+
+
+def test_an_unverified_restore_or_a_stale_status_is_called_out_loudly(world):
+    run = world.run / "amateur-radio"
+    run.mkdir(parents=True)
+    (run / "receiver.json").write_text(
+        json.dumps({"state": "waiting", "last_restore": "UNVERIFIED: no answer"})
+    )
+    result = borrow(world, "true")
+    assert "could not verify" in result.stderr
+    assert "not 'stopped'" in result.stderr
+
+
+def test_a_stale_lock_held_flag_is_not_trusted(world, monkeypatch):
+    monkeypatch.setattr(radio_lock, "LOCK_PATH", world.env["PLUTO_RADIO_LOCK"])
+    monkeypatch.setenv("PLUTO_RADIO_LOCK_HELD", "1")
+    # Nobody holds the lock, so the flag is ignored and the lock is really taken.
+    with radio_lock.radio_lock(timeout_s=1):
+        probe = subprocess.run(
+            ["flock", "-n", world.env["PLUTO_RADIO_LOCK"], "true"], check=False, capture_output=True
+        )
+        assert probe.returncode != 0, "the lock must be held inside the block"
+
+
+@pytest.mark.parametrize("script", ["live_session.py", "live_acceptance.py", "capture_wideband.py"])
+def test_every_radio_script_steps_the_live_service_aside_before_taking_the_lock(script):
+    source = (BORROW.parent / script).read_text()
+    assert "ensure_borrowed()" in source
+    assert source.index("ensure_borrowed()") < source.index("radio_lock(")

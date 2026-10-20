@@ -45,6 +45,17 @@ PATH=~/.cache/amateur-radio-arm/tc/arm-gnu-toolchain-13.3.rel1-x86_64-arm-none-l
   offload/arm/build-gcc.sh ~/.cache/amateur-radio-arm/sysroot/staging ~/.cache/amateur-radio-arm/build
 ```
 
+## The Pluto is live all the time
+
+On wigglebutt the `amateur-radio-live` user service (supervisor/, `radio-supervisor`) runs the
+producer on the Pluto and holds `/tmp/pluto-radio.lock` while it does. Anything else that needs the
+radio goes through `offload/radio-borrow [--lock] <command...>`: it stops the live service
+(producer stopped, radio read back and restored, lock released), runs the command, and starts live
+again however the command ends. The three scripts below do this themselves (`ensure_borrowed()`);
+a manual producer run needs `radio-borrow --lock` around it. The producer serves exactly one TCP
+client and exits when it goes away, so the supervisor starts a new one each time. Operational
+detail: home-it-services `services/amateur-radio/README.md`; code and flags: `supervisor/`.
+
 ## Live sessions (hold the shared lock)
 
 Every session that configures, captures or streams holds `/tmp/pluto-radio.lock` (the helpers
@@ -56,7 +67,8 @@ default; set `PLUTO_SSH_PASSWORD` if it was changed.
 # bounded acceptance: producer -> private engine -> WebSocket path, acknowledged STOP, readbacks
 uv run python offload/live_acceptance.py --binary ~/.cache/amateur-radio-arm/build/pluto-channel-source \
   --out output/live-acceptance --seconds 120
-# listening session on the service's own URL (stops the fixture service, restores it afterwards)
+# listening session with settings of your own on the service's URL (the public engine and the
+# live receiver step aside, and come back afterwards)
 uv run python offload/live_session.py --binary ~/.cache/amateur-radio-arm/build/pluto-channel-source --minutes 60
 ```
 

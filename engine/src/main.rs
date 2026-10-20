@@ -159,12 +159,10 @@ async fn main() -> Result<()> {
                     .context("source must be tcp:HOST:PORT")?
                     .to_string();
                 // Reconnects with backoff for as long as the engine runs.
-                let gate = receiver_status.is_some();
                 thread::spawn(move || {
                     radio_engine::link::run_source(
                         ingest_app,
                         radio_engine::link::LinkConfig::new(address),
-                        gate,
                     )
                 });
             } else {

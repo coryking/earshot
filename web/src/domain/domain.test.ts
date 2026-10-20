@@ -234,6 +234,19 @@ describe("health and preferences", () => {
     expect(long.detail).toMatch(/different software/);
     expect(healthOf(down({ offline_s: 7200 }), true).detail).toContain("offline for 2 h");
 
+    // A borrow or a clean stop writes its status once; its age must not read as "supervisor dead".
+    const borrowed = healthOf(down({ offline_s: 30 }, { state: "borrowed", fresh: false }), true);
+    expect(borrowed.detail).toBe("The receiver is being used for a test and comes back when that's done.");
+    expect(healthOf(down({ offline_s: 30 }, { state: "stopped", fresh: false }), true).detail).toMatch(/switched off for maintenance/);
+    // No status from the supervisor at all is not "switched off".
+    expect(healthOf(down({ offline_s: 30 }, { state: "unknown", fresh: false }), true).detail).toMatch(/isn't running/);
+    // TCP is up but the first CONFIG has not arrived: still reconnecting, not the old "lost its feed" text.
+    const connecting = { ...down({ offline_s: 1 }), link: { mode: "tcp", state: "connected" } } as unknown as Parameters<typeof healthOf>[0];
+    expect(healthOf(connecting, true)).toMatchObject({ reconnecting: true, lead: "Receiver offline, reconnecting." });
+    // The raw diagnostic is the current link error, not a stale engine error.
+    const rawErr = healthOf(down({ offline_s: 30, last_error: "cannot reach the receiver at x: timed out" }), true);
+    expect(rawErr).toMatchObject({ raw: "cannot reach the receiver at x: timed out" });
+
     // Back: connected link plus a receiving state is the normal listening state again.
     const back = { ...base, link: { mode: "tcp", state: "connected" } } as unknown as Parameters<typeof healthOf>[0];
     expect(healthOf(back, true).state).toBe("listening");

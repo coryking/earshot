@@ -31,12 +31,9 @@ fn with_user(c: &Value, user: &std::collections::BTreeMap<String, Value>) -> Val
     out
 }
 fn now_s() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64()
+    crate::link::now()
 }
-/// The browser validates this payload strictly (web/src/lib/radio.ts), so every numeric
+/// The browser validates this payload (web/src/api/engine.ts), so every numeric
 /// field must be a number even before the first CONFIG or sample arrives.
 pub(crate) fn status_json(app: &App) -> Value {
     let receiver = app.receiver_status();

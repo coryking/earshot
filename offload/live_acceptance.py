@@ -5,7 +5,8 @@ Pluto's volatile /tmp (nothing is flashed or written to flash). Sequence:
 
   1. snapshot original receiver settings, FIR enables and TX clock (iio_attr, read-only)
   2. copy the ARM binary to the Pluto's /tmp and start it (it opens RX only once the engine connects)
-  3. start a private engine instance wired to it (separate ports; the systemd service is untouched)
+  3. start a private engine instance wired to it (separate ports; the public engine service keeps running, but the
+     always-on receiver steps aside via radio-borrow and resumes afterwards)
   4. observe /api/status, /api/spectrum, /api/events and the /api/listen WebSocket for --seconds;
      pin the first confirmed voice channel and record its audio
   5. POST /api/stop and require the acknowledged restoration, then read the hardware back

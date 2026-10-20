@@ -221,16 +221,16 @@ export function rankSources(sources: Source[], followed: ReadonlySet<string>): S
 /** Why the receiver is away, in words for the household, from what the supervisor reported. */
 function receiverReason(receiver: EngineStatus["receiver"]): string | null {
   if (!receiver) return null;
+  // A borrowed or cleanly stopped supervisor writes its status once and goes quiet: the age of
+  // that file says nothing about whether it is alive.
+  if (receiver.state === "borrowed") return "The receiver is being used for a test and comes back when that's done.";
+  if (receiver.state === "stopped") return "The receiver has been switched off for maintenance.";
   if (receiver.fresh === false)
     return "The program that keeps the receiver running isn't running, so nothing will restart it until it is.";
   switch (receiver.state) {
-    case "borrowed":
-      return "The receiver is being used for a test and comes back when that's done.";
     case "starting":
     case "running":
       return "The receiver is starting up.";
-    case "stopped":
-      return "The receiver has been switched off for maintenance.";
     case "waiting":
       switch (receiver.reason) {
         case "lock-held":
@@ -262,7 +262,8 @@ export function healthOf(status: EngineStatus | undefined, connected: boolean): 
   if (!status)
     return { state: "offline", detail: "Can't reach the radio. Check that the receiver box is on.", raw: null };
   const link = status.link;
-  if (link?.mode === "tcp" && link.state !== "connected") {
+  // "connected" is only the TCP link: until the first CONFIG arrives the engine is still not receiving.
+  if (link?.mode === "tcp" && (link.state !== "connected" || status.state !== "receiving")) {
     const reason = receiverReason(status.receiver);
     const away = link.offline_s ?? 0;
     const detail =
@@ -274,7 +275,7 @@ export function healthOf(status: EngineStatus | undefined, connected: boolean): 
       lead: "Receiver offline, reconnecting.",
       reconnecting: true,
       detail,
-      raw: status.error ?? link.last_error ?? null,
+      raw: link.last_error ?? status.error ?? null,
     };
   }
   if (status.state === "receiving" && status.mode === "live")

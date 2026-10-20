@@ -32,9 +32,18 @@ say() { echo "radio-borrow: $*" >&2; }
 
 usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
 
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+# 0 = installed, 1 = not installed (or no systemd: another box), 2 = cannot ask the user manager
+# (no bus: cron, a bare ssh session). 2 must not be read as "not installed": the live service
+# would be holding the lock and the command would hang on it.
 live_installed() {
-  command -v systemctl >/dev/null 2>&1 &&
-    [ "$(systemctl --user show -p LoadState --value "$UNIT" 2>/dev/null)" = "loaded" ]
+  command -v systemctl >/dev/null 2>&1 || return 1
+  local load
+  load=$(systemctl --user show -p LoadState --value "$UNIT" 2>/dev/null) || return 2
+  [ "$load" = "loaded" ] && return 0
+  [ "$load" = "not-found" ] && return 1
+  return 2
 }
 
 live_running() {
@@ -83,9 +92,14 @@ hold_lock=0
 if [ "$1" = "--lock" ]; then hold_lock=1; shift; fi
 [ $# -gt 0 ] || { usage; exit 2; }
 
-if ! live_installed; then
+live_installed; installed=$?
+if [ $installed = 2 ]; then
+  say "ERROR: cannot reach the systemd user manager (no session bus?), so I cannot tell whether $UNIT holds the radio. Run from a login session or set DBUS_SESSION_BUS_ADDRESS. Not running the command."
+  exit 125
+fi
+if [ $installed = 1 ]; then
   export PLUTO_RADIO_BORROWED=1
-  if [ $hold_lock = 1 ]; then exec flock "$RADIO_LOCK" env PLUTO_RADIO_LOCK_HELD=1 "$@"; fi
+  if [ $hold_lock = 1 ]; then exec flock -F "$RADIO_LOCK" env PLUTO_RADIO_LOCK_HELD=1 "$@"; fi
   exec "$@"
 fi
 
@@ -105,7 +119,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM HUP     # until the command starts; then they are forwarded to it
 
 exec 9>"$MUTEX"; flock 9        # stop decisions are made one borrower at a time
+stopped_now=0
 if live_running; then
+  stopped_now=1
   : > "$MARKER"
   say "stopping $UNIT (it restores the radio and releases the lock)"
   if ! systemctl --user stop "$UNIT"; then
@@ -114,21 +130,35 @@ if live_running; then
     exit 125
   fi
 fi
-restore=$(jq -r '.last_restore // empty' "$STATUS" 2>/dev/null)
+status_field() { jq -r ".$1 // empty" "$STATUS" 2>/dev/null; }
+restore=$(status_field last_restore)
+state_after=$(status_field state)
+if [ $stopped_now = 1 ] && [ "$state_after" != "stopped" ]; then
+  say "WARNING: $UNIT stopped, but its last status says '$state_after', not 'stopped' (it may have been killed at the stop timeout). The Pluto's settings were not verified."
+fi
+case "$restore" in
+  UNVERIFIED*) say "WARNING: the live service could not verify the Pluto's settings were restored: $restore" ;;
+  "") ;;
+  *) say "radio restored by the live service: $restore" ;;
+esac
 write_status borrowed "The receiver is being used for a test and comes back when that finishes."
-[ -n "$restore" ] && say "radio restored by the live service: $restore"
 exec 9>&-                       # let other borrowers in
 
 export PLUTO_RADIO_BORROWED=1
+# Own process group (job control), so the command gets default signal handling (a plain
+# background job in a script has SIGINT ignored, which Python inherits) and a signal sent to
+# radio-borrow can be passed to the whole group.
+set -m
 if [ $hold_lock = 1 ]; then
-  flock "$RADIO_LOCK" env PLUTO_RADIO_LOCK_HELD=1 "$@" <&0 8>&- &
+  # -F: flock execs the command instead of forking, so the signals below reach the command itself.
+  flock -F "$RADIO_LOCK" env PLUTO_RADIO_LOCK_HELD=1 "$@" <&0 8>&- &
 else
   "$@" <&0 8>&- &
 fi
 child=$!
-# Signals sent to radio-borrow alone are passed on; cleanup waits for the command to be done.
-trap 'kill -TERM "$child" 2>/dev/null' TERM HUP
-trap 'kill -INT "$child" 2>/dev/null' INT
-rc=0
+trap 'kill -TERM -- "-$child" 2>/dev/null' TERM HUP
+trap 'kill -INT -- "-$child" 2>/dev/null' INT
+wait "$child"; rc=$?
+# A signal interrupts wait while the command is still alive: keep waiting for its real status.
 while kill -0 "$child" 2>/dev/null; do wait "$child"; rc=$?; done
 exit $rc
