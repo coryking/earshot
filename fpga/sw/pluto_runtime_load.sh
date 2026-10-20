@@ -97,12 +97,18 @@ set -e
 # iiod caches device/sysfs handles. They become stale across driver rebinds and
 # can fault in axiadc_read_raw. Its FunctionFS endpoint also keeps the composite
 # USB gadget attached: stopping it drops SSH, so restart it here, never from a
-# second host command. The gadget's Ethernet function/IP remain configured.
+# second host command. Explicitly unbind/rebind the gadget around FunctionFS;
+# restarting iiod alone does not reconnect this v0.37 firmware.
 restart_iiod() {
   . /etc/device_config
   start-stop-daemon -S -b -q -m -p /var/run/iiod.pid -x /usr/sbin/iiod -- -D -n \"\$ENDPOINTS\" -F /dev/iio_ffs
 }
+touch /tmp/pl_swap_pending
+# Independent of this script: recover even if a driver operation or USB restart
+# gets stuck. Only a returning host that has read PL_SWAP_DONE cancels this.
+(sleep 90; if [ -f /tmp/pl_swap_pending ]; then sync; reboot -f; fi) &
 trap 'echo PL_SWAP_FAILED; sync; reboot' EXIT
+echo '' > /sys/kernel/config/usb_gadget/composite_gadget/UDC
 killall iiod 2>/dev/null || true
 sleep 1
 killall -TERM pluto-fpga-source chanctl 2>/dev/null || true
@@ -119,6 +125,8 @@ if [ \"\$state\" != operating ]; then echo 'programming failed: rebooting to sto
 $BIND
 touch /tmp/pl_is_chan
 restart_iiod
+sleep 1
+echo ci_hdrc.0 > /sys/kernel/config/usb_gadget/composite_gadget/UDC
 trap - EXIT
 echo PL_SWAP_DONE
 EOS
@@ -131,6 +139,7 @@ setsid sh /tmp/pl_swap.sh > /tmp/pl_swap.log 2>&1 < /dev/null &"
     done
     echo "$out" | tee -a "$STATE/session.log"
     case "$out" in *PL_SWAP_DONE*) ;; *) log "PL swap did not complete; run '$0 restore' after the device is back"; exit 1;; esac
+    p 'rm -f /tmp/pl_swap_pending'
     apply_settings "$STATE/settings-before.txt"
     if [ -n "$tool" ]; then p /tmp/chanctl info | tee -a "$STATE/session.log"; fi
     ;;

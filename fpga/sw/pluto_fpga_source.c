@@ -216,7 +216,7 @@ static int send_config(const char *request, int ok, const char *error, int runni
     int u = snprintf(json, sizeof json,
         "{\"input_center_hz\":%lld,\"input_rate_hz\":%lld,\"input_bandwidth_hz\":%lld,"
         "\"filter_delay_input_samples_times_two\":4095,\"first_output_center_input_sample_times_two\":4095,"
-        "\"hardware_counter\":true,\"continuity_verified\":true,\"activity_calibrated\":true,"
+        "\"hardware_counter\":true,\"continuity_verified\":false,\"activity_calibrated\":false,"
         "\"activity_method\":\"fpga-welch-minstat-cfar\",\"receiver_state\":\"%s\",\"producer\":\"fpga-pfb\","
         "\"input_adc_bits\":12,\"input_adc_shift\":0,"
         "\"profile\":{\"max_input_rate_hz\":%lld,\"bins\":%d,\"taps\":8,\"hop\":%d,\"pre_roll_ms\":0,\"hang_ms\":100,\"max_iq_packet_ms\":10},"
