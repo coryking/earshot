@@ -166,9 +166,12 @@ with a `SHA256SUMS` file:
 | `system_top.bit.bin` | for `/sys/class/fpga_manager` (bootgen `-process_bitstream bin`) |
 | `pluto.frm` | ADI's public v0.37 image (the unit's version) with this bitstream and a no-map 64 MiB DMA carve-out at 0x04000000; kernel and ramdisk byte-identical (`sw/make_frm.py`) |
 | `chanctl` | static ARMv7 tool: `info`, `start`, `stop`, `psd`, `level`, `active`, `set-det`, `det-reset`, `snap`, `dma` |
+| `pluto-fpga-source` | static ARMv7 RIQ1 producer (`sw/pluto_fpga_source.c`), needs the flashed image's carve-out. It serves TCP 9010 like the ARM producer: CONFIG with 512 streams (stream = bin + 1, 100 ksps, `hardware_counter: true`), IQ for selected/pinned bins, PSD and activity from the FPGA, and `get_config`/`pin`/`stop` controls, with RX controls restored on stop. Start: `/tmp/pluto-fpga-source --center 460000000 --gain 40 --forward-streams 1` |
 
-**Staged plan** (not executed: the session's permission policy blocks writes to
-the device, see the final report):
+**Staged plan.** Not executed: the session's permission classifier denied the
+runtime load as "Remote Shell Writes". Running it needs a permission rule, or
+someone with device-write permission. A read-only check at 04:15 Pluto time found
+the device on stock v0.37 with nothing from this work on it.
 1. `sw/pluto_runtime_load.sh load system_top.bit.bin chanctl`. This checks the
    hash, then runs the unbind → fpga_manager → state check → rebind sequence
    detached on the device. It reboots to stock if programming fails, and
