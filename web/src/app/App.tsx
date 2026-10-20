@@ -9,6 +9,7 @@ import { SheetHost } from "@/components/Sheets";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Toaster } from "@/components/ui/sonner";
 import { LiveSelection } from "@/components/Tuning";
+import { SpectrumNavigation } from "@/components/SpectrumNavigation";
 import { Waterfall } from "@/components/Waterfall";
 import { CatchUpScreen } from "@/screens/CatchUp";
 import { NowScreen, useHome } from "@/screens/Now";
@@ -33,6 +34,7 @@ function WideNow() {
       <ResizableHandle withHandle />
       <ResizablePanel defaultSize="62%" minSize="30%" className="min-h-0">
         <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3">
+          <SpectrumNavigation />
           <LiveSelection />
           <div className="shrink-0 space-y-1 text-xs text-muted-foreground">
             <p>Click or drag to hold a frequency. UHF tuning snaps to 6.25 kHz steps; hold Shift for an exact frequency.</p>

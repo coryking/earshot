@@ -224,7 +224,7 @@ static int send_config(const char *request, int ok, const char *error, int runni
         "\"activity_method\":\"fpga-welch-minstat-cfar\",\"receiver_state\":\"%s\",\"producer\":\"fpga-pfb\","
         "\"input_adc_bits\":12,\"input_adc_shift\":0,"
         "\"profile\":{\"max_input_rate_hz\":%lld,\"bins\":%d,\"taps\":8,\"hop\":%d,\"pre_roll_ms\":0,\"hang_ms\":100,\"max_iq_packet_ms\":10},"
-        "\"capabilities\":{\"controls_supported\":true,\"configure_supported\":false,\"pin_supported\":true,\"stop_supported\":true},"
+        "\"capabilities\":{\"controls_supported\":true,\"configure_supported\":true,\"pin_supported\":true,\"stop_supported\":true},"
         "\"psd\":{\"bins\":%d,\"center_hz\":%lld,\"span_hz\":%lld,\"unit\":\"dBFS\"},\"streams\":[",
         center_hz, rate_hz, bw_hz, running ? "running" : "stopped", rate_hz, BINS, HOP, BINS,
         center_hz - rate_hz / (2 * BINS), rate_hz);
@@ -322,6 +322,46 @@ static const jsmntok_t *field(const char *j, const jsmntok_t *t, int count, cons
 }
 // returns 1 on stop request (its request_id is left in stop_request)
 static char stop_request[80];
+static long long json_integer(const char *j, const jsmntok_t *t) {
+    if (!t || t->type != JSMN_PRIMITIVE) return -1;
+    char *end;
+    errno = 0;
+    long long value = strtoll(j + t->start, &end, 10);
+    return errno || end != j + t->end ? -1 : value;
+}
+
+// Stop and drain before changing LO so old samples cannot acquire a new label.
+// Rate and RF bandwidth stay fixed for this FPGA image.
+static int retune(const char *request, long long target) {
+    char value[64], readback[64];
+    long long previous = center_hz;
+    hw_stop();
+    snprintf(value, sizeof value, "%lld", target);
+    int ok = !attr_write("out_altvoltage0_RX_LO_frequency", value)
+        && !attr_read("out_altvoltage0_RX_LO_frequency", readback, sizeof readback)
+        && atoll(readback) == target;
+    if (!ok) {
+        snprintf(value, sizeof value, "%lld", previous);
+        if (attr_write("out_altvoltage0_RX_LO_frequency", value)
+            || attr_read("out_altvoltage0_RX_LO_frequency", readback, sizeof readback)
+            || atoll(readback) != previous) return -1;
+    }
+    center_hz = ok ? target : previous;
+    usleep(20000); // LO settling; acquisition remains stopped.
+    memset(sb, 0, sizeof sb);
+    memset(seq, 0, sizeof seq);
+    memset(mask, 0, sizeof mask);
+    have_header = 0;
+    submitted = completed = 0;
+    generation++;
+    write_mask();
+    dma[0x100] = 0; dma[0x100] = 1; dma[0x103] = 0;
+    submit_next(); submit_next();
+    chan[4] = 0x15; // RUN, SEL_EN, detector reset
+    if (send_config(request, ok, ok ? NULL : "RX LO change failed; previous frequency restored", 1)) return -1;
+    return 2;
+}
+
 static int handle_control(void) {
     unsigned char h[64];
     ssize_t n = recv(client, h, 64, MSG_DONTWAIT | MSG_PEEK);
@@ -346,6 +386,16 @@ static int handle_control(void) {
     if (!act) return send_config(request, 0, "missing action", 1);
     if (json_eq(j, act, "get_config")) return send_config(request, 1, NULL, 1);
     if (json_eq(j, act, "stop")) { strcpy(stop_request, request); return 1; }
+    if (json_eq(j, act, "configure")) {
+        long long center = json_integer(j, field(j, t, count, "input_center_hz"));
+        long long rate = json_integer(j, field(j, t, count, "input_rate_hz"));
+        long long bandwidth = json_integer(j, field(j, t, count, "input_bandwidth_hz"));
+        if (center < 70000000 || center > 6000000000LL)
+            return send_config(request, 0, "center must be between 70 and 6000 MHz", 1);
+        if (rate != rate_hz || bandwidth != bw_hz)
+            return send_config(request, 0, "FPGA rate and bandwidth are fixed; change center only", 1);
+        return retune(request, center);
+    }
     if (json_eq(j, act, "pin")) {
         const jsmntok_t *st = field(j, t, count, "stream_id"), *pin = field(j, t, count, "pinned");
         if (!st || !pin) return send_config(request, 0, "pin requires stream_id and pinned", 1);
@@ -449,6 +499,11 @@ int main(int argc, char **argv) {
         }
         int r = handle_control();
         if (r < 0) break;                 // client gone
+        if (r == 2) {
+            last_frame_progress = last_dma_progress = now();
+            previous_frame = chan[0x12];
+            last_psd = now();
+        }
         if (r == 1) {                     // stop: restore before acknowledging
             hw_stop();
             int ok = restore_controls() == 0;

@@ -21,6 +21,7 @@ import {
 import type { Call, Source } from "@/domain/model";
 import { busyLine } from "@/domain/summary";
 import { usePrefs } from "@/state/prefs";
+import { SpectrumNavigation } from "@/components/SpectrumNavigation";
 import { useActivity, useBlocks, useCalls, useCatalog, useHealth, useSources, useStatus } from "@/state/radio";
 
 /** The home view refreshes at most this often, whatever the engine sends. */
@@ -248,6 +249,7 @@ export function NowScreen({ showStrip }: { showStrip: boolean }) {
   return (
     <div>
       <AreaTitle busy={busy} reserve={hasBaseline} />
+      {showStrip && <div className="px-4 pb-3"><SpectrumNavigation /></div>}
       {showStrip && <div className="px-4 pb-3"><LiveSelection /></div>}
       {showStrip && (
         <div className="px-4 pb-3">
