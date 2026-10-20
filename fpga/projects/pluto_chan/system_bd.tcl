@@ -10,6 +10,35 @@
 source $::env(FPGA_DIR)/projects/pluto_rx/system_bd.tcl
 source $::env(FPGA_DIR)/scripts/ip_xfft.tcl
 
+# Resource trims on top of the RX-only design (fpga/docs/design.md section 12).
+# CHAN_OPTS (space separated) selects them; the default is the signed-off set.
+#   nodecim  remove rx_fir_decimator: the x8 FPGA decimator for IIO rates below
+#            the AD9363's own minimum; bypassed (active = 0) at every rate the
+#            channelizer or libad9361's FIR path uses
+#   nocorr   ADC_DCFILTER_DISABLE + ADC_IQCORRECTION_DISABLE: the driver programs
+#            both to bit-exact identity at probe (DC filter off with offset 0, IQ
+#            coefficients 1.0/0.0), so the stock data path is unchanged
+#   fir2x    PFB FIR multipliers double-pumped at 200 MHz (8 DSP48E1 instead of 16)
+set chan_opts [expr {[info exists ::env(CHAN_OPTS)] ? $::env(CHAN_OPTS) : "nodecim fir2x"}]
+puts "chan_opts: $chan_opts"
+
+if {"nodecim" in $chan_opts} {
+  rx_only_remove_cell rx_fir_decimator
+  rx_only_remove_cell decim_slice
+  # channel 0 feeds cpack directly, as in fmcomms2 (no decimator)
+  ad_connect axi_ad9361/adc_enable_i0 cpack/enable_0
+  ad_connect axi_ad9361/adc_enable_q0 cpack/enable_1
+  ad_connect axi_ad9361/adc_data_i0 cpack/fifo_wr_data_0
+  ad_connect axi_ad9361/adc_data_q0 cpack/fifo_wr_data_1
+  ad_connect axi_ad9361/adc_valid_i0 cpack/fifo_wr_en
+  # the filter helper's constraints target only the removed filters' sync_bits
+  remove_files -quiet -fileset constrs_1 [get_files -quiet *adi_fir_filter_constr.xdc]
+}
+if {"nocorr" in $chan_opts} {
+  ad_ip_parameter axi_ad9361 CONFIG.ADC_DCFILTER_DISABLE 1
+  ad_ip_parameter axi_ad9361 CONFIG.ADC_IQCORRECTION_DISABLE 1
+}
+
 # module reference sources must be in the project before the cell is created
 add_files -norecurse [glob ./chan_*.v] $ad_hdl_dir/library/common/up_axi.v
 add_files -norecurse [glob ./*.mem]

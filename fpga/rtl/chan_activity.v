@@ -10,6 +10,10 @@
 //    estimated floor, so Pfa does not depend on absolute gain). Open when
 //    L > N + on_q8; stay open while L > N + off_q8, then for `hang` more blocks.
 //  * Long PSD: linear sum over 2^PSD_LOG2 frames, reported as Q8 log2.
+//  * Events: every open and close is reported once (evt_*), stamped with the frame
+//    number of the block's last frame, so the ARM can fetch pre-roll for exactly
+//    that frame from the history ring. Bins within one block come in FFT output
+//    order. A detector reset (rst) clears the bitmap without close events.
 //
 // State is in block RAM, read-modify-written once per bin per frame (the window
 // keeps V = 4 sub-window minima in one 64-bit word). A bin recurs every 512 words,
@@ -25,7 +29,8 @@ module chan_activity #(
   parameter LOG_TABLE = "chan_log2_table.mem"
 ) (
   input  wire         clk,
-  input  wire         rst,
+  input  wire         rst,                // datapath or detector reset
+  input  wire         frame_rst,          // datapath reset only: frame numbering
 
   input  wire         pw_valid,
   input  wire [8:0]   pw_k,
@@ -46,7 +51,11 @@ module chan_activity #(
   input  wire [8:0]   psd_raddr,
   output reg  [15:0]  psd_rdata = 16'd0,  // latency 1
   output reg  [31:0]  block_count = 32'd0,
-  output reg  [31:0]  psd_count = 32'd0
+  output reg  [31:0]  psd_count = 32'd0,
+  output reg          evt_valid = 1'b0,
+  output reg          evt_open = 1'b0,
+  output reg  [8:0]   evt_bin = 9'd0,
+  output reg  [31:0]  evt_frame = 32'd0
 );
 
   localparam [15:0] EMPTY = 16'hFFFF;
@@ -107,6 +116,21 @@ module chan_activity #(
       if (clr_addr == 9'd511) clearing <= 1'b0;
     end
   end
+
+  // Frame numbers (as in the packetizer's headers: frames since RUN). The counter
+  // runs at stage 0 and is not touched by a detector reset; each word carries the
+  // counter's LSB, so stage 5 can tell whether its frame is the counter's current
+  // one or the previous one (a frame is 512 words, the pipeline 8 stages deep).
+  reg [31:0] fcount = 32'd0;
+  always @(posedge clk) begin
+    if (frame_rst) fcount <= 32'd0;
+    else if (pw_valid & pw_last) fcount <= fcount + 32'd1;
+  end
+  reg t1, t2, t3, t3b, t4, t4b, t5;
+  always @(posedge clk) begin
+    t1 <= fcount[0]; t2 <= t1; t3 <= t2; t3b <= t3; t4 <= t3b; t4b <= t4; t5 <= t4b;
+  end
+  wire [31:0] frame5 = (fcount[0] == t5) ? fcount : fcount - 32'd1;
 
   // stage 1: side information aligned with the ACC read
   reg        v1 = 1'b0, blk1, sub1, psd1, last1;
@@ -226,6 +250,14 @@ module chan_activity #(
     if (blk5) s_w <= {hang_n, act_n, (sub5 ? EMPTY : smin5),
                       (sub5 ? {mins5[47:0], smin5} : mins5)};
     else      s_w <= {hang5, act5, sminold5, mins5};
+  end
+
+  // open/close events (stage 6)
+  always @(posedge clk) begin
+    evt_valid <= ~rst & v5 & blk5 & (act_n != act5);
+    evt_open  <= act_n;
+    evt_bin   <= k5;
+    evt_frame <= frame5;
   end
 
   // activity bitmap: written per bin at block end (cleared during the RAM sweep)

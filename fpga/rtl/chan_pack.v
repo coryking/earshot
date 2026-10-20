@@ -4,7 +4,8 @@
 // axi_dmac instances (DMA_TYPE_SRC = 1). Little-endian word formats:
 //
 //   header    [63:60]=0xA [59:56]=type (1 hist, 2 sel) [55:48]=flags [47:0]=frame
-//   hist data [15:0]=I(2p) [31:16]=Q(2p) [47:32]=I(2p+1) [63:48]=Q(2p+1), p=0..255
+//   hist data [15:0]=I(b(2p)) [31:16]=Q(b(2p)) [47:32]=I(b(2p+1)) [63:48]=Q(b(2p+1)),
+//             p = 0..pairs-1, b(i) = (hist_first + i) mod 512 (the history window)
 //   sel data  [63:60]=0x5 [56:48]=bin [47:32]=frame[15:0] [31:16]=Q [15:0]=I
 //   flags: bit0 frames of this stream were dropped before this one
 //          bit1 this frame's 4096-sample window may span lost ADC samples (CDC FIFO
@@ -12,9 +13,15 @@
 //          bit2 a sample in this frame saturated the 16-bit output
 //
 // Admission is per frame: a frame enters a stream only if that stream's FIFO has
-// room for the whole record (257 / 513 words), so records are never truncated and
-// a stalled DMA costs whole, counted frames instead of backpressure upstream.
-// Bin order is natural FFT order k = 0..511 (k >= 256 are negative offsets).
+// room for the whole record (1 + pairs / 513 words), so records are never truncated
+// and a stalled DMA costs whole, counted frames instead of backpressure upstream.
+//
+// Both streams walk the frame buffer once, starting at bin hist_first and wrapping
+// (k >= 256 are negative offsets), so a window centred on DC is contiguous. The
+// history record carries the first 2 * pairs bins of that walk; the selected stream
+// carries every selected bin (each sample word names its bin). The window is
+// latched when the history stream is armed (HIST_EN 0 -> 1), so every record in one
+// ring has the same length.
 
 `timescale 1ns/1ps
 `default_nettype none
@@ -37,6 +44,8 @@ module chan_pack #(
   input  wire         fd_sat,
 
   input  wire         hist_en,
+  input  wire [8:0]   hist_first_in,  // history window start bin (latched at arm)
+  input  wire [8:0]   hist_pairs_in,  // 1..256 bin pairs per record (latched at arm)
   input  wire         sel_en,
   input  wire         auto_forward,
   output wire [8:0]   sel_query,      // bin whose selection bits are needed now
@@ -56,6 +65,11 @@ module chan_pack #(
   output reg  [31:0]  hist_frames = 32'd0,
   output reg  [31:0]  hist_drops = 32'd0,
   output reg  [47:0]  hist_first_frame = 48'd0,
+  output reg  [31:0]  hist_records = 32'd0,   // records admitted since the last arm
+  output reg  [47:0]  hist_last_frame = 48'd0,// frame of the newest admitted record
+  output reg  [31:0]  hist_done = 32'd0,      // records fully handed to the DMA since arm
+  output reg  [8:0]   hist_first = 9'd0,      // window in force (latched at arm)
+  output reg  [8:0]   hist_pairs = 9'd256,
   output reg  [31:0]  sel_frames = 32'd0,
   output reg  [31:0]  sel_drops = 32'd0,
   output reg  [31:0]  overruns = 32'd0,
@@ -96,7 +110,8 @@ module chan_pack #(
   reg         hist_armed = 1'b0;   // first frame after enable not yet recorded
 
   wire [CW-1:0] hist_count, sel_count;
-  wire hist_room = hist_count <= FIFO_DEPTH - 257;
+  wire [9:0] hist_len = {1'b0, hist_pairs} + 10'd1;      // record words
+  wire hist_room = hist_count <= FIFO_DEPTH - hist_len;
   wire sel_room  = sel_count  <= FIFO_DEPTH - 513;
 
   // FIFO write ports
@@ -105,7 +120,8 @@ module chan_pack #(
 
   // read pipeline: address at cycle c, data at c+1
   reg         rv = 1'b0;
-  reg  [8:0]  rb;
+  reg  [8:0]  rb;                 // bin (rotated by hist_first)
+  reg  [8:0]  ri;                 // position in the walk
   reg  [31:0] even_word;
 
   wire start = ~busy & ~rst & (pend | fd_valid);
@@ -128,6 +144,7 @@ module chan_pack #(
       hw_en <= 1'b0; sw_en <= 1'b0;
       hist_disc <= 1'b0; sel_disc <= 1'b0; ovf_frames <= 5'd0;
       ovf_seen <= adc_overflow_count; hist_armed <= 1'b1;
+      hist_records <= 32'd0;
       hist_frames <= 32'd0; hist_drops <= 32'd0; sel_frames <= 32'd0;
       sel_drops <= 32'd0; overruns <= 32'd0; hist_first_frame <= 48'd0;
       hist_go <= 1'b0; sel_go <= 1'b0;
@@ -143,6 +160,12 @@ module chan_pack #(
         ovf_frames <= ovf_frames - 5'd1;
       end
       if (!hist_en) hist_armed <= 1'b1;
+      // the window and ring position counters start over at every arm; the window
+      // only changes between records, while the history stream is disarmed
+      if (hist_armed & ~busy & ~start) begin
+        hist_first <= hist_first_in;
+        hist_pairs <= (hist_pairs_in == 9'd0 || hist_pairs_in > 9'd256) ? 9'd256 : hist_pairs_in;
+      end
 
       // queue a frame that arrives while busy; a third one is an overrun
       if (fd_valid & ~start & ~rst) begin
@@ -175,9 +198,13 @@ module chan_pack #(
           hw_data <= {4'hA, 4'h1, 5'd0, start_sat, ovf_flag, hist_disc, start_frame};
           hist_disc <= 1'b0;
           hist_frames <= hist_frames + 32'd1;
+          hist_last_frame <= start_frame;
           if (hist_armed) begin
             hist_first_frame <= start_frame;
             hist_armed <= 1'b0;
+            hist_records <= 32'd1;
+          end else begin
+            hist_records <= hist_records + 32'd1;
           end
         end else if (hist_en) begin
           hist_drops <= hist_drops + 32'd1;
@@ -199,10 +226,11 @@ module chan_pack #(
 
       // read pipeline
       rv <= busy & ~start & (b != 10'd512);
-      rb <= b[8:0];
+      rb <= b[8:0] + hist_first;
+      ri <= b[8:0];
       if (rv) begin
-        if (!rb[0]) even_word <= rd_data;
-        if (rb[0] & hist_go) begin
+        if (!ri[0]) even_word <= rd_data;
+        if (ri[0] & hist_go & ({1'b0, ri[8:1]} < hist_pairs)) begin
           hw_en <= 1'b1;
           hw_data <= {rd_data, even_word};
         end
@@ -214,7 +242,7 @@ module chan_pack #(
     end
   end
 
-  always @(*) rd_addr = busy ? {cur_bank, b[8:0]} : snap_addr;
+  always @(*) rd_addr = busy ? {cur_bank, b[8:0] + hist_first} : snap_addr;
   assign snap_data = rd_data;
   assign busy_o = busy | pend;
 
@@ -251,6 +279,25 @@ module chan_pack #(
     .dbiterr (), .overflow (), .prog_empty (), .prog_full (), .rd_data_count (),
     .rd_rst_busy (), .sbiterr (), .underflow (), .wr_ack (), .wr_rst_busy ()
   );
+
+  // Records handed to the DMA: count drained words against the record length. The
+  // count restarts while the stream waits to be armed with its FIFO drained, which is
+  // the re-arm condition of the ring protocol (design.md section 7), so the length
+  // in force cannot change while a record is draining.
+  reg [9:0] dwc = 10'd0;
+  always @(posedge clk) begin
+    if (fifo_rst | (hist_armed & hist_empty)) begin
+      dwc <= 10'd0;
+      hist_done <= 32'd0;
+    end else if (m_hist_valid & m_hist_ready) begin
+      if (dwc == hist_len - 10'd1) begin
+        dwc <= 10'd0;
+        hist_done <= hist_done + 32'd1;
+      end else begin
+        dwc <= dwc + 10'd1;
+      end
+    end
+  end
 
   assign hist_empty_o = hist_empty;
   assign sel_empty_o = sel_empty;

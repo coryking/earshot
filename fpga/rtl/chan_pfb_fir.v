@@ -10,8 +10,11 @@
 // banks, so one cycle reads all of them; the coefficient for bank b is the tap
 // t = (b - bank0) mod 8, selected by a rotation of the 8 coefficient ROM outputs.
 //
-// Throughput: one branch sum per clock (8 complex x real MACs = 16 DSP48E1), so a
-// frame takes 512 clocks of the 1000 available per hop at 25.6 Msps / 100 MHz.
+// Throughput: one branch sum per clock, so a frame takes 512 clocks of the 1000
+// available per hop at 25.6 Msps / 100 MHz. The 16 real multiplies per branch use
+// 16 DSP48E1 at clk (FIR2X = 0) or 8 DSP48E1 double-pumped at clk2x = 200 MHz
+// (FIR2X = 1). A 100 MHz-only schedule cannot go below 9: 512 x 16 multiplies in
+// 1000 clocks is 8.19 per clock.
 //
 // Write protection: sample n overwrites sample n-4096. It may only do so once the
 // engine has issued the read of that address for the oldest unfinished frame, and
@@ -27,9 +30,11 @@
 `default_nettype none
 
 module chan_pfb_fir #(
-  parameter COEF_FILE_PREFIX = "pfb_coef_p"   // pfb_coef_p0.mem .. p3.mem
+  parameter COEF_FILE_PREFIX = "pfb_coef_p",  // pfb_coef_p0.mem .. p3.mem
+  parameter FIR2X = 0              // 1: 8 DSP48E1 double-pumped on clk2x (see below)
 ) (
   input  wire        clk,
+  input  wire        clk2x,        // 2 x clk, same source and phase (MMCM); FIR2X only
   input  wire        rst,          // synchronous, control state only
 
   input  wire        s_valid,
@@ -200,42 +205,107 @@ module chan_pfb_fir #(
     last_p3 <= last_p1;
   end
 
-  // p4: multiply (MREG), p5: product register (PREG)
-  (* use_dsp = "yes" *) reg signed [29:0] pi_p4 [0:7];
-  (* use_dsp = "yes" *) reg signed [29:0] pq_p4 [0:7];
-  reg signed [29:0] pi_p5 [0:7];
-  reg signed [29:0] pq_p5 [0:7];
-  reg               last_p4, last_p5;
+  // p4..p6: the 16 multiplies per branch, reduced to four pair sums each for I and
+  // Q (si_p6/sq_p6). The integer sum is exact (no rounding before p9), so any
+  // multiplier schedule gives bit-identical branch sums.
+  wire signed [31:0] si_p6 [0:3];
+  wire signed [31:0] sq_p6 [0:3];
+  reg               last_p4, last_p5, last_p6;
   always @(posedge clk) begin
-    for (k = 0; k < 8; k = k + 1) begin
-      pi_p4[k] <= xi_p3[k] * c_p3[k];
-      pq_p4[k] <= xq_p3[k] * c_p3[k];
-      pi_p5[k] <= pi_p4[k];
-      pq_p5[k] <= pq_p4[k];
-    end
     last_p4 <= last_p3;
     last_p5 <= last_p4;
+    last_p6 <= last_p5;
   end
 
-  // p6..p8: adder tree
-  reg signed [31:0] si_p6 [0:3];
-  reg signed [31:0] sq_p6 [0:3];
+  generate
+  if (FIR2X == 0) begin : g_mul1x
+    // one DSP48E1 per multiply: p4 multiply (MREG), p5 product (PREG), p6 pair sum
+    (* use_dsp = "yes" *) reg signed [29:0] pi_p4 [0:7];
+    (* use_dsp = "yes" *) reg signed [29:0] pq_p4 [0:7];
+    reg signed [29:0] pi_p5 [0:7];
+    reg signed [29:0] pq_p5 [0:7];
+    reg signed [31:0] si6 [0:3];
+    reg signed [31:0] sq6 [0:3];
+    genvar g;
+    for (g = 0; g < 4; g = g + 1) begin : g_out
+      assign si_p6[g] = si6[g];
+      assign sq_p6[g] = sq6[g];
+    end
+    always @(posedge clk) begin
+      for (k = 0; k < 8; k = k + 1) begin
+        pi_p4[k] <= xi_p3[k] * c_p3[k];
+        pq_p4[k] <= xq_p3[k] * c_p3[k];
+        pi_p5[k] <= pi_p4[k];
+        pq_p5[k] <= pq_p4[k];
+      end
+      for (k = 0; k < 4; k = k + 1) begin
+        si6[k] <= pi_p5[2*k] + pi_p5[2*k+1];
+        sq6[k] <= pq_p5[2*k] + pq_p5[2*k+1];
+      end
+    end
+  end else begin : g_mul2x
+    // Double-pumped multiply-accumulate (one DSP48E1 per tap pair, 8 in all).
+    // clk2x comes from an MMCM fed by clk, so both are timed as synchronous (5 ns
+    // between a clk edge and the next clk2x edge). With clk edges at T, T+10:
+    //   T+5  (odd clk2x edge)  A/B <= tap 2m        (operands launched at T)
+    //   T+10 (even edge)       A/B <= tap 2m+1,  M <= x0*c0
+    //   T+15 (odd)             M <= x1*c1,       P <= M          (load)
+    //   T+20 (even)            P <= P + M        (= x0*c0 + x1*c1)
+    //   T+25 (odd)             res <= P
+    //   T+30 (clk)             si_p6 <= res      (same cycle as the 1x pipeline)
+    // `odd` marks the odd clk2x edges. It is derived every cycle from a clk-domain
+    // toggle, so it needs no reset and cannot lose alignment.
+    reg tog = 1'b0;
+    always @(posedge clk) tog <= ~tog;
+    reg tog2 = 1'b0;
+    (* max_fanout = 16 *) reg odd = 1'b0;
+    always @(posedge clk2x) begin
+      tog2 <= tog;
+      odd  <= ~(tog ^ tog2);   // tog ^ tog2 is 1 just before an odd edge
+    end
+
+    genvar g;
+    for (g = 0; g < 8; g = g + 1) begin : g_mac
+      // g = 0..3: I of taps 2g, 2g+1; g = 4..7: Q of the same taps
+      localparam integer P = g % 4;
+      wire signed [11:0] x0 = (g < 4) ? xi_p3[2*P]   : xq_p3[2*P];
+      wire signed [11:0] x1 = (g < 4) ? xi_p3[2*P+1] : xq_p3[2*P+1];
+      reg  signed [11:0] a_r = 12'sd0;
+      reg  signed [17:0] b_r = 18'sd0;
+      reg  signed [29:0] m_r = 30'sd0;
+      reg  signed [30:0] acc = 31'sd0;
+      reg  signed [30:0] res = 31'sd0;
+      always @(posedge clk2x) begin
+        a_r <= odd ? x0 : x1;
+        b_r <= odd ? c_p3[2*P] : c_p3[2*P+1];
+        m_r <= a_r * b_r;
+        acc <= (odd ? 31'sd0 : acc) + m_r;     // UG901 MACC with synchronous load
+        if (odd) res <= acc;
+      end
+      reg signed [31:0] s6 = 32'sd0;
+      always @(posedge clk) s6 <= res;
+      if (g < 4) begin : g_i
+        assign si_p6[P] = s6;
+      end else begin : g_q
+        assign sq_p6[P] = s6;
+      end
+    end
+  end
+  endgenerate
+
+  // p7..p8: adder tree
   reg signed [32:0] si_p7 [0:1];
   reg signed [32:0] sq_p7 [0:1];
   reg signed [33:0] si_p8, sq_p8;
-  reg               last_p6, last_p7, last_p8;
+  reg               last_p7, last_p8;
   always @(posedge clk) begin
-    for (k = 0; k < 4; k = k + 1) begin
-      si_p6[k] <= pi_p5[2*k] + pi_p5[2*k+1];
-      sq_p6[k] <= pq_p5[2*k] + pq_p5[2*k+1];
-    end
     for (k = 0; k < 2; k = k + 1) begin
       si_p7[k] <= si_p6[2*k] + si_p6[2*k+1];
       sq_p7[k] <= sq_p6[2*k] + sq_p6[2*k+1];
     end
     si_p8 <= si_p7[0] + si_p7[1];
     sq_p8 <= sq_p7[0] + sq_p7[1];
-    last_p6 <= last_p5; last_p7 <= last_p6; last_p8 <= last_p7;
+    last_p7 <= last_p6; last_p8 <= last_p7;
   end
 
   // p9: round half up, >> FIR_SHIFT, saturate to 16 bits (xfft input width)
