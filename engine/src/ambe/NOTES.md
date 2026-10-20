@@ -67,14 +67,114 @@ Known fields: 0x3ec / 0x474 / 0x4fc parameter blocks (0x44 halfwords each; halfw
 of a block holds a firmware pointer to a per-harmonic voicing array, meaningless in the port and
 ignored in state comparisons), 0x7be frame history flags, 0x7a4 field-width table.
 
-## Status
+## Routine map
 
-| Stage | Routines | Status |
-|---|---|---|
-| shared helpers | math.rs list above | ported; replay tests |
-| frame dequant | frame | in progress |
-| spectral dequant | spectral | in progress |
-| unvoiced + FFT | unvoiced, fft | in progress |
-| voiced | voiced | in progress |
-| synth leaves | synth | in progress |
-| glue + end to end | decode_wav, 0x08056224, 0x08055484, 0x08055d74 | not started |
+Every routine reachable from the entry point, and its Rust port (`module::function`). Not ported:
+0x08060e38 (encoder-only codebook search; reached only with the encode flag, never by the
+decoder) and the encode branches of 0x08061074 / 0x08061340.
+
+| Firmware | Rust |
+|---|---|
+| 0x08051248 | decoder::decode_wav |
+| 0x0805359c | math::fill |
+| 0x08054cbc | synth::post_filter |
+| 0x08055170 | frame::field_widths |
+| 0x08055484 | decoder::decode_params |
+| 0x08055628 | frame::raise_levels |
+| 0x080556bc | frame::tone_class |
+| 0x080556fc | frame::tone_harmonic |
+| 0x0805573c | frame::pitch_history |
+| 0x08055808 | frame::tone_block |
+| 0x08055b64 | math::read_bits |
+| 0x08055bac | math::write_bits |
+| 0x08055c74 | synth::voicing_array |
+| 0x08055cf4 | frame::copy_params |
+| 0x08055d74 | decoder::synthesize |
+| 0x08056224 | decoder::frame_control |
+| 0x0805641c | synth::move_peak |
+| 0x08056580 | math::div_half |
+| 0x08056640 | math::div_int |
+| 0x08056680 | math::float_add |
+| 0x08056700 | math::float_sub |
+| 0x08056800 | math::div_norm |
+| 0x08056900 | math::log2_poly |
+| 0x08056980 | math::log2_scaled |
+| 0x080569c0 | math::pow2_poly |
+| 0x08056a80 | math::pow2_scaled |
+| 0x08056ac0 | math::sqrt_norm |
+| 0x08056b40 | math::sqrt_scaled |
+| 0x08057880 | fft::headroom |
+| 0x080578c0 | fft::bit_reverse |
+| 0x08057940 | fft::first_stage |
+| 0x080579c0 | fft::stage |
+| 0x08057b40 | fft::complex_fft |
+| 0x08057c00 | fft::unpack_pairs |
+| 0x08057d00 | fft::rotate_pairs |
+| 0x08057d5c | fft::real_pass |
+| 0x08057e10 | fft::fft_forward |
+| 0x08057e34 | fft::fft_inverse |
+| 0x08057e80 | math::mean |
+| 0x08058058 | math::scale_shift, math::scale_shift_in_place |
+| 0x08058098 | math::mul_q15, math::mul_q15_in_place |
+| 0x080580b8 | math::energy |
+| 0x08058170 | math::shift, math::shift_in_place |
+| 0x080581dc | math::max_abs_norm |
+| 0x0805821c | math::normalize, math::normalize_in_place |
+| 0x08058284 | synth::write_output |
+| 0x08058334 | math::shift_diff |
+| 0x0805836c | math::shift_diff_sat |
+| 0x0805c368 | frame::dequant_step |
+| 0x0805c47c | frame::pair_levels |
+| 0x0805c778 | spectral::save_frame |
+| 0x0805c7e4 | frame::bump_frame_counter |
+| 0x0805c7f8 | spectral::dequant_magnitudes |
+| 0x0805cc40 | spectral::dequant_spectrum |
+| 0x0805cc98 | frame::bit_reorder |
+| 0x0805d0d4 | math::read |
+| 0x0805d0ec | frame::band_flags |
+| 0x0805d11c | spectral::smooth_magnitudes |
+| 0x0805d380 | spectral::resample_step |
+| 0x0805d3e8 | spectral::resample_mags |
+| 0x0805d480 | spectral::blend_frames |
+| 0x0805d618 | frame::tone_frame |
+| 0x0805d708 | frame::pitch_params |
+| 0x0805d754 | synth::amp_expand |
+| 0x0805d7d8 | synth::band_voicing |
+| 0x0805d85c | synth::level_update |
+| 0x0805d8a4 | unvoiced::unvoiced |
+| 0x0805df08 | voiced::osc_run |
+| 0x0805e010 | voiced::build_period |
+| 0x0805e19c | voiced::overlay_period |
+| 0x0805e354 | voiced::overlay_series |
+| 0x0805e584 | voiced::synth_voiced |
+| 0x0805ec20 | synth::amp_fir |
+| 0x0805ed14 | synth::enhance |
+| 0x08060f4c | frame::spread_pairs |
+| 0x08060f9c | math::harmonic_count |
+| 0x08060fe0 | frame::period_params |
+| 0x08061074 | spectral::vq_read |
+| 0x080612ac | spectral::inverse_dct |
+| 0x08061340 | spectral::gain_dequant |
+| 0x08061440 | frame::copy_params_head |
+
+## Status (2026-10-19)
+
+- Every ported routine replays its firmware recordings exactly (`cargo test --lib ambe` with
+  `.native-md380/vectors` present: 36-48 recorded calls per routine; the porting runs also
+  checked several hundred extra calls per routine).
+- End to end the decoder is bit-exact: all 7,202 frames of the seven corpora (DMR fixture,
+  four Harvard files, random and edge frames incl. flag bits) give the firmware's samples
+  exactly (`tests/ambe.rs`, hashes; first-difference report when `.native-md380/expected/*.raw`
+  from `ambe_oracle.py decode` is present).
+- Reached by no corpus, so ported from the assembly but not exercised: 0x0805641c is verified only
+  by direct-call fuzz recordings; 0x0805836c and 0x08057e80 have no recordings; FFT sizes other
+  than 256 and the `edge` FFT layout; a few saturation branches (see the doc comments).
+- Specialised constants: n = 80 samples per half call, rate index 0 (49-bit frames), encode
+  flag 0, the PREV/CUR/WIDTHS state offsets.
+
+## Gotchas found on the way
+
+- In the REA/Ghidra assembly listings `qsub rd, A, B` computes B - A (and `qdadd`/`qdsub`
+  likewise take the doubled operand first); Ghidra's C has it right.
+- Unicorn hooks: use a block hook (entry and return addresses start blocks); close the
+  recording file explicitly (the hook closure keeps it in a reference cycle).

@@ -1,9 +1,10 @@
 use crate::{
-    codec::Decoder,
+    codec::{Decoder, DecoderOptions, Vocoder},
     dsp::{ChannelDsp, ChannelSpec, SliceMeter, TargetBand},
     fm::AnalogGate,
     freq::{Calibration, Labels, label_fields, snap},
     store::Store,
+    voice::VoiceConfig,
     wire::{DISCONTINUITY, Frame, OVERFLOW, PREROLL, START},
 };
 use anyhow::{Context, Result};
@@ -37,8 +38,32 @@ pub struct AppConfig {
     /// Where calls, activity and the catalog persist; `None` keeps them in memory only.
     pub state_dir: Option<std::path::PathBuf>,
     pub call_memory_mb: usize,
+    /// Voice synthesizer and voice post-processing settings.
+    pub voice: VoiceSettings,
     /// The receiver supervisor's status file (see link.rs); `None` when there is no supervisor.
     pub receiver_status: Option<std::path::PathBuf>,
+}
+/// The voice synthesizer and post-processing profile handed to every decoder.
+#[derive(Clone, Debug)]
+pub struct VoiceSettings {
+    pub vocoder: Vocoder,
+    pub post: VoiceConfig,
+}
+impl Default for VoiceSettings {
+    fn default() -> Self {
+        Self {
+            vocoder: Vocoder::Neo,
+            post: VoiceConfig::default(),
+        }
+    }
+}
+impl VoiceSettings {
+    pub fn decoder_options(&self) -> DecoderOptions {
+        DecoderOptions {
+            vocoder: self.vocoder,
+            voice: self.post.clone(),
+        }
+    }
 }
 impl AppConfig {
     pub fn new(max_decoders: usize) -> Self {
@@ -48,6 +73,7 @@ impl AppConfig {
             labels: Labels::default(),
             state_dir: None,
             call_memory_mb: 64,
+            voice: VoiceSettings::default(),
             receiver_status: None,
         }
     }
@@ -61,6 +87,7 @@ pub struct App {
     /// ppm correction from the Pluto's readings to true frequencies.
     pub(crate) calibration: Calibration,
     pub(crate) labels: Arc<Labels>,
+    pub(crate) voice: Arc<VoiceSettings>,
     pub(crate) receiver_file: Option<Arc<std::path::PathBuf>>,
 }
 #[derive(Clone)]
@@ -112,6 +139,7 @@ impl App {
             labels,
             state_dir,
             call_memory_mb,
+            voice,
             receiver_status,
         } = config;
         let (audio, _) = broadcast::channel(16);
@@ -147,6 +175,7 @@ impl App {
             max_decoders,
             calibration: Calibration { ppm },
             labels: Arc::new(labels),
+            voice: Arc::new(voice),
             receiver_file: receiver_status.map(Arc::new),
         }
     }
@@ -338,6 +367,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
     let queued = Arc::new(AtomicUsize::new(0));
     let worker_queued = queued.clone();
     let (tx, rx) = mpsc::sync_channel::<Work>(4);
+    let decoder_options = app.voice.decoder_options();
     thread::spawn(move || {
         let mut decoders = Vec::new();
         let mut dsps: Vec<(ChannelSpec, ChannelDsp)> = Vec::new();
@@ -373,7 +403,7 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
             if gap || decoders.is_empty() {
                 decoders = modes
                     .iter()
-                    .filter_map(|&p| Decoder::new(p).ok().map(|d| (p, d)))
+                    .filter_map(|&p| Decoder::with_options(p, &decoder_options).ok().map(|d| (p, d)))
                     .collect();
                 let input_rate = cfg["sample_rate_num_hz"]
                     .as_f64()
@@ -549,16 +579,8 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                         entry["audio_seconds"].as_f64().unwrap_or(0.) + audio.len() as f64 / 8000.
                     );
                 } else if let Some(entry) = e.channels.get_mut(&id) {
-                    // Announce the end of speech too: browsers follow /api/events, and without
-                    // this a call looked live until the next snapshot or RF change.
-                    let ended = entry["speech_active"] == true;
                     entry["speech_active"] = json!(false);
                     entry["available"] = json!(true);
-                    if ended {
-                        let _ = app.events.send(
-                            json!({"type":"channel","generation":frame.generation,"channel":entry}),
-                        );
-                    }
                 }
                 if speech {
                     // Every speaking channel is recorded as a call, not only the one being heard.
