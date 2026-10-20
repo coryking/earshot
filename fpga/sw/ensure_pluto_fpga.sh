@@ -79,6 +79,7 @@ if [[ "$last_failure" =~ ^[0-9]+$ ]] && (( now - last_failure < 300 && now >= la
   echo "Recent FPGA load failed; waiting for five-minute cooldown" >&2
   exit 1
 fi
+echo "$now" > "$failure_file"  # also survives a killed preflight with no EXIT trap
 loading=1
 trap 'if (( loading )); then date +%s > "$failure_file"; fi' EXIT
 "$script_dir/pluto_runtime_load.sh" load "$bit" "$tool"

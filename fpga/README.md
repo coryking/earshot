@@ -194,8 +194,10 @@ window), with +23.3 ppm display correction and an initial forwarded bin near
 the live 454.54375 MHz DMR voice channel. To move the window, put
 `FPGA_CENTER=<radio-reading Hz>` in `~/.config/amateur-radio/fpga-window.env`
 and restart `amateur-radio-live`; use the browser to choose an individual
-frequency. The operator control and audio are served through the existing
-tailnet-only radio ingress. The original boot image and DFU recovery procedure
+frequency. On the tailnet, open
+`https://radio-host.example.ts.net:8449/`, select a channel and
+press Listen. The selection stays armed during silence; press Stop listening
+to leave it, then select another frequency. The original boot image and DFU recovery procedure
 are in `offload/RECOVERY.md`; do not flash an unchanged older channelizer image
 that failed to boot during historical bring-up.
 
