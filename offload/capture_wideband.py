@@ -66,8 +66,16 @@ RESTORED_KEYS = (
 
 
 def sigmf_meta(
-    *, rate: int, lo: int, datatype_bits: int, applied: dict, note: str, started: str,
-    stats: dict, kind: str, extra: dict
+    *,
+    rate: int,
+    lo: int,
+    datatype_bits: int,
+    applied: dict,
+    note: str,
+    started: str,
+    stats: dict,
+    kind: str,
+    extra: dict,
 ) -> dict:
     return {
         "global": {
@@ -83,9 +91,7 @@ def sigmf_meta(
             "radio:stats": stats,
             **extra,
         },
-        "captures": [
-            {"core:sample_start": 0, "core:frequency": lo, "core:datetime": started}
-        ],
+        "captures": [{"core:sample_start": 0, "core:frequency": lo, "core:datetime": started}],
         "annotations": [],
     }
 
@@ -153,14 +159,19 @@ def main() -> int:
             (args.out / f"{name}.sigmf-data").write_bytes(raw)
             st = stats_of(raw)
             meta = sigmf_meta(
-                rate=rate, lo=args.center, datatype_bits=bits, applied=ap_,
+                rate=rate,
+                lo=args.center,
+                datatype_bits=bits,
+                applied=ap_,
                 note=(
                     "Single libiio refill of one DMA block: contiguous within this file. "
                     "No hardware sample counter exists, and separate files are NOT contiguous "
                     "with each other. AGC was left in the device's gain mode, so gain may "
                     "vary; hardwaregain read after refill is in extra."
                 ),
-                started=started, stats=st, kind="single_buffer",
+                started=started,
+                stats=st,
+                kind="single_buffer",
                 extra={
                     "radio:hardwaregain_after": gain,
                     "radio:buffer_samples": args.buffer_samples,
@@ -170,7 +181,10 @@ def main() -> int:
             )
             (args.out / f"{name}.sigmf-meta").write_text(json.dumps(meta, indent=2))
             manifest["captures"].append(name)
-            print(f"buf{n:02d} {len(raw)} B refill {t2 - t1:.3f}s rms {st['rms']:.1f} peak {st['peak_abs']}", flush=True)
+            print(
+                f"buf{n:02d} {len(raw)} B refill {t2 - t1:.3f}s rms {st['rms']:.1f} peak {st['peak_abs']}",
+                flush=True,
+            )
         if args.stream_rate:
             set_rx(args.stream_rate)
             sp = applied()
@@ -197,13 +211,18 @@ def main() -> int:
             st = stats_of(bytes(raw_all))
             ratio = (got / srate) / wall
             meta = sigmf_meta(
-                rate=srate, lo=args.center, datatype_bits=bits, applied=sp,
+                rate=srate,
+                lo=args.center,
+                datatype_bits=bits,
+                applied=sp,
                 note=(
                     "Streamed refills of one buffer. Contiguity across refills is NOT proven: "
                     "stock DMA has no sample counter. throughput_ratio<~0.95 means the link "
                     "could not keep up and samples were probably dropped between refills."
                 ),
-                started=started, stats=st, kind="stream",
+                started=started,
+                stats=st,
+                kind="stream",
                 extra={
                     "radio:buffer_samples": args.stream_buffer_samples,
                     "radio:wall_s": wall,
@@ -216,7 +235,9 @@ def main() -> int:
             )
             (args.out / f"{name}.sigmf-meta").write_text(json.dumps(meta, indent=2))
             manifest["captures"].append(name)
-            print(f"stream {srate} sps {got} samples wall {wall:.2f}s ratio {ratio:.3f}", flush=True)
+            print(
+                f"stream {srate} sps {got} samples wall {wall:.2f}s ratio {ratio:.3f}", flush=True
+            )
     except BaseException as exc:  # noqa: BLE001 - restore first, then re-raise
         errors.append(exc)
     finally:
