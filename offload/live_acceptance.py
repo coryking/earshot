@@ -458,6 +458,38 @@ def summarize(obs: Observer, report: dict, stop_response: httpx.Response, final:
     }
 
 
+def household_api_summary(base: str) -> dict:
+    """What the household UI's endpoints returned after the run (calls, catalog, activity, RSP1)."""
+    out: dict = {}
+    try:
+        calls = httpx.get(f"{base}/api/calls?limit=50", timeout=5).json()
+        out["calls"] = {
+            "count": len(calls["calls"]),
+            "in_progress": calls["in_progress"],
+            "first": calls["calls"][0] if calls["calls"] else None,
+            "total_audio_s": sum(c["duration_s"] for c in calls["calls"]),
+        }
+        catalog = httpx.get(f"{base}/api/catalog", timeout=5).json()
+        out["catalog"] = [
+            {
+                k: s.get(k)
+                for k in ("id", "name", "frequency_hz", "mode", "traffic_kind", "channel_ids")
+            }
+            for s in catalog["sources"]
+        ]
+        activity = httpx.get(f"{base}/api/activity?window_s=3600&bucket_s=300", timeout=5).json()
+        out["activity"] = {
+            "talk_seconds": sum(activity["block"]),
+            "rf_seconds": sum(activity["rf_total"]),
+            "sources": {k: sum(v) for k, v in activity["sources"].items() if sum(v)},
+        }
+        rsp = httpx.get(f"{base}/api/spectrum.bin?after=0&limit=5", timeout=5)
+        out["rsp1"] = {"magic": rsp.content[:4].decode(errors="replace"), "bytes": len(rsp.content)}
+    except Exception as exc:  # noqa: BLE001 - reported, not fatal
+        out["error"] = repr(exc)
+    return out
+
+
 def acceptance_failures(report: dict) -> list[str]:
     """Pass criteria. Audio and RF activity are reported, not required: the air may be quiet."""
     out: list[str] = []
@@ -537,6 +569,8 @@ def run_session(args: argparse.Namespace, out: Path, report: dict, failures: lis
                 str(args.freq_correction_ppm),
                 "--labels",
                 str(args.labels),
+                "--state-dir",
+                str(out / "state"),
             ],
             stdout=engine_log,
             stderr=subprocess.STDOUT,
@@ -551,6 +585,7 @@ def run_session(args: argparse.Namespace, out: Path, report: dict, failures: lis
         report["stop_seconds"] = time.monotonic() - t_stop
         final = httpx.get(f"{base}/api/status", timeout=5).json()
         summarize(obs, report, stop_response, final)
+        report["household_api"] = household_api_summary(base)
         (out / "status_samples.json").write_text(json.dumps(obs.status_samples))
         if obs.audio_pcm:
             with wave.open(str(out / "audio.wav"), "wb") as w:

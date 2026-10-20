@@ -472,8 +472,12 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                             && c["logical_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
                     })
                     .cloned();
-                let speech = speech && physical.is_some();
-                if confirmed && !audio.is_empty() && physical.is_some() {
+                // A channel the data names as a trunking control channel carries signalling, not
+                // voice: a "voice" confirmation there is an artifact, never a call.
+                let control_channel = sibling.as_ref().is_some_and(|c| c["label_kind"] == "control")
+                    || app.labels.lookup(app.calibration.true_hz(frequency)).is_some_and(|l| l["kind"] == "control");
+                let speech = speech && physical.is_some() && !control_channel;
+                if confirmed && !audio.is_empty() && physical.is_some() && !control_channel {
                     if protocol != "FM" {
                         protocol_evidence = Some(protocol);
                     }
@@ -1902,6 +1906,17 @@ mod tests {
         assert_eq!(channel["frequency_hz"], 454_000_000.0, "keeps the nominal frequency");
         assert_eq!(channel["id"], "454000000-Unknown-1");
         assert_eq!(channel["frequency_snapped"], true, "the nominal bin center is itself on the raster");
+    }
+    #[test]
+    fn a_labeled_control_channel_never_becomes_a_voice_call() {
+        let dir = std::env::temp_dir().join(format!("control-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("labels.json");
+        std::fs::write(&path, r#"{"channels":{"454000000":{"name":"Test control","kind":"control"}}}"#).unwrap();
+        let app = App::configured(AppConfig { labels: Labels::load(&path).unwrap(), ..AppConfig::new(8) });
+        let (fm, _, _, calls) = fm_session_in(app, true, false, true);
+        assert!(fm.is_none() && calls.is_empty(), "control channels carry data, not calls");
+        let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]
     fn rf_active_metadata_only_streams_do_not_starve_forwarded_stream() {
