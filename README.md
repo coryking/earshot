@@ -89,11 +89,19 @@ uv run radio dmr output/fm-neighbor.wav --slot 2 --seconds 60 \
 ```
 
 Alternatively use `--offset-hz -100000`, where offset is target minus center;
-use `--offset-hz 0` for the capture center. The center is explicit rather than
-inferred from the filename. Existing outputs are never overwritten.
+use `--offset-hz 0` for the capture center. A WAV center must be explicit;
+SigMF uses its capture metadata. Existing outputs are never overwritten.
 
-`iq-fm` supports two-channel int16 IQ WAV above 192 kHz. It memory-maps the
-input and processes the first 10 seconds by default, capped at 60 seconds.
+`iq-fm` supports two-channel int16 IQ WAV above 192 kHz and `ci16_le` SigMF
+metadata/data pairs or tar archives, including the app's 100 kHz slices. SigMF
+provides the physical center for `--target-hz`; WAV requires `--center-hz` or
+an explicit offset. Archive filenames are labels and may differ from the
+physical center. Archives are read without extracting their contents.
+
+It processes the first 10 seconds by default, capped at 60 seconds; `--start-s`
+selects a later segment. WAV and standalone SigMF data are memory-mapped;
+archive reads are capped at 256 MiB. A range crossing a SigMF capture boundary
+or discontinuity is rejected. Select a shorter continuous segment instead.
 It mixes the target to zero, resamples to 50 kHz, applies a 161-tap low-pass
 FIR at 6250 Hz, takes the complex phase difference, removes mean DC, then
 resamples to 48 kHz. `--bandwidth-hz` changes twice the low-pass cutoff.
@@ -104,6 +112,44 @@ enlarge blocks for unusual sample rates. Only the smaller 50 kHz channel is
 retained for the selected duration.
 Output gain uses a nominal 5 kHz FM deviation; filter startup and resampling
 edges remain in the output.
+
+### Digital signalling and symbol recovery
+
+Use `digital-probe` to inspect demodulated mono 48 kHz WAV with the managed
+`dsd-fme` command. The search order is `--decoder`, `RADIO_DSD_FME`, then PATH.
+The pinned installer lives in the dotfiles repository as
+`run_onchange_install-dsd-fme.sh.tmpl`; it installs to `~/.local/bin/dsd-fme`
+and statically links mbelib. It needs no project build directory or library-path
+override. The Linux install and offline WAV input are verified; its Darwin
+installation path has not yet been validated.
+
+```sh
+uv run radio iq-fm recordings/capture.sigmf.tar --target-hz 454337500 \
+  --seconds 19 -o output/channel.wav --yes --json
+uv run radio digital-probe output/channel.wav --protocol nxdn48 \
+  --log-output output/channel.log --yes --json
+uv run radio iq-symbols recordings/capture.sigmf.tar --target-hz 454337500 \
+  --start-s 4.28 --seconds 0.44 --baud 2400 --json
+```
+
+`digital-probe` supports explicit `dmr`, `nxdn48`, `nxdn96`, `dpmr`, and
+`p25p1` selections. Its default `auto` excludes NXDN and dPMR. Analysis is
+capped at 120 seconds, with a 120-second decoder timeout. It uses a temporary
+working directory and emits no playback audio. JSON distinguishes raw sync
+reports, CRC failures, and selected CRC-gated NXDN message labels. Counts depend
+on the pinned decoder's log format. `decoder_output` can include false syncs;
+it is not proof of intelligible speech or an identified operator. Diagnostic
+previews are bounded; `--log-output` saves up to 4 MiB to a new file.
+
+`iq-symbols` tests a selected 4FSK baud hypothesis over 50 ms through 5 seconds,
+fits four frequency levels, and checks full NXDN frame sync, LICH parity, and
+eligible Type-D SCCH CRC7. It reports FEC correction cost and raw payloads.
+Clock search spans ±2% of `--baud`; fit residual alone is not protocol evidence.
+`--output-dir output/symbols --yes` saves a new directory containing JSON and
+NPZ symbol arrays with stored-capture timestamps. IQ inputs match `iq-fm`, and
+`-` accepts piped WAV or SigMF tar input.
+
+See [verified capture findings and the non-audio UX handoff](docs/iq-analysis.md).
 
 `dmr` requires 48 kHz demodulated audio and an optional DSDcc build with mbelib.
 It sends signed 16-bit PCM to `dsdccx -i - -o - -fr -T <slot> -q` and wraps

@@ -6,10 +6,10 @@ from pathlib import Path
 
 import numpy as np
 from pydantic import BaseModel
-from scipy.io import wavfile
 from scipy.signal import firwin, lfilter, resample_poly
 
 from .analysis import load_audio
+from .iq_recording import open_iq
 
 
 class FMResult(BaseModel):
@@ -19,6 +19,7 @@ class FMResult(BaseModel):
     offset_hz: float
     channel_bandwidth_hz: float
     analyzed_s: float
+    start_s: float = 0
     output_rate_hz: int = 48000
     output_samples: int
     notes: list[str]
@@ -45,24 +46,28 @@ def channelize_iq(raw, rate, count, offset_hz, chunk_size=1000000):
     return np.concatenate(chunks)
 
 
-def iq_fm(path: Path, seconds: float, offset_hz: float, bandwidth_hz: float = 12500):
+def iq_fm(
+    path: Path,
+    seconds: float,
+    offset_hz: float,
+    bandwidth_hz: float = 12500,
+    start_s: float = 0,
+):
     if not np.isfinite(seconds) or not 0.001 <= seconds <= 60:
         raise ValueError("IQ duration must be between 0.001 and 60 seconds.")
     if not np.isfinite(offset_hz):
         raise ValueError("Offset must be finite.")
     if not np.isfinite(bandwidth_hz) or not 1000 <= bandwidth_hz <= 40000:
         raise ValueError("Channel bandwidth must be between 1000 and 40000 Hz.")
-    rate, raw = wavfile.read(path, mmap=True)
-    if raw.ndim != 2 or raw.shape[1] != 2 or raw.dtype != np.dtype("int16") or rate <= 192000:
-        raise ValueError(
-            "Expected wideband IQ WAV: two int16 I/Q channels and rate above 192 kHz. Audio WAV is unsupported here."
-        )
+    with open_iq(path) as recording:
+        rate = recording.rate
+        raw = recording.read(start_s, seconds)
     # Keep the complete channel, including its filter transition, inside the capture.
     if abs(offset_hz) + bandwidth_hz / 2 + 2500 >= rate / 2:
         raise ValueError(
             "Target channel and 2500 Hz filter guard must fit inside the IQ capture's Nyquist bandwidth."
         )
-    count = min(len(raw), int(seconds * rate))
+    count = len(raw)
     if count < max(2, rate // 1000):
         raise ValueError("IQ WAV must contain at least 1 ms of samples.")
     y = channelize_iq(raw, rate, count, offset_hz)
