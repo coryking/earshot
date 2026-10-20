@@ -68,7 +68,10 @@ rx_fir_decimator (22 DSP) and tx_fir_interpolator (22 DSP).
 
 Synthesized OOC, the xfft v9.1 512-point pipelined streaming core (18-bit
 data and twiddles, unscaled, convergent rounding, natural order) is **2,969 LUT,
-5,554 FF, 4 BRAM36, 24 DSP**. The polyphase FIR at one output per 100 MHz clock
+5,554 FF, 4 BRAM36, 24 DSP**. The radix-4 burst I/O variant with the same settings is
+**2,277 LUT, 7 BRAM36, 18 DSP**. At 100 MHz there are 1,000 clocks per 256-sample hop,
+which leaves room for a burst transform; that still needs confirming against the
+PG109 transform-time formula. The polyphase FIR at one output per 100 MHz clock
 needs 16 DSP. Without trimming the stock design, the channelizer doesn't fit.
 Setting DAC_DDS_DISABLE and removing tx_fir_interpolator would free about 4,600 LUT
 and 30 DSP. That's not measured yet; it's the gate the design review asks for.
