@@ -18,7 +18,7 @@ const OperatorScreen = lazy(() => import("@/screens/Operator").then((m) => ({ de
 
 /** Desktop and landscape: list on the left; full waterfall over the call timeline on the right. */
 function WideNow() {
-  const { ranked } = useHome();
+  const { view } = useHome();
   const player = usePlayerInstance();
   const activeSourceId = usePlayerSelect((s) => (s.kind === "live" ? s.sourceId : null));
   return (
@@ -34,10 +34,10 @@ function WideNow() {
           <ResizablePanel defaultSize="50%" minSize="20%" className="p-3">
             <Waterfall
               variant="full"
-              sources={ranked}
+              sources={view.marked}
+              talking={view.talking}
               activeSourceId={activeSourceId}
               onListen={(s) => void player.listen(s)}
-              onAbout={(s) => openSheet({ type: "source", id: s.id })}
               onUnnamed={(frequencyHz) => openSheet({ type: "unnamed", frequencyHz })}
             />
           </ResizablePanel>

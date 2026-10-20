@@ -37,6 +37,8 @@ pub struct AppConfig {
     /// Where calls, activity and the catalog persist; `None` keeps them in memory only.
     pub state_dir: Option<std::path::PathBuf>,
     pub call_memory_mb: usize,
+    /// The receiver supervisor's status file (see link.rs); `None` when there is no supervisor.
+    pub receiver_status: Option<std::path::PathBuf>,
 }
 impl AppConfig {
     pub fn new(max_decoders: usize) -> Self {
@@ -46,6 +48,7 @@ impl AppConfig {
             labels: Labels::default(),
             state_dir: None,
             call_memory_mb: 64,
+            receiver_status: None,
         }
     }
 }
@@ -58,6 +61,7 @@ pub struct App {
     /// ppm correction from the Pluto's readings to true frequencies.
     pub(crate) calibration: Calibration,
     pub(crate) labels: Arc<Labels>,
+    pub(crate) receiver_file: Option<Arc<std::path::PathBuf>>,
 }
 #[derive(Clone)]
 pub(crate) struct Audio {
@@ -95,6 +99,7 @@ pub(crate) struct Engine {
     pub(crate) frames: u64,
     pub(crate) drops: u64,
     pub(crate) active: bool,
+    pub(crate) link: crate::link::Link,
 }
 impl App {
     pub fn new(max_decoders: usize) -> Self {
@@ -107,6 +112,7 @@ impl App {
             labels,
             state_dir,
             call_memory_mb,
+            receiver_status,
         } = config;
         let (audio, _) = broadcast::channel(16);
         let (events, _) = broadcast::channel(256);
@@ -134,12 +140,14 @@ impl App {
                 frames: 0,
                 drops: 0,
                 active: false,
+                link: crate::link::Link::fixture(),
             })),
             audio,
             events,
             max_decoders,
             calibration: Calibration { ppm },
             labels: Arc::new(labels),
+            receiver_file: receiver_status.map(Arc::new),
         }
     }
     /// The engine state. A panic in another thread must not turn the whole engine into a
@@ -541,8 +549,16 @@ fn worker(app: App, logical: u64, cfg: Value) -> Result<Worker> {
                         entry["audio_seconds"].as_f64().unwrap_or(0.) + audio.len() as f64 / 8000.
                     );
                 } else if let Some(entry) = e.channels.get_mut(&id) {
+                    // Announce the end of speech too: browsers follow /api/events, and without
+                    // this a call looked live until the next snapshot or RF change.
+                    let ended = entry["speech_active"] == true;
                     entry["speech_active"] = json!(false);
                     entry["available"] = json!(true);
+                    if ended {
+                        let _ = app.events.send(
+                            json!({"type":"channel","generation":frame.generation,"channel":entry}),
+                        );
+                    }
                 }
                 if speech {
                     // Every speaking channel is recorded as a call, not only the one being heard.

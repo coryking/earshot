@@ -32,7 +32,7 @@ from radio_tools.pluto import PlutoReceiver
 
 sys.path.insert(0, str(Path(__file__).parent))
 from pluto_readback import iio_attr, mismatches, restore_receiver, snapshot
-from radio_lock import radio_lock, raise_on_termination
+from radio_lock import ensure_borrowed, radio_lock, raise_on_termination
 
 LO_HZ = 454_216_998
 
@@ -94,6 +94,7 @@ def main() -> int:
     ap.add_argument("--stream-buffer-samples", type=int, default=262_144)
     ap.add_argument("--lock-timeout", type=float, default=3600)
     args = ap.parse_args()
+    ensure_borrowed()  # the always-on receiver steps aside, and resumes afterwards
     raise_on_termination()
     with radio_lock(args.lock_timeout):
         return session(args)

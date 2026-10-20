@@ -32,12 +32,12 @@ import { useSheet } from "@/app/ui";
 import { useSources } from "@/state/radio";
 
 export const shortcuts: [string, string][] = [
-  ["⌘K, Ctrl+K or /", "Search channels and actions"],
-  ["j / k or ↓ / ↑", "Move through the channel list"],
-  ["Enter or Space", "Listen to the focused channel (again to stop)"],
-  ["Esc", "Stop listening, or close what's open"],
+  ["⌘K, Ctrl+K or /", "Search"],
+  ["j / k or ↓ / ↑", "Move"],
+  ["Enter or Space", "Listen / stop"],
+  ["Esc", "Stop or close"],
   ["m", "Mute or unmute"],
-  ["f", "Follow or unfollow the focused channel"],
+  ["f", "Follow"],
   ["1 2 3", "Now, Catch up, Radio"],
   ["?", "Show these shortcuts"],
 ];

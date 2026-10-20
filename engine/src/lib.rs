@@ -4,6 +4,7 @@ pub mod codec;
 pub mod dsp;
 pub mod fm;
 pub mod freq;
+pub mod link;
 pub mod runtime;
 pub mod store;
 pub mod wire;
