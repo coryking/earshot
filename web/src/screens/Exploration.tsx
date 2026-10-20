@@ -33,12 +33,12 @@ export function Exploration() {
   }}>
     <div className="relative flex shrink-0 items-center gap-2 px-3 py-1">
       <h1 className="min-w-0 flex-1 truncate text-sm font-medium text-heading">
-        {canSwitch ? <button className="min-h-10" onClick={() => openSheet({ type: "block" })} aria-label={`Listening area: ${current?.name}. Change area`}>{current?.name} ▾</button> : <button className="min-h-10" aria-label={`${current?.name ?? "Spectrum"}. Receiver band`} aria-expanded={band} onClick={() => setBand(!band)}>{current?.name ?? "Spectrum"} ▾</button>}
+        {canSwitch ? <button className="min-h-10" onClick={() => openSheet({ type: "block" })} aria-label={`Listening area: ${current?.name}. Change area`}>{current?.name} ▾</button> : <button className="min-h-10" aria-label={`${current?.name ?? "Spectrum"}. Receiver band`} aria-expanded={band} onClick={() => { setBand(!band); setBrowse(false); setInspect(false); }}>{current?.name ?? "Spectrum"} ▾</button>}
       </h1>
-      <Button variant={browse ? "secondary" : "ghost"} size="sm" aria-expanded={browse} onClick={() => setBrowse(!browse)}><List className="size-4" />Channels</Button>
-      <Button variant={inspect ? "secondary" : "ghost"} size="sm" disabled={state.frequencyHz === null} aria-expanded={inspect} onClick={() => setInspect(!inspect)}><Info className="size-4" />Signal</Button>
+      <Button variant={browse ? "secondary" : "ghost"} size="sm" aria-expanded={browse} onClick={() => { setBrowse(!browse); setInspect(false); setBand(false); }}><List className="size-4" />Channels</Button>
+      <Button variant={inspect ? "secondary" : "ghost"} size="sm" disabled={state.frequencyHz === null} aria-expanded={inspect} onClick={() => { setInspect(!inspect); setBrowse(false); setBand(false); }}><Info className="size-4" />Signal</Button>
+    {band && <div className="absolute top-full left-3 z-20 max-w-[calc(100%-1.5rem)] rounded-lg border border-border bg-card p-2 shadow-xl"><SpectrumNavigation /></div>}
     </div>
-    {band && <div className="absolute top-28 left-3 z-20 max-w-[calc(100%-1.5rem)] rounded-lg border border-border bg-card p-2 shadow-xl"><SpectrumNavigation /></div>}
     <LiveSelection />
     <div className="relative flex min-h-0 flex-1">
       <Waterfall variant="full" sources={sources} talking={new Map()} activeSourceId={active ? state.sourceId : null}
