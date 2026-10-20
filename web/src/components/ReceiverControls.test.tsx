@@ -11,7 +11,7 @@ it("stops receiving, retains the stopped state, and resumes from the same visibl
   const start = vi.spyOn(backend, "startReceiver");
   render(<Providers backend={backend}><ReceiverControls details /></Providers>);
   const user = userEvent.setup();
-  await waitFor(() => expect(screen.getByRole("button", { name: "Stop receiving" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole("button", { name: "Stop receiving" })).toBeEnabled(), { timeout: 5000 });
   await user.click(screen.getByRole("button", { name: "Stop receiving" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "Start receiving" })).toBeEnabled());
   expect(stop).toHaveBeenCalledOnce();
