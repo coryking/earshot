@@ -268,10 +268,23 @@ PYTHONPATH=. uv run python -m fpga.model.validate all        # model results (pr
 uv run pytest -q fpga/model/test_model.py                    # model unit tests
 PYTHONPATH=. uv run python -m fpga.model.golden mems fpga/rtl/mem
 fpga/scripts/run_sim.sh                                      # bit-exact regression (all scenarios)
-fpga/scripts/build_project.sh pluto_chan                     # bitstream + reports/ (~35 min)
+fpga/scripts/build_project.sh pluto_chan                     # clean bitstream + reports build (default)
+fpga/scripts/build_project.sh --incremental pluto_chan       # reuse a compatible routed reference
 fpga/sw/build.sh                                             # chanctl
 python3 fpga/sw/make_frm.py <plutosdr-fw-v0.37/pluto.frm> <system_top.bit> <out/pluto.frm>
 ```
+
+`--clean` removes generated runs and any saved reference checkpoint. The opt-in
+`--incremental` mode keeps a routed `reference.dcp` outside the generated run
+directories and lets ADI's project flow use it for incremental placement and
+routing. Vivado, ADI HDL, or target/run setup changes invalidate that reference.
+RTL, block-design, and IP edits can use it as a physical reference; Vivado may
+decline reuse when the design changed too much. The checkpoint is refreshed
+only after a successful route with worst setup slack of at least -0.250 ns. If
+no compatible reference exists, that build runs without implementation reuse
+and can establish one for a later build. Both modes still recreate the project
+and run OOC synthesis; this path targets implementation, which took about 12
+minutes in the last recorded full build. Its speed-up has not been measured.
 
 The xfft bit-accurate C model ships with Vivado. The Python CLIs set its
 `LD_LIBRARY_PATH` themselves.
