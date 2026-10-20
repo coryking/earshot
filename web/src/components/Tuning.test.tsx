@@ -17,12 +17,12 @@ it("tunes an entered frequency, explains silence and reports a receive-window er
   const user = userEvent.setup();
   let input = screen.getByRole("textbox", { name: "Frequency (MHz)" });
   await user.type(input, "452.675");
-  await user.click(screen.getByRole("button", { name: "Listen" }));
+  await user.click(screen.getByRole("button", { name: "Tune" }));
   await waitFor(() => expect(monitor).toHaveBeenCalledWith(channel.id));
   expect(backend.tune).toHaveBeenCalledWith(452675000, undefined, true);
-  expect(screen.getByRole("status")).toHaveTextContent("waiting for receiver samples");
-  expect(screen.getByText("452.675 MHz")).toBeVisible();
-  expect(screen.getByText("FM signal audio · unsquelched. Sound plays as soon as receiver samples arrive, including noise and digital signals.")).toBeVisible();
+  expect(screen.getByRole("status")).toHaveTextContent("Waiting");
+  expect(screen.getByText("Waiting")).toBeVisible();
+  expect(screen.getByRole("combobox", { name: "Audio mode" })).toHaveValue("fm");
   await user.click(screen.getByRole("button", { name: "Mute speaker" }));
   expect(screen.getByRole("status")).toHaveTextContent(/muted/i);
   expect(screen.getByRole("button", { name: "Unmute speaker" })).toHaveAttribute("aria-pressed", "true");
@@ -31,11 +31,11 @@ it("tunes an entered frequency, explains silence and reports a receive-window er
   expect(input).toHaveValue("452.67500");
   await user.clear(input);
   await user.type(input, "471");
-  await user.click(screen.getByRole("button", { name: "Listen" }));
+  await user.click(screen.getByRole("button", { name: "Tune" }));
   await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Frequency is outside the receive window"));
-  expect(screen.getByText("471.000 MHz")).toBeVisible();
+  expect(screen.getByRole("textbox", { name: "Frequency (MHz)" })).toHaveValue("471.00000");
   await user.click(screen.getByRole("button", { name: "Stop listening" }));
-  expect(screen.getByText(/Audio will not start automatically/)).toBeVisible();
+  expect(screen.getByRole("status")).toHaveTextContent("Audio off");
 });
 
 it("does not offer an empty IQ snapshot or invent the sample range before samples arrive", async () => {
@@ -45,8 +45,8 @@ it("does not offer an empty IQ snapshot or invent the sample range before sample
     downloadIq: vi.fn(async () => new Blob()),
   });
   render(<Providers backend={backend}><IqCapture channelId="waiting" frequencyHz={452675000} /></Providers>);
-  expect(await screen.findByText("0.0 s buffered / 30 s maximum")).toBeVisible();
-  expect(screen.getByRole("button", { name: "Download IQ snapshot" })).toBeDisabled();
+  expect(await screen.findByText("0.0 / 30 s")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Save IQ" })).toBeDisabled();
   expect(screen.queryByText(/Sampled range/)).not.toBeInTheDocument();
   expect(backend.downloadIq).not.toHaveBeenCalled();
 });
@@ -70,26 +70,27 @@ it("offers original IQ separately from FM audio and preserves a stopped frequenc
   try {
     render(<Providers backend={backend}><LiveSelection /></Providers>);
     const user = userEvent.setup();
-    expect(screen.getByRole("status")).toHaveTextContent("Listening off");
+    expect(screen.getByRole("status")).toHaveTextContent("Audio off");
     await user.type(screen.getByRole("textbox", { name: "Frequency (MHz)" }), "452.675");
-    await user.click(screen.getByRole("button", { name: "Listen" }));
-    const save = await screen.findByRole("button", { name: "Download IQ snapshot" });
+    await user.click(screen.getByRole("button", { name: "Tune" }));
+    render(<Providers backend={backend}><IqCapture channelId={channel.id} frequencyHz={452675000} /></Providers>);
+    const save = await screen.findByRole("button", { name: "Save IQ" });
     await waitFor(() => expect(save).toBeEnabled());
-    expect(screen.getByText(/Sampled range 452.61700–452.71700 MHz · 100.0 kHz wide/)).toBeVisible();
-    expect(screen.getByText("1.0 s buffered / 30 s maximum")).toBeVisible();
+    expect(screen.getByText(/452.61700–452.71700 MHz/)).toBeVisible();
+    expect(screen.getByText("1.0 / 30 s")).toBeVisible();
     await user.click(save);
     await waitFor(() => expect(backend.downloadIq).toHaveBeenCalledWith(channel.id));
     expect(click).toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Stop listening" }));
-    expect(screen.getByRole("status")).toHaveTextContent("Listening off");
+    expect(screen.getByRole("status")).toHaveTextContent("Audio off");
     expect(screen.getByRole("textbox", { name: "Frequency (MHz)" })).toHaveValue("452.67500");
     expect(screen.getByRole("button", { name: "Resume listening" })).toBeVisible();
     // Stop is local; this mocked server reports another listener still collecting
     // the same slice. The UI must not falsely call its IQ buffer stopped.
-    expect(screen.getByText("Rolling · receiving samples")).toBeVisible();
+    expect(screen.getByText("Rolling")).toBeVisible();
     backend.iqCaptureStatus.mockResolvedValue({ samples: 100000, seconds: 1, sample_rate_hz: 100000,
       center_hz: 452666998, stream_id: 7, max_seconds: 30, last_received_at: Date.now()/1000, collecting: false });
-    await waitFor(() => expect(screen.getByText("Buffer paused · no new samples arriving")).toBeVisible(), { timeout: 2500 });
+    await waitFor(() => expect(screen.getByText("Paused")).toBeVisible(), { timeout: 2500 });
     expect(save).toBeEnabled();
   } finally {
     click.mockRestore();

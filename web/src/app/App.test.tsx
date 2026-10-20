@@ -15,76 +15,36 @@ function setup(backend = new MockBackend({ manual: true })) {
   return { backend, monitor, user: userEvent.setup() };
 }
 
-// The home view samples the engine once a second. Poll with plain timers: under
-// waitFor the first full render of the list stalls for many seconds in jsdom.
 const wait = { timeout: 12_000 };
-async function rowsReady() {
-  for (let i = 0; i < 80; i++) {
-    if (document.querySelectorAll("[data-source-list] [data-source-row]").length > 3) return;
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  throw new Error("the channel list never filled");
-}
 
-describe("Now", { timeout: 40_000 }, () => {
-
-  it("titles the page with the listening area and pins who's talking", async () => {
+describe("Explore", () => {
+  it("opens with the spectrum and one tuning strip, with channels folded away", async () => {
     setup();
-    await rowsReady();
-    expect(screen.getByRole("heading", { level: 1, name: /Downtown business radio/ })).toBeInTheDocument();
-    const talking = screen.getByRole("list", { name: "Recent activity" });
-    expect(within(talking).getAllByRole("listitem")).toHaveLength(2);
-    expect(screen.getByText(/than usual$|^About normal$/)).toBeInTheDocument();
-    expect(screen.queryByText(/Still learning|Quiet right now/)).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 1, name: /Downtown business radio/ })).toBeVisible();
+    expect(screen.getByRole("region", { name: "Live tuning" })).toBeVisible();
+    expect(document.querySelector('[data-waterfall="full"]')).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Channels" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("list", { name: "Recent activity" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Only the held channel/)).not.toBeInTheDocument();
   });
 
-  it("keeps noise out of the channel list and tells same-named rows apart", async () => {
-    const { user } = setup();
-    await rowsReady();
-    const list = screen.getByRole("list", { name: "Channels" });
-    expect(within(list).getByText("Downtown ambassadors")).toBeInTheDocument();
-    expect(within(list).queryByText(/Unidentified|451\.806/)).not.toBeInTheDocument();
-    expect(within(list).getAllByText("Shared business network")).toHaveLength(2);
-    expect(within(list).getAllByText(/MHz · DMR · Slot 1/).length).toBeGreaterThan(0);
-    expect(within(list).getAllByText(/MHz · DMR · Slot 2/).length).toBeGreaterThan(0);
-    const other = screen.getByRole("button", { name: /^Other activity \(\d+\)$/ });
-    expect(other).toHaveAttribute("aria-expanded", "false");
-    await user.click(other);
-    expect(within(screen.getByRole("list", { name: "Other activity" })).getByText(/451\.806/)).toBeInTheDocument();
-  });
-
-  it("listens with one tap and stops with the player's stop button", async () => {
-    const { monitor, user } = setup();
-    await rowsReady();
-    const [row] = screen.getAllByRole("button", { name: /^Tune to Downtown ambassadors/ });
+  it("searches a frequency list and tunes with one tap, then closes the list", async () => {
+    const { user, monitor } = setup();
+    await user.click(screen.getByRole("button", { name: "Channels" }));
+    await user.type(screen.getByRole("textbox", { name: "Search channels" }), "Downtown ambassadors");
+    const row = await screen.findByRole("button", { name: /^Tune to Downtown ambassadors/ }, wait);
     await user.click(row);
-    expect(monitor).toHaveBeenCalledWith("452685504-DMR-1");
-    const player = await screen.findByRole("region", { name: "Player" });
-    expect(player).toHaveTextContent("Downtown ambassadors");
-    await user.click(within(player).getByRole("button", { name: "Stop listening" }));
-    await waitFor(() => expect(monitor).toHaveBeenLastCalledWith(null));
+    await waitFor(() => expect(monitor).toHaveBeenCalledWith("452685504-DMR-1"));
+    expect(screen.queryByRole("textbox", { name: "Search channels" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Mute speaker" })).toHaveLength(1);
     expect(screen.queryByRole("region", { name: "Player" })).not.toBeInTheDocument();
-  });
-
-  it("never opens the info sheet from a row tap; About is its own button", async () => {
-    const { user } = setup();
-    await rowsReady();
-    const [row] = screen.getAllByRole("button", { name: /^Tune to Private business radio/ });
-    await user.click(row);
-    // Can't be heard: the player says so in a few words; no sheet.
-    expect(await screen.findByRole("region", { name: "Player" })).toHaveTextContent("Encrypted");
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    await user.click(screen.getAllByRole("button", { name: "About Private business radio" })[0]);
-    expect(await screen.findByRole("dialog")).toHaveTextContent("Encrypted");
-  });
-
-  it("follows a source from its sheet", async () => {
-    const { user } = setup();
-    await rowsReady();
-    await user.click(screen.getAllByRole("button", { name: "About Convention Center radio" })[0]);
-    await user.click(await screen.findByRole("button", { name: "Follow" }));
-    expect(await screen.findByRole("button", { name: "Following" })).toHaveAttribute("aria-pressed", "true");
-    expect(JSON.parse(localStorage.getItem("radio.prefs.v1")!).followed).toEqual(["starter-convention"]);
+    await user.click(screen.getByRole("button", { name: "Signal" }));
+    expect(screen.getByRole("complementary", { name: "Signal details" })).toBeVisible();
+    expect(screen.getByText("Frame decoded")).toBeVisible();
+    expect(screen.getByText("Speech")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Stop listening" }));
+    await waitFor(() => expect(monitor).toHaveBeenLastCalledWith(null));
+    expect(screen.getByRole("textbox", { name: "Frequency (MHz)" })).toHaveValue("452.68550");
   });
 });
 

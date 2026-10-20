@@ -20,52 +20,13 @@ interface Props {
   onListen?(source: Source): void;
   /** Full view only: tapped a trace with no source nearby. */
   onUnnamed?(frequencyHz: number): void;
+  captureRange?: { centerHz: number; spanHz: number } | null;
   className?: string;
 }
 
 const HIT_PX = 22;
 
-/**
- * Greedy lane assignment so marker labels don't overlap. Talking and active
- * sources claim lanes first; labels that don't fit in `maxLanes` are dropped
- * (the marker tick stays). Returns pixel centres clamped inside the view.
- */
-function stackLabels<T extends { source: Source; x: number; live: boolean }>(
-  markers: T[],
-  width: number,
-  maxLanes: number,
-  activeId: string | null,
-) {
-  const lanes: [number, number][][] = [];
-  const rank = (m: T) => (m.live ? 2 : 0) + (m.source.id === activeId ? 1 : 0);
-  const ordered = [...markers].sort((a, b) => rank(b) - rank(a) || a.x - b.x);
-  return ordered.flatMap((m) => {
-    const half = 192 / 2;
-    const center = Math.min(width - half - 4, Math.max(half + 4, m.x * width));
-    const span: [number, number] = [center - half - 3, center + half + 3];
-    let lane = lanes.findIndex((spans) => spans.every(([a, b]) => span[1] < a || span[0] > b));
-    if (lane < 0) {
-      if (lanes.length >= maxLanes) return [];
-      lane = lanes.push([]) - 1;
-    }
-    lanes[lane].push(span);
-    return [{ ...m, lane, center }];
-  });
-}
-
-/**
- * Live spectrum history rendered in the browser.
- *
- * Phone strip: a picture, not a control. Its channels are a few pixels apart,
- * and most bright lines on this receiver are data, control channels or noise
- * that can't be listened to, so "tap a bright line" sent people to things they
- * couldn't hear. The strip instead labels the traces of whoever is talking and
- * whatever is playing, tying it to the list, which is the way in.
- *
- * Full view (desktop, landscape): history, a frequency readout, labelled
- * markers, and click-to-listen on a marked trace, where a pointer is precise.
- */
-export function Waterfall({ variant, sources, talking, activeSourceId, tunedFrequencyHz, onListen, onUnnamed, className }: Props) {
+export function Waterfall({ variant, sources, talking, activeSourceId, tunedFrequencyHz, onListen, onUnnamed, captureRange, className }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const drag = useRef<{ pointerId: number; lastTune: number; frequency: number | null } | null>(null);
   const box = useRef<HTMLDivElement>(null);
@@ -152,7 +113,7 @@ export function Waterfall({ variant, sources, talking, activeSourceId, tunedFreq
     return low + Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) * meta.spanHz;
   };
 
-  const interactive = variant === "full" && !!onListen;
+  const interactive = variant === "full" && (!!onListen || !!onUnnamed);
   const targetAt = (clientX: number, clientY: number, exact: boolean) => {
     const rect = box.current?.getBoundingClientRect();
     const frequency = frequencyAt(clientX);
@@ -251,7 +212,7 @@ export function Waterfall({ variant, sources, talking, activeSourceId, tunedFreq
         <p className="absolute right-2 bottom-1 rounded bg-[#0f1a2b]/80 px-1.5 text-[11px] text-[#93a1b8]">Paused</p>
       )}
       {width > 0 &&
-        markers.map(({ source, x, live }) => (
+        markers.filter(({ source }) => source.id === activeSourceId).map(({ source, x, live }) => (
           <span
             key={source.id}
             aria-hidden
@@ -265,31 +226,11 @@ export function Waterfall({ variant, sources, talking, activeSourceId, tunedFreq
             style={{ left: `${x * 100}%` }}
           />
         ))}
-      {width > 0 &&
-        stackLabels(
-          variant === "strip"
-            ? markers
-            : markers.filter((m) => m.live || m.source.id === activeSourceId || m.source.named),
-          width,
-          variant === "strip" ? 1 : height < 260 ? 2 : 4,
-          activeSourceId,
-        ).map(({ source, lane, center, live }) => (
-          <span
-            key={`label-${source.id}`}
-            aria-hidden
-            className={cn(
-              "pointer-events-none absolute w-48 -translate-x-1/2 truncate rounded px-1 text-[11px] leading-4 [&_.text-muted-foreground]:text-inherit",
-              source.id === activeSourceId
-                ? "bg-[#5eb8c9] text-[#0f1a2b]"
-                : live
-                  ? "bg-[#f5a524] text-[#0f1a2b]"
-                  : "bg-[#0f1a2b]/80 text-[#c9d4e5]",
-            )}
-            style={{ left: center, top: (variant === "strip" ? 4 : 12) + lane * 34 }}
-          >
-            <ChannelIdentity {...source} name={source.id === activeSourceId ? `Held · ${source.name}` : source.name} compact />
-          </span>
-        ))}
+      {captureRange && low !== null && meta.spanHz && (
+        <span aria-label="IQ capture range" className="pointer-events-none absolute inset-y-0 border-x border-[#5eb8c9]/90 bg-[#5eb8c9]/15"
+          style={{ left: `${Math.max(0, (captureRange.centerHz - captureRange.spanHz / 2 - low) / meta.spanHz) * 100}%`,
+            width: `${Math.max(0, Math.min(low + meta.spanHz, captureRange.centerHz + captureRange.spanHz / 2) - Math.max(low, captureRange.centerHz - captureRange.spanHz / 2)) / meta.spanHz * 100}%` }} />
+      )}
       {variant === "full" && tunedFrequencyHz != null && low !== null && meta.spanHz && tunedFrequencyHz >= low && tunedFrequencyHz <= low + meta.spanHz && (
         <span aria-hidden className="pointer-events-none absolute inset-y-0 w-0.5 bg-[#5eb8c9]" style={{ left: `${(tunedFrequencyHz - low) / meta.spanHz * 100}%` }} />
       )}

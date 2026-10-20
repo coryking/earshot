@@ -6,58 +6,19 @@ import { useRoute, useWide } from "@/app/ui";
 import { Header, TabBar } from "@/components/Chrome";
 import { PlayerBar } from "@/components/PlayerBar";
 import { SheetHost } from "@/components/Sheets";
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Toaster } from "@/components/ui/sonner";
-import { LiveSelection } from "@/components/Tuning";
-import { Waterfall } from "@/components/Waterfall";
 import { CatchUpScreen } from "@/screens/CatchUp";
-import { NowScreen, useHome } from "@/screens/Now";
+import { Exploration } from "@/screens/Exploration";
 import { RadioTab } from "@/screens/RadioTab";
 import { useBlocks } from "@/state/radio";
 
 const OperatorScreen = lazy(() => import("@/screens/Operator").then((m) => ({ default: m.OperatorScreen })));
 
-/** Live channel selection and spectrum; recordings belong to Catch up. */
-function WideNow() {
-  const { view } = useHome();
-  const player = usePlayerInstance();
-  const tunedFrequencyHz = usePlayerSelect((s) => s.kind === "live" && s.phase !== "taken" && s.phase !== "error" ? s.frequencyHz : null);
-  const activeSourceId = usePlayerSelect((s) => (s.kind === "live" && s.phase !== "taken" && s.phase !== "error" ? s.sourceId : null));
-  return (
-    <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
-      <ResizablePanel defaultSize="38%" minSize="26%" className="min-h-0">
-        <div className="h-full overflow-y-auto">
-          <NowScreen showStrip={false} />
-        </div>
-      </ResizablePanel>
-      <ResizableHandle withHandle />
-      <ResizablePanel defaultSize="62%" minSize="30%" className="min-h-0">
-        <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3">
-          <LiveSelection />
-          <div className="shrink-0 space-y-1 text-xs text-muted-foreground">
-            <p>Click or drag to hold a frequency. UHF tuning snaps to 6.25 kHz steps; hold Shift for an exact frequency.</p>
-            <p><span className="text-lamp">Amber: recent activity</span> · <span className="text-signal">Blue: held channel</span>. Only the held channel feeds the speaker.</p>
-          </div>
-          <Waterfall
-            variant="full"
-            sources={view.all}
-            talking={view.talking}
-            activeSourceId={activeSourceId}
-            tunedFrequencyHz={tunedFrequencyHz}
-            onListen={(s) => void player.listen(s, { raw: !s.heardVoice || s.control || s.encryption === "encrypted" })}
-            onUnnamed={(frequencyHz) => void player.listenFrequency(frequencyHz)}
-            className="flex-1"
-          />
-        </div>
-      </ResizablePanel>
-    </ResizablePanelGroup>
-  );
-}
-
 export function App() {
   const route = useRoute();
-  const { wide, desktop } = useWide();
+  const { desktop } = useWide();
   const player = usePlayerInstance();
+  const recorded = usePlayerSelect((s) => s.kind === "call");
   const { current } = useBlocks();
   useAlerts();
   useShortcuts();
@@ -76,7 +37,7 @@ export function App() {
       case "radio":
         return <RadioTab />;
       default:
-        return wide ? <WideNow /> : <NowScreen showStrip />;
+        return <Exploration />;
     }
   })();
 
@@ -91,15 +52,15 @@ export function App() {
       <Header wide={desktop} />
       <main
         id="main"
-        className={wide && route === "now" ? "flex min-h-0 flex-1" : "min-h-0 flex-1 overflow-y-auto"}
+        className={route === "now" ? "flex min-h-0 flex-1" : "min-h-0 flex-1 overflow-y-auto"}
       >
-        {wide && route === "now" ? (
+        {route === "now" ? (
           main
         ) : (
           <div className={route === "operator" ? "" : "mx-auto w-full max-w-2xl"}>{main}</div>
         )}
       </main>
-      <PlayerBar />
+      {(route !== "now" || recorded) && <PlayerBar />}
       {!desktop && <TabBar />}
       <SheetHost />
       <Palette />

@@ -65,7 +65,7 @@ export function Header({ wide }: { wide: boolean }) {
 }
 
 const tabs: { route: Route; label: string; icon: typeof Radio }[] = [
-  { route: "now", label: "Now", icon: Radio },
+  { route: "now", label: "Explore", icon: Radio },
   { route: "catch-up", label: "Catch up", icon: Clock3 },
   { route: "radio", label: "Radio", icon: SlidersHorizontal },
 ];
