@@ -328,3 +328,40 @@ seconds; ids are strings.
 Dev feeder: `web/dev/fixture_feed.py` sends the DMR fixture plus PSD rows
 measured from the 6 Msps recording it was cut from, so the waterfall shows
 real recorded RF. It is a development tool, not a data path.
+
+### FPGA slice tuning and replay
+
+`POST /api/tune {"frequency_hz":454018750}` adds an operator target and returns a
+channel entry. Frequencies here are calibrated true Hz. The engine converts once
+back into the producer's reading frame, picks the nearest advertised slice that
+contains the whole channel, and uses the existing fine mixer and listener pins.
+Select the returned id with `/api/monitor` (the browser's **Operator tools → Listen
+at MHz** does both). Stop listening with the player stop button; **Stop receiver**
+also asks the producer to stop RX. Up to 64 operator frequencies are retained for
+the engine session; catalog entries and operator edits retain their existing
+persistence behavior. A source generation change remaps these targets to its new
+slices. Targets outside the RF filter bandwidth are refused even when the PSD
+covers a wider span.
+
+Both spectrum endpoints use the producer's `psd.center_hz` and `psd.span_hz`, with
+legacy input-center/bandwidth fallback. Center and span share the channel-marker
+ppm correction; the receiver's RF bandwidth remains a separate status field.
+No host FFT supplies the displayed waterfall.
+
+For offline development, prepare signed16 interleaved I/Q at 100 ksps, mixed to
+the chosen FPGA bin center (for center 454216998, stream 509 is 454016998 Hz).
+Keep recordings private. Run an isolated engine and replay driver:
+
+```sh
+cargo build --release --locked --example fpga_ingress
+./target/release/radio-engine serve --port 18810 --ingest-port 18811 \
+  --freq-correction-ppm 23.3 --web-dir ../web/dist
+./target/release/examples/fpga_ingress /private/slice100k.ci16 \
+  --ingest 127.0.0.1:18811 --center 454216998 --stream 509 --loops 0
+```
+
+The driver advertises 512 streams without `targets`, emits continuous sample
+counters and two seconds of silence between repetitions, and acknowledges
+pin/get-config/stop. Only the recorded stream has IQ. `--psd FILE` can replay
+producer-captured 512-float spectrum rows; without it no spectrum is emitted.
+The driver is development evidence, not live receiver acceptance.

@@ -100,6 +100,9 @@ pub(crate) struct Engine {
     pub(crate) store: Store,
     pub(crate) source: Value,
     pub(crate) channels: HashMap<String, Value>,
+    /// Operator-selected frequencies in the radio's reading frame. Re-map them to
+    /// physical slices after each CONFIG; producer metadata remains unchanged.
+    pub(crate) host_targets: HashSet<u64>,
     worker_epochs: HashMap<u64, u64>,
     pub(crate) selected_at: Instant,
     /// Browser sockets listening to a specific channel (`/api/listen?channel_id=`), by
@@ -149,6 +152,7 @@ impl App {
                 store: Store::new(state_dir, call_memory_mb),
                 source: json!({}),
                 channels: HashMap::new(),
+                host_targets: HashSet::new(),
                 worker_epochs: HashMap::new(),
                 selected: None,
                 selected_at: Instant::now(),
@@ -294,7 +298,7 @@ fn refresh_rf(c: &mut Value) {
 }
 /// Catalog source id of a channel: its id's nominal frequency plus the slot.
 use crate::api::source_id;
-fn make_channel(app: &App, stream: u32, reading: f64, protocol: &str, slot: u8) -> Value {
+pub(crate) fn make_channel(app: &App, stream: u32, reading: f64, protocol: &str, slot: u8) -> Value {
     let (frequency, snapped) = app.display_frequency(reading);
     let mut channel = make_channel_json(stream, reading, frequency, snapped, protocol, slot);
     if let (Some(fields), Some(extra)) = (
@@ -321,6 +325,72 @@ fn fits_slice(cfg: &Value, frequency: f64) -> bool {
         (Some(rate), Some(center)) => (frequency - center).abs() + band / 2. <= rate / 2.,
         _ => true,
     }
+}
+
+/// Map a requested reading to the nearest advertised slice that contains the entire
+/// channel. The RF filter width bounds reception; the wider PSD span does not.
+pub(crate) fn target_slice(source: &Value, reading: f64) -> Option<Value> {
+    let center = source["input_center_hz"].as_f64()?;
+    let bandwidth = source["input_bandwidth_hz"].as_f64()?;
+    if source["receiver_state"] == "stopped"
+        || (reading - center).abs() + ChannelSpec::CHANNEL_12_5.band_hz / 2. > bandwidth / 2.
+    {
+        return None;
+    }
+    source["streams"].as_array()?.iter()
+        .filter(|s| fits_slice(s, reading))
+        .filter_map(|s| Some(((s["center_hz"].as_f64()? - reading).abs(), s)))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, s)| {
+            let mut cfg = s.clone();
+            cfg.as_object_mut().unwrap().remove("targets");
+            cfg["target_hz"] = json!(reading);
+            cfg["protocol"] = json!("Unknown");
+            cfg
+        })
+}
+
+/// Add host tuning requests to the normal logical-target pipeline. Called on CONFIG
+/// and the scheduler tick, so pin acknowledgements cannot erase fine tuning.
+fn merge_host_targets(app: &App, configs: &mut HashMap<u64, Value>) -> bool {
+    let mut changed = false;
+    let mut e = app.engine();
+    let targets: Vec<_> = e.host_targets.iter().copied().collect();
+    for logical in targets {
+        let Some(cfg) = target_slice(&e.source, logical as f64) else { continue };
+        let stream = cfg["stream_id"].as_u64().unwrap() as u32;
+        let id = channel_id(app.display_frequency(logical as f64).0, "Unknown", 1);
+        let c = e.channels.entry(id).or_insert_with(|| make_channel(app, stream, logical as f64, "Unknown", 1));
+        c["stream_id"] = json!(stream);
+        c["logical_hz"] = json!(logical);
+        c["reading_hz"] = json!(logical);
+        c["in_range"] = json!(true);
+        // A bin center and a nearby operator target can snap to the same channel
+        // identity. Keep one worker for that identity, at the requested frequency.
+        let display = app.display_frequency(logical as f64).0;
+        for c in e.channels.values_mut() {
+            if c["logical_hz"].as_f64().is_some_and(|r| app.display_frequency(r).0 == display) {
+                c["stream_id"] = json!(stream);
+                c["logical_hz"] = json!(logical);
+                c["reading_hz"] = json!(logical);
+                c["in_range"] = json!(true);
+            }
+        }
+        configs.retain(|key, _| *key == logical || app.display_frequency(*key as f64).0 != display);
+        changed |= configs.get(&logical) != Some(&cfg);
+        configs.insert(logical, cfg);
+    }
+    let mut counts = HashMap::<u32, usize>::new();
+    for cfg in configs.values() {
+        *counts.entry(cfg["stream_id"].as_u64().unwrap_or(0) as u32).or_default() += 1;
+    }
+    for c in e.channels.values_mut() {
+        if let Some(count) = counts.get(&(c["stream_id"].as_u64().unwrap_or(0) as u32)) {
+            c["slice_targets"] = json!(count);
+            refresh_rf(c);
+        }
+    }
+    changed
 }
 /// RIQ1 interleaved signed16 I/Q payload to complex samples.
 fn iq_from_payload(payload: &[u8]) -> Vec<Complex32> {
@@ -710,22 +780,25 @@ fn schedule(
     let e = app.engine();
     let wanted = wanted_logicals(&e);
     let pin_pending = e.listen_changed_at.elapsed() < PIN_GRACE;
-    let mut effective = configs.clone();
-    for (&stream, cfg) in &mut effective {
-        if cfg["protocol"].as_str().unwrap_or("Unknown") == "Unknown"
-            && let Some(protocol) = e
-                .channels
-                .values()
-                .find(|c| {
-                    c["logical_hz"].as_f64().map(|v| v.round() as u64) == Some(stream)
-                        && c["in_range"] == true
-                        && c["decoded"] == true
-                        && c["persisted"] != true
-                        && matches!(c["protocol"].as_str(), Some("DMR" | "NXDN48"))
-                })
-                .and_then(|c| c["protocol"].as_str())
+    // Producer-shaped CONFIG has 512 slices. Index channel evidence once rather
+    // than scanning the whole catalog for every slice while holding the worker lock.
+    let mut known = HashMap::new();
+    let mut active = HashSet::new();
+    for c in e.channels.values() {
+        let Some(logical) = c["logical_hz"].as_f64().map(|v| v.round() as u64) else { continue };
+        if c["rf_active"] == true { active.insert(logical); }
+        if c["in_range"] == true && c["decoded"] == true && c["persisted"] != true
+            && matches!(c["protocol"].as_str(), Some("DMR" | "NXDN48"))
         {
-            cfg["protocol"] = json!(protocol);
+            known.insert(logical, c["protocol"].clone());
+        }
+    }
+    let mut effective = configs.clone();
+    for (&logical, cfg) in &mut effective {
+        if cfg["protocol"].as_str().unwrap_or("Unknown") == "Unknown"
+            && let Some(protocol) = known.get(&logical)
+        {
+            cfg["protocol"] = protocol.clone();
         }
     }
     let candidates: Vec<Candidate> = effective
@@ -749,10 +822,7 @@ fn schedule(
                 selected: wanted.contains(&logical),
                 pin_pending,
                 forwarded: declared || received,
-                rf_active: e.channels.values().any(|c| {
-                    c["logical_hz"].as_f64().map(|v| v.round() as u64) == Some(logical)
-                        && c["rf_active"] == true
-                }),
+                rf_active: active.contains(&logical),
                 cost: workers
                     .get(&logical)
                     .map(|w| w.cost.load(Ordering::Relaxed))
@@ -1057,6 +1127,7 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
             let _ = app.events.send(
                 json!({"type":"source_config","generation":frame.generation,"source":config}),
             );
+            merge_host_targets(&app, &mut configs);
             schedule(&app, &configs, &mut workers, &iq_seen)?;
             sync_pins(&mut app.engine());
             rebuild_meters(&configs, &mut meters);
@@ -1088,6 +1159,9 @@ pub fn ingest(mut input: impl Read, app: App) -> Result<()> {
             }
         }
         if scheduled.elapsed() > Duration::from_millis(100) {
+            if merge_host_targets(&app, &mut configs) {
+                rebuild_meters(&configs, &mut meters);
+            }
             schedule(&app, &configs, &mut workers, &iq_seen)?;
             scheduled = Instant::now();
         }
@@ -2245,5 +2319,46 @@ mod tests {
         assert_eq!(e.channels.len(), 2);
         assert_eq!(e.channels["454029200-Unknown-1"]["in_range"], false);
         assert_eq!(e.channels["452685500-Unknown-1"]["in_range"], true);
+    }
+}
+
+#[cfg(test)]
+mod fpga_tests {
+    use super::*;
+
+    fn producer_config() -> Value {
+        json!({"input_center_hz":454216998,"input_rate_hz":25600000,"input_bandwidth_hz":20000000,
+            "streams":(0..512).map(|k| json!({"stream_id":k+1,
+                "center_hz":454216998i64 + if k<256 {k as i64} else {k as i64-512}*50000,
+                "sample_rate_num_hz":25600000,"sample_rate_den":256,"protocol":"Unknown",
+                "iq_forwarded":false,"pinned":false})).collect::<Vec<_>>()})
+    }
+
+    #[test]
+    fn target_maps_to_nearest_fft_bin_and_survives_pin_config_refresh() {
+        let app = App::new(8);
+        let cfg = producer_config();
+        let target = target_slice(&cfg, 454029223.).unwrap();
+        assert_eq!(target["stream_id"], 509);
+        assert_eq!(target["center_hz"], 454016998i64);
+        assert_eq!(target["target_hz"], 454029223.);
+        // Equal-distance boundary is safe because each slice covers twice its spacing.
+        assert!(target_slice(&cfg, 454041998.).is_some());
+        // PSD covers 25.6 MHz but the RF filter only covers 20 MHz.
+        assert!(target_slice(&cfg, 465216998.).is_none());
+        {
+            let mut e = app.engine();
+            e.source = cfg.clone();
+            e.host_targets.insert(454029223);
+        }
+        let mut configs = HashMap::new();
+        assert!(merge_host_targets(&app, &mut configs));
+        assert!(!merge_host_targets(&app, &mut configs));
+        let mut refreshed = cfg;
+        refreshed["streams"][508]["iq_forwarded"] = json!(true);
+        app.engine().source = refreshed;
+        assert!(merge_host_targets(&app, &mut configs));
+        assert_eq!(configs[&454029223]["target_hz"], 454029223.);
+        assert_eq!(configs[&454029223]["iq_forwarded"], true);
     }
 }

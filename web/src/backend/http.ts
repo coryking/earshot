@@ -1,5 +1,6 @@
 import {
   engineEventSchema,
+  engineChannelSchema,
   engineSpectrumSchema,
   engineStatusSchema,
   listenMessageSchema,
@@ -143,6 +144,11 @@ export class HttpBackend implements Backend {
 
   async monitor(channelId: string | null) {
     await request("/api/monitor", { method: "POST", body: JSON.stringify({ channel_id: channelId }) });
+  }
+
+  async tune(frequencyHz: number) {
+    const response = await request("/api/tune", { method: "POST", body: JSON.stringify({ frequency_hz: frequencyHz }) });
+    return engineChannelSchema.parse(await response.json());
   }
 
   listen(handlers: ListenHandlers) {
