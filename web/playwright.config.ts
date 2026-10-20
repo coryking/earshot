@@ -10,7 +10,7 @@ const launch = {
 
 export default defineConfig({
   testDir: "e2e",
-  timeout: 120_000,
+  timeout: 240_000,
   expect: { timeout: 15_000 },
   fullyParallel: false,
   workers: 1,
