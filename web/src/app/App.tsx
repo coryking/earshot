@@ -21,8 +21,8 @@ const OperatorScreen = lazy(() => import("@/screens/Operator").then((m) => ({ de
 function WideNow() {
   const { view } = useHome();
   const player = usePlayerInstance();
-  const tunedFrequencyHz = usePlayerSelect((s) => s.kind === "live" ? s.frequencyHz : null);
-  const activeSourceId = usePlayerSelect((s) => (s.kind === "live" ? s.sourceId : null));
+  const tunedFrequencyHz = usePlayerSelect((s) => s.kind === "live" && s.phase !== "taken" && s.phase !== "error" ? s.frequencyHz : null);
+  const activeSourceId = usePlayerSelect((s) => (s.kind === "live" && s.phase !== "taken" && s.phase !== "error" ? s.sourceId : null));
   return (
     <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
       <ResizablePanel defaultSize="38%" minSize="26%" className="min-h-0">

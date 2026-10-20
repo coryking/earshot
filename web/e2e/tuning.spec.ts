@@ -44,7 +44,7 @@ test("desktop dragging follows the pointer and stopped listening can resume", as
   test.skip(isMobile, "the portrait strip is not interactive");
   await page.goto("/?demo");
   const selection = page.getByRole("region", { name: "Live tuning" });
-  await expect(selection).toContainText("Not listening");
+  await expect(selection).toContainText("Listening off");
   await expect(selection).toContainText("Audio will not start automatically");
   const waterfall = page.locator('[data-waterfall="full"]');
   await expect(waterfall).toHaveAttribute("aria-label", /451\.2 to 457\.2/);
@@ -58,7 +58,7 @@ test("desktop dragging follows the pointer and stopped listening can resume", as
   await expect(frequency).not.toHaveValue(first);
   await expect(selection).toContainText("Playing FM signal audio");
   await selection.getByRole("button", { name: "Stop listening" }).click();
-  await expect(selection).toContainText("Listening stopped");
+  await expect(selection).toContainText("Listening off");
   await expect(selection).toContainText("Audio will not start automatically");
   const stopped = await frequency.inputValue();
   await selection.getByRole("button", { name: "Resume listening" }).click();

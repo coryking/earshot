@@ -82,7 +82,42 @@ test("keyboard: move, listen, mute and stop", async ({ page, isMobile }) => {
 test("catch up plays recorded calls down the list", async ({ page }) => {
   await page.goto("/?demo#/catch-up");
   await page.getByRole("button", { name: /Play call from/ }).first().click();
-  await expect(page.getByRole("region", { name: "Player" })).toContainText("Recorded");
+  await expect(page.getByRole("region", { name: "Player" })).toContainText(/[Rr]ecorded/);
+});
+
+test("speaker mute and zero volume retain the held frequency until Stop listening", async ({ page }) => {
+  await page.getByRole("list", { name: "Recent activity" }).getByRole("button", { name: /^Tune to / }).first().click();
+  const player = page.getByRole("region", { name: "Player" });
+  const tuning = page.getByRole("region", { name: "Live tuning" });
+  const frequency = tuning.getByRole("textbox", { name: "Frequency (MHz)" });
+  const held = await frequency.inputValue();
+  await expect(player).toContainText("Playing live voice");
+  await player.getByRole("button", { name: "Mute speaker", exact: true }).click();
+  await expect(player).toContainText("Speaker muted");
+  await expect(frequency).toHaveValue(held);
+  await player.getByRole("button", { name: "Unmute speaker", exact: true }).click();
+  const volume = player.getByRole("slider", { name: "Speaker volume" });
+  await volume.focus();
+  await volume.press("Home");
+  await expect(volume).toHaveAttribute("aria-valuenow", "0");
+  await expect(player).toContainText("Speaker muted");
+  await player.getByRole("button", { name: "Unmute speaker", exact: true }).click();
+  await expect(volume).not.toHaveAttribute("aria-valuenow", "0");
+  await expect(frequency).toHaveValue(held);
+  await player.getByRole("button", { name: "Stop listening", exact: true }).click();
+  await expect(player).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Stop receiving", exact: true })).toBeEnabled();
+});
+
+test("receiver start and stop are distinct from listening", async ({ page }) => {
+  await page.getByRole("list", { name: "Recent activity" }).getByRole("button", { name: /^Tune to / }).first().click();
+  await expect(page.getByRole("region", { name: "Player" })).toBeVisible();
+  await page.getByRole("button", { name: "Stop receiving", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Start receiving", exact: true })).toBeEnabled();
+  await expect(page.getByRole("region", { name: "Player" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Start receiving", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Stop receiving", exact: true })).toBeEnabled();
+  await expect(page.getByRole("region", { name: "Player" })).toHaveCount(0);
 });
 
 test("phone: every row's main area listens and only the About button opens info", async ({ page, isMobile }) => {
