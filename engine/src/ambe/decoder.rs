@@ -87,8 +87,7 @@ fn decode_params(st: &mut State, out: &mut Block, bits: &mut [i16; 49], flag80: 
             set_kind(st, out, 0);
             break 'body 4;
         }
-        let mode;
-        if head == 0x3f {
+        let mode = if head == 0x3f {
             set_kind(st, out, 3);
             let mut w = [0i16; frame::WIDTHS_LEN];
             w.copy_from_slice(st.s(WIDTHS, frame::WIDTHS_LEN));
@@ -107,15 +106,15 @@ fn decode_params(st: &mut State, out: &mut Block, bits: &mut [i16; 49], flag80: 
             break 'body 0;
         } else if head == 0x3e {
             set_kind(st, out, 2);
-            mode = 2;
+            2
         } else {
             let voice = head <= 0x3b;
             set_kind(st, out, voice as i16);
             if !voice {
                 break 'body 4;
             }
-            mode = 1;
-        }
+            1
+        };
         let mut w = [0i16; frame::WIDTHS_LEN];
         w.copy_from_slice(st.s(WIDTHS, frame::WIDTHS_LEN));
         frame::bit_reorder(&mut bits[..], &w);
