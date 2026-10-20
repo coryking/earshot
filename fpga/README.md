@@ -185,7 +185,8 @@ systemctl --user status amateur-radio amateur-radio-live
 producer receives at 25.6 Msps, covers about 20 MHz around the configured LO,
 and sends one 100 ksps IQ slice per selected bin. The engine pins the bin when a
 browser selects a frequency; the selection stays armed through silence. The
-measured 512-bin FPGA PSD is sent at 10 Hz, activity at 1 Hz. Current activity
+measured 512-bin FPGA PSD is sent at 10 Hz. Activity reports are staggered
+over those updates, refreshing each bin about once per second. Current activity
 flags overreport occupied bins, so `activity_calibrated` is false and the host
 does not use those flags to admit decoders. Read `/api/status` for live vs
 reconnecting, drops, and measured spectrum geometry.

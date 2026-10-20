@@ -98,7 +98,12 @@ loss. `available`/`decoder_admitted` describe the bounded decode budget;
 `rf_active`, `decoded`, and `speech_active` remain separate.
 
 When the source explicitly reports `activity_calibrated: false`, raw activity
-does not rank decoder admission. A slice containing an operator-selected target
+does not rank decoder admission or authorize voice playback. The host's measured
+activity at the exact logical target must be present before decoded audio is
+played or recorded. A 300 ms hold measured in IQ time bridges TDMA gaps and
+decoder delay; the RF decision travels with each queued IQ packet. The displayed
+activity uses the same held target measurement. False DMR syncs in quiet IQ stay silent.
+A slice containing an operator-selected target
 decodes the selected targets only, so an uncalibrated coarse-bin probe cannot
 compete with their IQ processing. Other forwarded slices retain discovery, and
 multiple explicit listeners on one slice retain their own targets. Activity

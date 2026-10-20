@@ -277,6 +277,7 @@ pub struct TargetBand {
     pub carrier_updates: u32,
     /// In-band power over the slice noise reference, dB, from the latest packet.
     pub snr_db: f64,
+    pub(crate) hang_remaining: u64,
 }
 impl TargetBand {
     pub fn new(logical: u64, offset_hz: f64, bandwidth_hz: f64) -> Self {
@@ -290,6 +291,7 @@ impl TargetBand {
             carrier_hz: None,
             carrier_updates: 0,
             snr_db: 0.,
+            hang_remaining: 0,
         }
     }
 }
@@ -298,6 +300,8 @@ impl TargetBand {
 /// neighbor transmitting elsewhere in the slice does not make a quiet target active.
 /// The noise reference is the slice's median bin power, so it needs no history.
 pub struct SliceMeter {
+    /// RF hold time in seconds of IQ, independent of packet or decoder arrival timing.
+    pub hang_seconds: f64,
     window: Vec<f32>,
     window_power: f32,
     /// Samples of an incomplete window, carried to the next packet so producers that
@@ -327,6 +331,7 @@ impl SliceMeter {
             .collect();
         let window_power = window.iter().map(|w| w * w).sum();
         Self {
+            hang_seconds: 0.,
             window,
             window_power,
             pending: Vec::new(),
@@ -336,6 +341,9 @@ impl SliceMeter {
     /// Drop the carried partial window (new burst, gap or discontinuity).
     pub fn reset_window(&mut self) {
         self.pending.clear();
+        if self.hang_seconds > 0. {
+            for target in &mut self.targets { target.active = false; target.hang_remaining = 0; }
+        }
     }
     /// Update every target from one live IQ packet. `full_scale` is the amplitude of a
     /// full-scale sample. Returns false until enough samples have accumulated for one
@@ -413,11 +421,13 @@ impl SliceMeter {
                 });
                 target.carrier_updates += 1;
             }
-            target.active = if target.active {
-                ratio_db > Self::CLOSE_DB
+            let detected = ratio_db > if target.active { Self::CLOSE_DB } else { Self::OPEN_DB };
+            if detected {
+                target.hang_remaining = (self.hang_seconds * rate).round() as u64;
             } else {
-                ratio_db > Self::OPEN_DB
-            };
+                target.hang_remaining = target.hang_remaining.saturating_sub((windows * Self::FFT) as u64);
+            }
+            target.active = detected || target.hang_remaining > 0;
             target.level_dbfs = 10. * (total.max(1e-18) / (full_scale * full_scale)).log10();
         }
         true
@@ -645,6 +655,7 @@ mod tests {
             carrier_hz: None,
             carrier_updates: 0,
             snr_db: 0.,
+            hang_remaining: 0,
         }
     }
     #[test]
@@ -706,5 +717,38 @@ mod tests {
         assert!(meter.targets[1].active, "closed above the close threshold");
         meter.measure(&level(2.), rate, 32768.);
         assert!(!meter.targets[1].active);
+    }
+
+    #[test]
+    fn rf_hold_bridges_keyed_bursts_and_fades_then_expires_in_iq_time() {
+        let mut meter = SliceMeter::new(vec![band(0., 11250.), band(25000., 11250.)]);
+        meter.hang_seconds = 0.3;
+        let packet = |seed, amplitude| {
+            let mut iq = noise(1024, 400., seed);
+            for (s, c) in iq.iter_mut().zip(fm(1024, 100000., 0., amplitude, 1000., 2500.)) {
+                *s += c;
+            }
+            iq
+        };
+        for seed in 0..10 {
+            meter.measure(&packet(seed, 0.), 100000., 32768.);
+            assert!(!meter.targets[0].active, "noise must not start the hold");
+        }
+        // Approximately 30 ms on / 30 ms off, with a deep fade every other burst.
+        for seed in 10..70 {
+            let on = (seed - 10) % 6 < 3 && ((seed - 10) / 6) % 2 == 0;
+            meter.measure(&packet(seed, if on {3000.} else {0.}), 100000., 32768.);
+            assert!(meter.targets[0].active, "keyed/fading signal chopped at {seed}");
+            assert!(!meter.targets[1].active, "a neighbor must not acquire this target's hold");
+        }
+        // No wall-clock sleeps: expiration follows the samples, even during fast replay.
+        for seed in 70..110 {
+            meter.measure(&packet(seed, 0.), 100000., 32768.);
+        }
+        assert!(!meter.targets[0].active, "hold never closed after the carrier ended");
+        meter.measure(&packet(111, 3000.), 100000., 32768.);
+        assert!(meter.targets[0].active);
+        meter.reset_window();
+        assert!(!meter.targets[0].active, "a discontinuity must discard stale RF evidence");
     }
 }
