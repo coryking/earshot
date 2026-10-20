@@ -178,6 +178,7 @@
     opacity 240ms ease-in;
 }
 .calm-presence.calm-leaving {
+  animation: none;
   grid-template-rows: 0fr;
   opacity: 0;
 }

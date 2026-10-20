@@ -178,7 +178,7 @@ export function Waterfall({ variant, sources, talking, activeSourceId, onListen,
       <canvas ref={canvas} className="absolute inset-0 h-full w-full" aria-hidden />
       {empty && (
         <p className="absolute inset-0 grid place-items-center px-4 text-center text-xs text-[#93a1b8]">
-          No signal picture yet
+          No signal
         </p>
       )}
       {stale && (

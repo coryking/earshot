@@ -29,7 +29,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { useStore } from "@/lib/store";
 import { prefs, prefsStore } from "@/state/prefs";
 import { useSheet } from "@/app/ui";
-import { useSources } from "@/state/radio";
+import { useBlocks, useSources } from "@/state/radio";
 
 export const shortcuts: [string, string][] = [
   ["⌘K, Ctrl+K or /", "Search"],
@@ -45,6 +45,7 @@ export const shortcuts: [string, string][] = [
 export function Palette() {
   const open = useStore(paletteStore);
   const sources = useSources();
+  const { canSwitch } = useBlocks();
   const player = usePlayerInstance();
   const run = (fn: () => void) => () => {
     paletteStore.set(false);
@@ -96,9 +97,11 @@ export function Palette() {
             <CommandItem onSelect={run(() => navigate("catch-up"))}>
               Catch up on recent calls <CommandShortcut>2</CommandShortcut>
             </CommandItem>
-            <CommandItem onSelect={run(() => openSheet({ type: "block" }))}>
-              Change listening area
-            </CommandItem>
+            {canSwitch && (
+              <CommandItem onSelect={run(() => openSheet({ type: "block" }))}>
+                Change listening area
+              </CommandItem>
+            )}
             <CommandItem onSelect={run(() => openSheet({ type: "alerts" }))}>
               Alerts
             </CommandItem>

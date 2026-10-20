@@ -98,6 +98,15 @@ describe("toSources", () => {
     expect(control.listenable.ok).toBe(false);
   });
 
+  it("decides control from the engine's label kind only, never from free text", () => {
+    const [voice] = toSources(
+      [channel("454000000-DMR-1", { protocol: "DMR", decoded: true, speech_active: true, label_kind: "voice" })],
+      [entry({ id: "ushers", name: "Ushers", frequency_hz: 454_000_000, traffic_kind: "Crowd control and ushers" })],
+    );
+    expect(voice).toMatchObject({ name: "Ushers", control: false, talking: true, heardVoice: true });
+    expect(voice.listenable.ok).toBe(true);
+  });
+
   it("applies catalog labels and treats an encrypted carrier as a private call", () => {
     const [s] = toSources(
       [channel("454554500-DMR-1", { rf_active: true })],
@@ -233,7 +242,7 @@ describe("health and preferences", () => {
       ({ ...base, state: "error", mode: "disconnected", error: "RIQ source disconnected", link: { mode: "tcp", state: "reconnecting", ...link }, receiver }) as unknown as Parameters<typeof healthOf>[0];
     const short = healthOf(down({ offline_s: 20 }), true);
     expect(short).toMatchObject({ state: "offline", reconnecting: true });
-    expect(short.detail).toBe("Usually back within a minute.");
+    expect(short.detail).toBe("Reconnecting.");
 
     // The supervisor's reason is passed on in plain words.
     const busy = healthOf(down({ offline_s: 30 }, { state: "waiting", reason: "lock-held", fresh: true }), true);
