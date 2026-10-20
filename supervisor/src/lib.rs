@@ -9,10 +9,7 @@
 //!
 //! A cycle:
 //!  1. take `/tmp/pluto-radio.lock` (shared with every other radio session); wait if it is held
-//!  2. check the Pluto is reachable and runs an image we have a producer for (stock ARM, or an
-//!     FPGA image listed in --profiles), otherwise release the lock,
-//!     back off and look again later (an FPGA test image or a reboot is somebody else's
-//!     business, not something to fight)
+//!  2. check the Pluto is reachable, otherwise release the lock, back off and look again later
 //!  3. stop any leftover producer, snapshot the receiver settings, start the producer
 //!  4. watch it until it exits, the engine reports no data for too long, or we are told to stop
 //!  5. stop it cleanly, read the hardware back and correct it if it differs from the snapshot
@@ -30,9 +27,7 @@ pub type Snapshot = BTreeMap<String, String>;
 pub enum Probe {
     /// No answer: powered off, rebooting, cable out, link down.
     Unreachable(String),
-    /// Answers, but is not the image the producer is built for (for example an FPGA test image).
-    WrongImage(String),
-    /// The expected image; the string is a one-line description for the status.
+    /// Answers; the string is a one-line description for the status.
     Ready(String),
 }
 
@@ -96,10 +91,6 @@ pub trait Running {
 
 pub trait Radio {
     fn probe(&mut self) -> Probe;
-    /// Which producer profile the last successful probe chose (for the status).
-    fn profile_name(&self) -> String {
-        String::new()
-    }
     fn inspect(&mut self) -> Result<Inspection, String>;
     /// Stop producers somebody left behind (we hold the lock, so they are nobody's live run).
     fn stop_leftovers(&mut self) -> Result<(), String>;
@@ -142,8 +133,8 @@ pub struct Policy {
     pub stable_run: Duration,
     pub unreachable_base: Duration,
     pub unreachable_cap: Duration,
-    pub wrong_image_base: Duration,
-    pub wrong_image_cap: Duration,
+    /// How long to wait before looking again at a receiver left in a state we will not touch.
+    pub radio_state_wait: Duration,
     /// No data verdicts this soon after a start.
     pub startup_grace: Duration,
     /// Data older than this (seconds) with the producer "running" means it is wedged.
@@ -162,8 +153,7 @@ impl Default for Policy {
             stable_run: Duration::from_secs(60),
             unreachable_base: Duration::from_secs(5),
             unreachable_cap: Duration::from_secs(30),
-            wrong_image_base: Duration::from_secs(15),
-            wrong_image_cap: Duration::from_secs(120),
+            radio_state_wait: Duration::from_secs(120),
             startup_grace: Duration::from_secs(60),
             wedge_after: 60.,
             health_every: Duration::from_secs(5),
@@ -193,13 +183,11 @@ pub struct Supervisor<R: Radio, L: Lock, E: Env> {
     last_publish: f64,
     retry_in: Option<f64>,
     pluto: String,
-    profile: String,
     producer_started_at: Option<f64>,
     starts: u64,
     last_exit: Option<String>,
     last_restore: Option<String>,
     unreachable_n: u32,
-    wrong_image_n: u32,
     crash_n: u32,
     deployed: bool,
 }
@@ -219,13 +207,11 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
             last_publish: f64::MIN,
             retry_in: None,
             pluto: String::new(),
-            profile: String::new(),
             producer_started_at: None,
             starts: 0,
             last_exit: None,
             last_restore: None,
             unreachable_n: 0,
-            wrong_image_n: 0,
             crash_n: 0,
             deployed: false,
         }
@@ -272,7 +258,6 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
         match self.radio.probe() {
             Probe::Unreachable(why) => {
                 self.unreachable_n += 1;
-                self.wrong_image_n = 0;
                 let wait = backoff(self.unreachable_n, self.policy.unreachable_base, self.policy.unreachable_cap);
                 self.set(
                     "waiting",
@@ -282,28 +267,10 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
                 );
                 return Next::Retry(wait);
             }
-            Probe::WrongImage(what) => {
-                self.wrong_image_n += 1;
-                self.unreachable_n = 0;
-                let wait = backoff(self.wrong_image_n, self.policy.wrong_image_base, self.policy.wrong_image_cap);
-                self.set(
-                    "waiting",
-                    Some("wrong-image"),
-                    &format!(
-                        "The receiver is running different software ({what}), probably a test image. \
-                         Waiting for the normal one; looking again in {} s.",
-                        wait.as_secs()
-                    ),
-                    Some(wait),
-                );
-                return Next::Retry(wait);
-            }
             Probe::Ready(summary) => {
                 // unreachable_n is not reset here: a Pluto that answers iio_info but refuses
                 // ssh must still back off. It resets once a producer has started.
-                self.wrong_image_n = 0;
                 self.pluto = summary;
-                self.profile = self.radio.profile_name();
             }
         }
         let inspection = match self.radio.inspect() {
@@ -326,7 +293,7 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
         if before.get("rx_filter_fir_en").is_some_and(|v| v != "0")
             || before.get("tx_filter_fir_en").is_some_and(|v| v != "0")
         {
-            let wait = self.policy.wrong_image_cap;
+            let wait = self.policy.radio_state_wait;
             self.set(
                 "waiting",
                 Some("radio-state"),
@@ -477,7 +444,6 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
             "updated": now,
             "retry_in_s": self.retry_in,
             "pluto": self.pluto,
-            "profile": self.profile,
             "producer_started_at": self.producer_started_at,
             "starts": self.starts,
             "last_exit": self.last_exit,
@@ -739,41 +705,6 @@ mod tests {
         assert!(w.calls[..first_probe].iter().all(|c| c == "lock-busy" || c == "lock"), "{:?}", w.calls);
         assert_eq!(w.calls[..first_probe].iter().filter(|c| *c == "lock").count(), 1);
         assert!(states(&w).contains(&"waiting/lock-held".to_string()));
-    }
-
-    #[test]
-    fn a_different_image_is_waited_out_with_growing_gaps_and_never_started_on() {
-        let mut w = world(400.);
-        w.probes = VecDeque::from([
-            Probe::WrongImage("fw v0.99-fpga".into()),
-            Probe::WrongImage("fw v0.99-fpga".into()),
-            Probe::WrongImage("fw v0.99-fpga".into()),
-            Probe::WrongImage("fw v0.99-fpga".into()),
-            Probe::WrongImage("fw v0.99-fpga".into()),
-        ]);
-        let (mut sup, shared) = rig(w);
-        sup.run();
-        let w = shared.borrow();
-        let waits: Vec<u64> = w
-            .statuses
-            .iter()
-            .filter(|s| s["reason"] == "wrong-image")
-            .map(|s| s["retry_in_s"].as_f64().unwrap() as u64)
-            .fold(Vec::new(), |mut acc, x| {
-                if acc.last() != Some(&x) {
-                    acc.push(x);
-                }
-                acc
-            });
-        assert_eq!(waits, vec![15, 30, 60, 120]);
-        // Only after the normal image came back did it inspect or start anything.
-        let first_start = w.calls.iter().position(|c| c == "start").unwrap();
-        let wrong_probes = 5;
-        assert!(w.calls[..first_start].iter().filter(|c| *c == "probe").count() > wrong_probes);
-        let detail = w.statuses.iter().find(|s| s["reason"] == "wrong-image").unwrap()["detail"].as_str().unwrap();
-        assert!(detail.contains("test image"), "{detail}");
-        // The lock is released while waiting, so an FPGA session can take it.
-        assert_eq!(count(&w, "lock"), count(&w, "unlock"), "balanced lock use: {:?}", w.calls);
     }
 
     #[test]

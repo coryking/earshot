@@ -1,0 +1,48 @@
+{
+  "requirements": {
+    "bin_spacing_hz": 50000.0,
+    "output_rate_hz": 100000.0,
+    "oversampling": 2.0,
+    "protected_passband_hz": 31250.0,
+    "alias_stopband_edge_hz": 68750.0,
+    "transition_hz": 37500.0,
+    "harris_length_estimate_for_90db": 2792.7272727272725,
+    "kaiser_order_estimate_for_90db": 3901.4065629836823,
+    "chosen_length": 4096,
+    "taps_per_branch": 8,
+    "kaiser_beta_for_94db": 9.40006
+  },
+  "kaiser_float": {
+    "passband_ripple_db": 0.00037154562966721283,
+    "passband_min_db": -0.0002378937781130661,
+    "alias_rejection_db": 94.17313968451074,
+    "at_25k_db": 1.3791643638065667e-06,
+    "at_31k_db": -0.0001713343135574292,
+    "at_50k_db": -6.020681998366882,
+    "at_68k_db": -94.17313968451074,
+    "at_100k_db": -106.99140444695325,
+    "at_150k_db": -123.84460987539956
+  },
+  "kaiser_18bit": {
+    "passband_ripple_db": 0.0003763770756249658,
+    "passband_min_db": -0.00025011386928657544,
+    "alias_rejection_db": 94.19705722265533,
+    "at_25k_db": -1.1038957743579741e-05,
+    "at_31k_db": -0.0001764720899511765,
+    "at_50k_db": -6.02069986284167,
+    "at_68k_db": -94.19705722265533,
+    "at_100k_db": -107.21634691022581,
+    "at_150k_db": -144.52528415963306
+  },
+  "arm_c_reference_512": {
+    "passband_ripple_db": 24.016906168486482,
+    "passband_min_db": -24.01690616848649,
+    "alias_rejection_db": 88.66892221998441,
+    "at_25k_db": -9.462481479717157,
+    "at_31k_db": -24.01690616848649,
+    "at_50k_db": -84.07230464682938,
+    "at_68k_db": -95.99092213104656,
+    "at_100k_db": -110.47012502460666,
+    "at_150k_db": -125.04425854576888
+  }
+}

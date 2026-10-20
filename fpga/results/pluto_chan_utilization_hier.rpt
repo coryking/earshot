@@ -1,0 +1,63 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
+---------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2026.1 (lin64) Build 6511674 Tue Jun 16 11:01:26 MDT 2026
+| Date         : Mon Oct 19 19:57:42 2026
+| Host         : wigglebutt running 64-bit Ubuntu 26.04 LTS
+| Command      : report_utilization -hierarchical -hierarchical_depth 4 -file reports/utilization_hier.rpt
+| Design       : system_top
+| Device       : xc7z010clg225-1
+| Speed File   : -1
+| Design State : Routed
+---------------------------------------------------------------------------------------------------------------------------------------------
+
+Utilization Design Information
+
+Table of Contents
+-----------------
+1. Utilization by Hierarchy
+
+1. Utilization by Hierarchy
+---------------------------
+
++----------------------------+----------------------------------------+------------+------------+---------+------+-------+--------+--------+------------+
+|          Instance          |                 Module                 | Total LUTs | Logic LUTs | LUTRAMs | SRLs |  FFs  | RAMB36 | RAMB18 | DSP Blocks |
++----------------------------+----------------------------------------+------------+------------+---------+------+-------+--------+--------+------------+
+| system_top                 |                                  (top) |      13066 |      11377 |     440 | 1249 | 20281 |     13 |     29 |         74 |
+|   (system_top)             |                                  (top) |          0 |          0 |       0 |    0 |     0 |      0 |      0 |          0 |
+|   i_system_wrapper         |                         system_wrapper |      13066 |      11377 |     440 | 1249 | 20281 |     13 |     29 |         74 |
+|     system_i               |                                 system |      13064 |      11375 |     440 | 1249 | 20281 |     13 |     29 |         74 |
+|       tx_upack             |                      system_tx_upack_0 |         90 |         90 |       0 |    0 |   103 |      0 |      0 |          0 |
+|         inst               |          system_tx_upack_0_util_upack2 |         90 |         90 |       0 |    0 |   103 |      0 |      0 |          0 |
+|       axi_ad9361           |                    system_axi_ad9361_0 |       2694 |       2661 |       0 |   33 |  5390 |      0 |      0 |         12 |
+|         inst               |         system_axi_ad9361_0_axi_ad9361 |       2694 |       2661 |       0 |   33 |  5390 |      0 |      0 |         12 |
+|       axi_ad9361_adc_dma   |            system_axi_ad9361_adc_dma_0 |        421 |        389 |      32 |    0 |   662 |      1 |      0 |          0 |
+|         inst               |   system_axi_ad9361_adc_dma_0_axi_dmac |        421 |        389 |      32 |    0 |   662 |      1 |      0 |          0 |
+|       axi_ad9361_dac_dma   |            system_axi_ad9361_dac_dma_0 |        440 |        412 |      28 |    0 |   566 |      1 |      0 |          0 |
+|         inst               |   system_axi_ad9361_dac_dma_0_axi_dmac |        440 |        412 |      28 |    0 |   566 |      1 |      0 |          0 |
+|       axi_gp0_interconnect |          system_axi_gp0_interconnect_0 |        752 |        691 |       0 |   61 |   686 |      0 |      0 |          0 |
+|         s00_couplers       |               s00_couplers_imp_1HZ6LU5 |        406 |        345 |       0 |   61 |   550 |      0 |      0 |          0 |
+|         xbar               | system_axi_gp0_interconnect_imp_xbar_0 |        346 |        346 |       0 |    0 |   136 |      0 |      0 |          0 |
+|       axi_iic_main         |                  system_axi_iic_main_0 |        381 |        371 |       0 |   10 |   374 |      0 |      0 |          0 |
+|         U0                 |          system_axi_iic_main_0_axi_iic |        381 |        371 |       0 |   10 |   374 |      0 |      0 |          0 |
+|       axi_spi              |                       system_axi_spi_0 |        385 |        373 |      12 |    0 |   582 |      0 |      0 |          0 |
+|         U0                 |          system_axi_spi_0_axi_quad_spi |        385 |        373 |      12 |    0 |   582 |      0 |      0 |          0 |
+|       axi_tdd_0            |                   axi_tdd_0_imp_PE8F36 |        461 |        461 |       0 |    0 |   902 |      0 |      0 |          0 |
+|         tdd_core           |                      system_tdd_core_0 |        461 |        461 |       0 |    0 |   902 |      0 |      0 |          0 |
+|       chan                 |                          system_chan_0 |       3421 |       3064 |     280 |   77 |  3535 |      9 |     19 |         18 |
+|         (chan)             |                          system_chan_0 |        128 |          0 |     128 |    0 |     0 |      0 |      0 |          0 |
+|         inst               |                 system_chan_0_chan_top |       3293 |       3064 |     152 |   77 |  3535 |      9 |     19 |         18 |
+|       chan_fft             |                      system_chan_fft_0 |       2304 |       1645 |       0 |  659 |  4739 |      0 |     10 |         22 |
+|         U0                 |         system_chan_fft_0_xfft_v9_1_16 |       2304 |       1645 |       0 |  659 |  4739 |      0 |     10 |         22 |
+|       chan_hist_dma        |                 system_chan_hist_dma_0 |        501 |        469 |      32 |    0 |   646 |      1 |      0 |          0 |
+|         inst               |        system_chan_hist_dma_0_axi_dmac |        501 |        469 |      32 |    0 |   646 |      1 |      0 |          0 |
+|       chan_sel_dma         |                  system_chan_sel_dma_0 |        470 |        438 |      32 |    0 |   645 |      1 |      0 |          0 |
+|         inst               |         system_chan_sel_dma_0_axi_dmac |        470 |        438 |      32 |    0 |   645 |      1 |      0 |          0 |
+|       cpack                |                         system_cpack_0 |        108 |        108 |       0 |    0 |   130 |      0 |      0 |          0 |
+|         inst               |             system_cpack_0_util_cpack2 |        108 |        108 |       0 |    0 |   130 |      0 |      0 |          0 |
+|       rx_fir_decimator     |           rx_fir_decimator_imp_1GA06XC |        617 |        185 |      24 |  408 |  1291 |      0 |      0 |         22 |
+|         fir_decimation_0   |              system_fir_decimation_0_0 |        300 |         84 |      12 |  204 |   645 |      0 |      0 |         11 |
+|         fir_decimation_1   |              system_fir_decimation_1_0 |        300 |         84 |      12 |  204 |   644 |      0 |      0 |         11 |
++----------------------------+----------------------------------------+------------+------------+---------+------+-------+--------+--------+------------+
+* Note: The sum of lower-level cells may be larger than their parent cells total, due to cross-hierarchy LUT combining
+
+

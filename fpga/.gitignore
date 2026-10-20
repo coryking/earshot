@@ -1,0 +1,5 @@
+.Xil/
+*.pb
+*.jou
+vivado*.log
+xvlog.log

@@ -1,0 +1,359 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
+---------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2026.1 (lin64) Build 6511674 Tue Jun 16 11:01:26 MDT 2026
+| Date         : Mon Oct 19 19:58:05 2026
+| Host         : wigglebutt running 64-bit Ubuntu 26.04 LTS
+| Command      : report_methodology -file reports/methodology.rpt
+| Design       : system_top
+| Device       : xc7z010clg225-1
+| Speed File   : -1
+| Design State : Fully Routed
+---------------------------------------------------------------------------------------------------------------------------------------------
+
+Report Methodology
+
+Table of Contents
+-----------------
+1. REPORT SUMMARY
+2. REPORT DETAILS
+
+1. REPORT SUMMARY
+-----------------
+            Netlist: netlist
+          Floorplan: checkpoint_system_top_routed
+      Design limits: <entire design considered>
+             Max checks: <unlimited>
+             Checks found: 55
++-----------+------------------+-------------------------------------------------------------------------------------+--------+
+| Rule      | Severity         | Description                                                                         | Checks |
++-----------+------------------+-------------------------------------------------------------------------------------+--------+
+| TIMING-54 | Critical Warning | Scoped false path, clock group or max delay datapath only constraint between clocks | 5      |
+| TIMING-9  | Warning          | Unknown CDC Logic                                                                   | 1      |
+| TIMING-18 | Warning          | Missing input or output delay                                                       | 36     |
+| ULMTCS-1  | Warning          | Control Sets use limits recommend reduction                                         | 1      |
+| XDCB-5    | Warning          | Runtime inefficient way to find pin objects                                         | 8      |
+| RTGT-1    | Advisory         | RAM retargeting possibility                                                         | 4      |
++-----------+------------------+-------------------------------------------------------------------------------------+--------+
+
+2. REPORT DETAILS
+-----------------
+TIMING-54#1 Critical Warning
+Scoped false path, clock group or max delay datapath only constraint between clocks  
+A scoped Max Delay Datapath Only timing constraint is set between clocks clk_fpga_0 and rx_clk (see constraint position 33 in the Timing Constraint window in Vivado IDE). It is not recommended to define such scoped constraints between clocks as the constraint impacts timing paths outside of the scope.
+Related violations: <none>
+
+TIMING-54#2 Critical Warning
+Scoped false path, clock group or max delay datapath only constraint between clocks  
+A scoped Max Delay Datapath Only timing constraint is set between clocks clk_fpga_0 and rx_clk (see constraint position 37 in the Timing Constraint window in Vivado IDE). It is not recommended to define such scoped constraints between clocks as the constraint impacts timing paths outside of the scope.
+Related violations: <none>
+
+TIMING-54#3 Critical Warning
+Scoped false path, clock group or max delay datapath only constraint between clocks  
+A scoped Max Delay Datapath Only timing constraint is set between clocks clk_fpga_0 and rx_clk (see constraint position 52 in the Timing Constraint window in Vivado IDE). It is not recommended to define such scoped constraints between clocks as the constraint impacts timing paths outside of the scope.
+Related violations: <none>
+
+TIMING-54#4 Critical Warning
+Scoped false path, clock group or max delay datapath only constraint between clocks  
+A scoped Max Delay Datapath Only timing constraint is set between clocks rx_clk and clk_fpga_0 (see constraint position 55 in the Timing Constraint window in Vivado IDE). It is not recommended to define such scoped constraints between clocks as the constraint impacts timing paths outside of the scope.
+Related violations: <none>
+
+TIMING-54#5 Critical Warning
+Scoped false path, clock group or max delay datapath only constraint between clocks  
+A scoped Max Delay Datapath Only timing constraint is set between clocks rx_clk and clk_fpga_0 (see constraint position 62 in the Timing Constraint window in Vivado IDE). It is not recommended to define such scoped constraints between clocks as the constraint impacts timing paths outside of the scope.
+Related violations: <none>
+
+TIMING-9#1 Warning
+Unknown CDC Logic  
+One or more asynchronous Clock Domain Crossing has been detected between 2 clock domains through a set_false_path or a set_clock_groups or set_max_delay -datapath_only constraint but no double-registers logic synchronizer has been found on the side of the capture clock. It is recommended to run report_cdc for a complete and detailed CDC coverage. Please consider using XPM_CDC to avoid Critical severities
+Related violations: <none>
+
+TIMING-18#1 Warning
+Missing input or output delay  
+An input delay is missing on pl_gpio1 relative to the rising and/or falling clock edge(s) of clk_fpga_0, rx_clk.
+Related violations: <none>
+
+TIMING-18#2 Warning
+Missing input or output delay  
+An input delay is missing on pl_gpio3 relative to the rising and/or falling clock edge(s) of clk_fpga_0.
+Related violations: <none>
+
+TIMING-18#3 Warning
+Missing input or output delay  
+An input delay is missing on pl_gpio4 relative to the rising and/or falling clock edge(s) of clk_fpga_0.
+Related violations: <none>
+
+TIMING-18#4 Warning
+Missing input or output delay  
+An input delay is missing on rx_data_in[0] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#5 Warning
+Missing input or output delay  
+An input delay is missing on rx_data_in[10] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#6 Warning
+Missing input or output delay  
+An input delay is missing on rx_data_in[11] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#7 Warning
+Missing input or output delay  
+An input delay is missing on rx_data_in[1] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#8 Warning
+Missing input or output delay  
+An input delay is missing on rx_data_in[2] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#9 Warning
+Missing input or output delay  
+An input delay is missing on rx_data_in[3] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#10 Warning
+Missing input or output delay  
+An input delay is missing on rx_data_in[4] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#11 Warning
+Missing input or output delay  
+An input delay is missing on rx_data_in[5] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#12 Warning
+Missing input or output delay  
+An input delay is missing on rx_data_in[6] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#13 Warning
+Missing input or output delay  
+An input delay is missing on rx_data_in[7] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#14 Warning
+Missing input or output delay  
+An input delay is missing on rx_data_in[8] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#15 Warning
+Missing input or output delay  
+An input delay is missing on rx_data_in[9] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#16 Warning
+Missing input or output delay  
+An input delay is missing on rx_frame_in relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#17 Warning
+Missing input or output delay  
+An output delay is missing on enable relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#18 Warning
+Missing input or output delay  
+An output delay is missing on pl_gpio0 relative to the rising and/or falling clock edge(s) of clk_fpga_0, rx_clk.
+Related violations: <none>
+
+TIMING-18#19 Warning
+Missing input or output delay  
+An output delay is missing on pl_gpio2 relative to the rising and/or falling clock edge(s) of clk_fpga_0.
+Related violations: <none>
+
+TIMING-18#20 Warning
+Missing input or output delay  
+An output delay is missing on pl_gpio3 relative to the rising and/or falling clock edge(s) of clk_fpga_0.
+Related violations: <none>
+
+TIMING-18#21 Warning
+Missing input or output delay  
+An output delay is missing on pl_gpio4 relative to the rising and/or falling clock edge(s) of clk_fpga_0.
+Related violations: <none>
+
+TIMING-18#22 Warning
+Missing input or output delay  
+An output delay is missing on tx_clk_out relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#23 Warning
+Missing input or output delay  
+An output delay is missing on tx_data_out[0] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#24 Warning
+Missing input or output delay  
+An output delay is missing on tx_data_out[10] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#25 Warning
+Missing input or output delay  
+An output delay is missing on tx_data_out[11] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#26 Warning
+Missing input or output delay  
+An output delay is missing on tx_data_out[1] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#27 Warning
+Missing input or output delay  
+An output delay is missing on tx_data_out[2] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#28 Warning
+Missing input or output delay  
+An output delay is missing on tx_data_out[3] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#29 Warning
+Missing input or output delay  
+An output delay is missing on tx_data_out[4] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#30 Warning
+Missing input or output delay  
+An output delay is missing on tx_data_out[5] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#31 Warning
+Missing input or output delay  
+An output delay is missing on tx_data_out[6] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#32 Warning
+Missing input or output delay  
+An output delay is missing on tx_data_out[7] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#33 Warning
+Missing input or output delay  
+An output delay is missing on tx_data_out[8] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#34 Warning
+Missing input or output delay  
+An output delay is missing on tx_data_out[9] relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#35 Warning
+Missing input or output delay  
+An output delay is missing on tx_frame_out relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+TIMING-18#36 Warning
+Missing input or output delay  
+An output delay is missing on txnrx relative to the rising and/or falling clock edge(s) of rx_clk.
+Related violations: <none>
+
+ULMTCS-1#1 Warning
+Control Sets use limits recommend reduction  
+This design uses 621 control sets (vs. available limit of 4400, determined by 1 control set per CLB). This exceeds the control set use guideline of 7.5 percent. This is at a level where reduction is RECOMMENDED (see UG949). Use report_control_sets to get more details.
+Related violations: <none>
+
+XDCB-5#1 Warning
+Runtime inefficient way to find pin objects  
+The option '-to : [get_pins -quiet -hier *reset_sync_in_reg*/PRE -filter {NAME =~ *i_reset_manager*}]' of constraint 'set_false_path' uses inefficient query to find pin objects (see constraint position '40' in the Timing Constraint window in Vivado IDE). To reduce runtime, it is recommended to get the pins through the cell objects. Please refer to Using Constraints Guide (Constraints Efficiency). An example of optimal query is: get_pins -filter {REF_PIN_NAME=~yy*} -of_objects [get_cells -hierarchical xx*].
+Current XDC: /Users/coryking/.cache/amateur-radio-fpga/build/pluto_chan/pluto_chan.gen/sources_1/bd/system/ip/system_axi_ad9361_dac_dma_0/system_axi_ad9361_dac_dma_0_constr.xdc (Line: 133)
+Related violations: <none>
+
+XDCB-5#2 Warning
+Runtime inefficient way to find pin objects  
+The option '-to : [get_pins -quiet -hier *reset_sync_in_reg*/PRE -filter {NAME =~ *i_reset_manager*}]' of constraint 'set_false_path' uses inefficient query to find pin objects (see constraint position '41' in the Timing Constraint window in Vivado IDE). To reduce runtime, it is recommended to get the pins through the cell objects. Please refer to Using Constraints Guide (Constraints Efficiency). An example of optimal query is: get_pins -filter {REF_PIN_NAME=~yy*} -of_objects [get_cells -hierarchical xx*].
+Current XDC: /Users/coryking/.cache/amateur-radio-fpga/build/pluto_chan/pluto_chan.gen/sources_1/bd/system/ip/system_axi_ad9361_dac_dma_0/system_axi_ad9361_dac_dma_0_constr.xdc (Line: 139)
+Related violations: <none>
+
+XDCB-5#3 Warning
+Runtime inefficient way to find pin objects  
+The option '-to : [get_pins -quiet -hier *reset_sync_in_reg*/PRE -filter {NAME =~ *i_reset_manager*}]' of constraint 'set_false_path' uses inefficient query to find pin objects (see constraint position '65' in the Timing Constraint window in Vivado IDE). To reduce runtime, it is recommended to get the pins through the cell objects. Please refer to Using Constraints Guide (Constraints Efficiency). An example of optimal query is: get_pins -filter {REF_PIN_NAME=~yy*} -of_objects [get_cells -hierarchical xx*].
+Current XDC: /Users/coryking/.cache/amateur-radio-fpga/build/pluto_chan/pluto_chan.gen/sources_1/bd/system/ip/system_axi_ad9361_adc_dma_0/system_axi_ad9361_adc_dma_0_constr.xdc (Line: 168)
+Related violations: <none>
+
+XDCB-5#4 Warning
+Runtime inefficient way to find pin objects  
+The option '-to : [get_pins -quiet -hier *reset_sync_in_reg*/PRE -filter {NAME =~ *i_reset_manager*}]' of constraint 'set_false_path' uses inefficient query to find pin objects (see constraint position '66' in the Timing Constraint window in Vivado IDE). To reduce runtime, it is recommended to get the pins through the cell objects. Please refer to Using Constraints Guide (Constraints Efficiency). An example of optimal query is: get_pins -filter {REF_PIN_NAME=~yy*} -of_objects [get_cells -hierarchical xx*].
+Current XDC: /Users/coryking/.cache/amateur-radio-fpga/build/pluto_chan/pluto_chan.gen/sources_1/bd/system/ip/system_axi_ad9361_adc_dma_0/system_axi_ad9361_adc_dma_0_constr.xdc (Line: 174)
+Related violations: <none>
+
+XDCB-5#5 Warning
+Runtime inefficient way to find pin objects  
+The option '-to : [get_pins -quiet -hier *reset_sync_in_reg*/PRE -filter {NAME =~ *i_reset_manager*}]' of constraint 'set_false_path' uses inefficient query to find pin objects (see constraint position '90' in the Timing Constraint window in Vivado IDE). To reduce runtime, it is recommended to get the pins through the cell objects. Please refer to Using Constraints Guide (Constraints Efficiency). An example of optimal query is: get_pins -filter {REF_PIN_NAME=~yy*} -of_objects [get_cells -hierarchical xx*].
+Current XDC: /Users/coryking/.cache/amateur-radio-fpga/build/pluto_chan/pluto_chan.gen/sources_1/bd/system/ip/system_chan_hist_dma_0/system_chan_hist_dma_0_constr.xdc (Line: 30)
+Related violations: <none>
+
+XDCB-5#6 Warning
+Runtime inefficient way to find pin objects  
+The option '-to : [get_pins -quiet -hier *reset_sync_in_reg*/PRE -filter {NAME =~ *i_reset_manager*}]' of constraint 'set_false_path' uses inefficient query to find pin objects (see constraint position '91' in the Timing Constraint window in Vivado IDE). To reduce runtime, it is recommended to get the pins through the cell objects. Please refer to Using Constraints Guide (Constraints Efficiency). An example of optimal query is: get_pins -filter {REF_PIN_NAME=~yy*} -of_objects [get_cells -hierarchical xx*].
+Current XDC: /Users/coryking/.cache/amateur-radio-fpga/build/pluto_chan/pluto_chan.gen/sources_1/bd/system/ip/system_chan_hist_dma_0/system_chan_hist_dma_0_constr.xdc (Line: 36)
+Related violations: <none>
+
+XDCB-5#7 Warning
+Runtime inefficient way to find pin objects  
+The option '-to : [get_pins -quiet -hier *reset_sync_in_reg*/PRE -filter {NAME =~ *i_reset_manager*}]' of constraint 'set_false_path' uses inefficient query to find pin objects (see constraint position '97' in the Timing Constraint window in Vivado IDE). To reduce runtime, it is recommended to get the pins through the cell objects. Please refer to Using Constraints Guide (Constraints Efficiency). An example of optimal query is: get_pins -filter {REF_PIN_NAME=~yy*} -of_objects [get_cells -hierarchical xx*].
+Current XDC: /Users/coryking/.cache/amateur-radio-fpga/build/pluto_chan/pluto_chan.gen/sources_1/bd/system/ip/system_chan_sel_dma_0/system_chan_sel_dma_0_constr.xdc (Line: 30)
+Related violations: <none>
+
+XDCB-5#8 Warning
+Runtime inefficient way to find pin objects  
+The option '-to : [get_pins -quiet -hier *reset_sync_in_reg*/PRE -filter {NAME =~ *i_reset_manager*}]' of constraint 'set_false_path' uses inefficient query to find pin objects (see constraint position '98' in the Timing Constraint window in Vivado IDE). To reduce runtime, it is recommended to get the pins through the cell objects. Please refer to Using Constraints Guide (Constraints Efficiency). An example of optimal query is: get_pins -filter {REF_PIN_NAME=~yy*} -of_objects [get_cells -hierarchical xx*].
+Current XDC: /Users/coryking/.cache/amateur-radio-fpga/build/pluto_chan/pluto_chan.gen/sources_1/bd/system/ip/system_chan_sel_dma_0/system_chan_sel_dma_0_constr.xdc (Line: 36)
+Related violations: <none>
+
+RTGT-1#1 Advisory
+RAM retargeting possibility  
+Identified 12 RAM32X1D primitives that could be retargeted to RAM32M. Retargeting will save approximately 4 memory LUTs and improve routability. These can usually be achieved using synthesis inference or XPMs. The memories are i_system_wrapper/system_i/chan/inst/i_mask/g_col[17].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[18].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[19].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[20].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[21].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[23].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[24].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[26].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[27].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[28].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[29].col_reg_r2_0_15_0_0
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[31].col_reg_r2_0_15_0_0
+Related violations: <none>
+
+RTGT-1#2 Advisory
+RAM retargeting possibility  
+Identified 30 RAM32X1D primitives that could be retargeted to RAM32M. Retargeting will save approximately 10 memory LUTs and improve routability. These can usually be achieved using synthesis inference or XPMs. The memories are i_system_wrapper/system_i/chan/inst/i_mask/g_col[0].col_reg_r1_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[10].col_reg_r1_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[11].col_reg_r1_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[12].col_reg_r1_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[13].col_reg_r1_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[14].col_reg_r1_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[15].col_reg_r1_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[16].col_reg_r1_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[17].col_reg_r1_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[18].col_reg_r1_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[19].col_reg_r1_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[1].col_reg_r1_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[20].col_reg_r1_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[21].col_reg_r1_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[22].col_reg_r1_0_15_0_0
+ (the first 15 of 30 listed)
+Related violations: <none>
+
+RTGT-1#3 Advisory
+RAM retargeting possibility  
+Identified 6 RAM32X1D primitives that could be retargeted to RAM32M. Retargeting will save approximately 2 memory LUTs and improve routability. These can usually be achieved using synthesis inference or XPMs. The memories are i_system_wrapper/system_i/chan/inst/i_mask/g_col[10].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[11].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[12].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[13].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[14].col_reg_r2_0_15_0_0
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[15].col_reg_r2_0_15_0_0
+Related violations: <none>
+
+RTGT-1#4 Advisory
+RAM retargeting possibility  
+Identified 6 RAM32X1D primitives that could be retargeted to RAM32M. Retargeting will save approximately 2 memory LUTs and improve routability. These can usually be achieved using synthesis inference or XPMs. The memories are i_system_wrapper/system_i/chan/inst/i_mask/g_col[16].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[22].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[25].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[30].col_reg_r2_0_15_0_0,
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[4].col_reg_r2_0_15_0_0
+i_system_wrapper/system_i/chan/inst/i_mask/g_col[6].col_reg_r2_0_15_0_0
+Related violations: <none>
+
+

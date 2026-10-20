@@ -1,0 +1,28 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
+---------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2026.1 (lin64) Build 6511674 Tue Jun 16 11:01:26 MDT 2026
+| Date         : Mon Oct 19 19:58:16 2026
+| Host         : wigglebutt running 64-bit Ubuntu 26.04 LTS
+| Command      : report_clock_interaction -file reports/clock_interaction.rpt
+| Design       : system_top
+| Device       : 7z010-clg225
+| Speed File   : -1  PRODUCTION 1.12 2019-11-22
+| Design State : Routed
+---------------------------------------------------------------------------------------------------------------------------------------------
+
+Clock Interaction Report
+
+Clock Interaction Table
+-----------------------
+
+                            WNS                            TNS Failing  TNS Total    WNS Path         Clock-Pair           Inter-Clock              
+From Clock    To Clock      Clock Edges  WNS(ns)  TNS(ns)    Endpoints    Endpoints  Requirement(ns)  Classification       Constraints              
+------------  ------------  -----------  -------  -------  -----------  -----------  ---------------  -------------------  -----------------------  
+clk_fpga_0    clk_fpga_0    rise - rise     0.24     0.00            0        43479            10.00  Clean                Partial False Path       
+clk_fpga_0    rx_clk        rise - rise     8.26     0.00            0          926       Unexpanded  Ignored              Max Delay Datapath Only  
+clk_fpga_1    clk_fpga_1    rise - rise     3.68     0.00            0            4             5.00  Clean                Timed                    
+rx_clk        clk_fpga_0    rise - rise     5.42     0.00            0          228       Unexpanded  Ignored              Max Delay Datapath Only  
+rx_clk        clk_fpga_1                                             0            3                   Ignored              False Path               
+rx_clk        rx_clk        rise - rise     6.62     0.00            0        13308            16.27  Clean                Partial False Path       
+
+

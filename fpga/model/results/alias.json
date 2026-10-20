@@ -1,0 +1,92 @@
+{
+  "tone_amplitude_adc": 2000.0,
+  "rows": [
+    {
+      "offset_hz": 0,
+      "bin0_rel_db": -9.14081708060339e-06,
+      "aliases_into_protected_band": false
+    },
+    {
+      "offset_hz": 6250,
+      "bin0_rel_db": -0.00013306409577018013,
+      "aliases_into_protected_band": false
+    },
+    {
+      "offset_hz": 12500,
+      "bin0_rel_db": 2.2764117048125503e-05,
+      "aliases_into_protected_band": false
+    },
+    {
+      "offset_hz": 18750,
+      "bin0_rel_db": -0.0001774284182978883,
+      "aliases_into_protected_band": false
+    },
+    {
+      "offset_hz": 25000,
+      "bin0_rel_db": -0.00013156321412882528,
+      "aliases_into_protected_band": false
+    },
+    {
+      "offset_hz": 31250,
+      "bin0_rel_db": -0.0002160891776991199,
+      "aliases_into_protected_band": false
+    },
+    {
+      "offset_hz": 40000,
+      "bin0_rel_db": -0.4123283395494673,
+      "aliases_into_protected_band": false
+    },
+    {
+      "offset_hz": 50000,
+      "bin0_rel_db": -6.020802068006738,
+      "aliases_into_protected_band": false
+    },
+    {
+      "offset_hz": 60000,
+      "bin0_rel_db": -26.683125094360847,
+      "aliases_into_protected_band": false
+    },
+    {
+      "offset_hz": 68750,
+      "bin0_rel_db": -91.80291821503769,
+      "aliases_into_protected_band": true
+    },
+    {
+      "offset_hz": 75000,
+      "bin0_rel_db": -101.61765944737608,
+      "aliases_into_protected_band": true
+    },
+    {
+      "offset_hz": 100000,
+      "bin0_rel_db": -106.13000470814777,
+      "aliases_into_protected_band": true
+    },
+    {
+      "offset_hz": 150000,
+      "bin0_rel_db": -113.55492059091142,
+      "aliases_into_protected_band": true
+    },
+    {
+      "offset_hz": 250000,
+      "bin0_rel_db": -110.20603796166193,
+      "aliases_into_protected_band": true
+    },
+    {
+      "offset_hz": 1000000,
+      "bin0_rel_db": -111.10780426515282,
+      "aliases_into_protected_band": true
+    },
+    {
+      "offset_hz": 5000000,
+      "bin0_rel_db": -126.22663787494156,
+      "aliases_into_protected_band": true
+    },
+    {
+      "offset_hz": 12000000,
+      "bin0_rel_db": -122.24723778822117,
+      "aliases_into_protected_band": true
+    }
+  ],
+  "worst_alias_db": -91.80291821503769,
+  "zero_input_max_abs_y": 0
+}
