@@ -31,14 +31,12 @@ fn with_user(c: &Value, user: &std::collections::BTreeMap<String, Value>) -> Val
     out
 }
 fn now_s() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64()
+    crate::link::now()
 }
-/// The browser validates this payload strictly (web/src/lib/radio.ts), so every numeric
+/// The browser validates this payload (web/src/api/engine.ts), so every numeric
 /// field must be a number even before the first CONFIG or sample arrives.
-fn status_json(app: &App) -> Value {
+pub(crate) fn status_json(app: &App) -> Value {
+    let receiver = app.receiver_status();
     let e = app.engine();
     let number = |v: &Value| json!(v.as_f64().unwrap_or(0.));
     let position = number(&e.source["source_position_s"]);
@@ -61,7 +59,7 @@ fn status_json(app: &App) -> Value {
         source["capabilities"]["fm_audio"] = json!(true);
         source["capabilities"]["per_client_listening"] = json!(true);
     }
-    json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":json!(app.calibration.true_hz(e.source["input_center_hz"].as_f64().unwrap_or(0.))),"center_reading_hz":number(&e.source["input_center_hz"]),"rate_hz":number(&e.source["input_rate_hz"]),"bandwidth_hz":number(&e.source["input_bandwidth_hz"]),"generation":e.generation,"channels":e.channels.values().map(|c| with_user(c, &e.store.user)).collect::<Vec<_>>(),"received_seconds":position,"source_position_s":position,"decode_latency_s":latency,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":number(&e.source["queue_depth"]),"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"calibration_ppm":app.calibration.ppm,"labels_loaded":app.labels.len(),"listeners":e.listeners.len(),"persistence":{"enabled":e.store.persistent(),"write_errors":e.store.io_errors()},"source":source})
+    json!({"mode":if e.active{"live"}else{"disconnected"},"state":if e.active{"receiving"}else if e.error.is_some(){"error"}else{"stopped"},"source_name":"Pluto channelized RIQ1","center_hz":json!(app.calibration.true_hz(e.source["input_center_hz"].as_f64().unwrap_or(0.))),"center_reading_hz":number(&e.source["input_center_hz"]),"rate_hz":number(&e.source["input_rate_hz"]),"bandwidth_hz":number(&e.source["input_bandwidth_hz"]),"generation":e.generation,"channels":e.channels.values().map(|c| with_user(c, &e.store.user)).collect::<Vec<_>>(),"received_seconds":position,"source_position_s":position,"decode_latency_s":latency,"dropped_batches":e.drops,"processed_batches":e.frames,"queue_depth":number(&e.source["queue_depth"]),"error":e.error,"decoder_error":null,"started_at":e.started,"last_samples_at":e.source["last_samples_at"],"continuity":"transport sequence checked; hardware continuity unknown","decoder_capacity":app.max_decoders,"calibration_ppm":app.calibration.ppm,"labels_loaded":app.labels.len(),"listeners":e.listeners.len(),"persistence":{"enabled":e.store.persistent(),"write_errors":e.store.io_errors()},"link":e.link.to_json(now_s()),"receiver":receiver,"source":source})
 }
 async fn status(State(app): State<App>) -> Json<Value> {
     Json(status_json(&app))

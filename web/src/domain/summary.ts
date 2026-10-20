@@ -54,7 +54,7 @@ export function headline(
   health: Health,
   now: number,
 ): { lead: string; context: string } {
-  if (health.state === "offline") return { lead: "The radio isn't connected.", context: health.detail };
+  if (health.state === "offline") return { lead: health.lead ?? "The radio isn't connected.", context: health.detail };
   if (health.state === "paused") return { lead: "The radio is paused.", context: health.detail };
 
   const talking = sources.filter((s) => s.talking);

@@ -218,9 +218,66 @@ export function rankSources(sources: Source[], followed: ReadonlySet<string>): S
   });
 }
 
+/** Why the receiver is away, in words for the household, from what the supervisor reported. */
+function receiverReason(receiver: EngineStatus["receiver"]): string | null {
+  if (!receiver) return null;
+  // A borrowed or cleanly stopped supervisor writes its status once and goes quiet: the age of
+  // that file says nothing about whether it is alive.
+  if (receiver.state === "borrowed") return "The receiver is being used for a test and comes back when that's done.";
+  if (receiver.state === "stopped") return "The receiver has been switched off for maintenance.";
+  if (receiver.fresh === false)
+    return "The program that keeps the receiver running isn't running, so nothing will restart it until it is.";
+  switch (receiver.state) {
+    case "starting":
+    case "running":
+      return "The receiver is starting up.";
+    case "waiting":
+      switch (receiver.reason) {
+        case "lock-held":
+          return "The receiver is being used for a test and comes back when that's done.";
+        case "wrong-image":
+          return "The receiver is running different software for a test. It comes back when that's finished.";
+        case "unreachable":
+          return "The receiver box isn't answering. Check that it's powered and plugged in.";
+        case "producer-failed":
+          return "The receiver's software stopped and is restarting.";
+        case "radio-state":
+          return "The receiver is in an unexpected state, so it's waiting.";
+      }
+  }
+  return null;
+}
+
+function duration(seconds: number): string {
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  return minutes % 60 === 0 ? `${hours} h` : `${hours} h ${minutes % 60} min`;
+}
+
+/** After this long without the receiver the page stops calling it a blip. */
+const LONG_OUTAGE_S = 600;
+
 export function healthOf(status: EngineStatus | undefined, connected: boolean): Health {
   if (!status)
     return { state: "offline", detail: "Can't reach the radio. Check that the receiver box is on.", raw: null };
+  const link = status.link;
+  // "connected" is only the TCP link: until the first CONFIG arrives the engine is still not receiving.
+  if (link?.mode === "tcp" && (link.state !== "connected" || status.state !== "receiving")) {
+    const reason = receiverReason(status.receiver);
+    const away = link.offline_s ?? 0;
+    const detail =
+      away >= LONG_OUTAGE_S
+        ? `The receiver has been offline for ${duration(away)}. Nothing new is coming in; you're seeing what it heard earlier.${reason ? ` ${reason}` : ""}`
+        : (reason ?? "It usually comes back by itself within a minute.");
+    return {
+      state: "offline",
+      lead: "Receiver offline, reconnecting.",
+      reconnecting: true,
+      detail,
+      raw: link.last_error ?? status.error ?? null,
+    };
+  }
   if (status.state === "receiving" && status.mode === "live")
     return connected
       ? { state: "listening", detail: "The radio is on and listening." }
