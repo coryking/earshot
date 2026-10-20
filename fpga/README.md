@@ -206,7 +206,7 @@ For a direct maintenance preflight, with no service owning Pluto:
 
 ```sh
 B=~/.cache/amateur-radio-fpga/release/pluto_chan-8cea8ae
-fpga/sw/ensure_pluto_fpga.sh "$B/system_top.bit.bin" ~/.cache/amateur-radio-fpga/sw/chanctl
+fpga/sw/ensure_pluto_fpga.sh "$B/system_top.bit.bin" "$B/chanctl"
 ```
 
 This preflight is idempotent. It refuses DMA if the reservation is missing and

@@ -282,7 +282,7 @@ module tb_chan;
     for (int w = 0; w < 16; w++) axi_write(reg_addr('h40 + w), mask_words[w]);
   endtask
 
-  task automatic wait_frame_counter(input int target);
+  task automatic wait_frames(input int target);
     logic [31:0] v, prev;
     int still = 0;
     prev = 0;
@@ -299,11 +299,6 @@ module tb_chan;
       end
       prev = v;
     end
-  endtask
-
-  task automatic wait_frames(input int target);
-    logic [31:0] v;
-    wait_frame_counter(target);
     // let the packetizer finish and the output FIFOs drain to the (slow) sinks
     for (int i = 0; i < 2000; i++) begin
       repeat (1000) @(posedge clk);
@@ -324,7 +319,7 @@ module tb_chan;
   task automatic snapshot_check();
     logic [31:0] v, sf, expected;
     int bad = 0;
-    wait_frame_counter(snapshot_at);
+    wait_frames(snapshot_at);
     axi_write(reg_addr('h22), 1);
     do begin
       repeat (500) @(posedge clk);
@@ -432,14 +427,14 @@ module tb_chan;
     feed_go = 1;
 
     if (det_reset_at > 0) begin
-      wait_frame_counter(det_reset_at);
+      wait_frames(det_reset_at);
       axi_write(reg_addr(4), 32'h1F);              // DET_RESET pulse while running
       check_reg(4, "control", 32'hF);
     end
 
     if (reset_at_frame > 0) begin
       // (1) soft stop while the packetizer is mid-record: the record must complete
-      wait_frame_counter(reset_at_frame);
+      wait_frames(reset_at_frame);
       wait (dut.i_pack.busy && dut.i_pack.hist_go && dut.i_pack.b > 100);
       axi_write(reg_addr(4), 32'h6);
       repeat (3000) @(posedge clk);
