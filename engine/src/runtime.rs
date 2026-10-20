@@ -52,7 +52,7 @@ pub struct VoiceSettings {
 impl Default for VoiceSettings {
     fn default() -> Self {
         Self {
-            vocoder: Vocoder::Neo,
+            vocoder: Vocoder::Ambe,
             post: VoiceConfig::default(),
         }
     }

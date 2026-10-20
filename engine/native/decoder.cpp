@@ -1,4 +1,8 @@
-// C ABI adapter to GPLv3 DSDcc + ISC mbelib. No algorithm reimplementation.
+// C ABI adapter to GPLv3 DSDcc + ISC mbelib. No algorithm reimplementation here.
+//
+// DSDcc does sync, FEC and descrambling. The AMBE+2 49 data bits -> 8 kHz PCM step is either
+// mbelib's (inside DSDcc) or, when the caller passes a vocoder callback, the engine's own
+// decoder (src/ambe, called back through the hook in patches/dsdcc-ambe-vocoder-hook.patch).
 #include "dsd_decoder.h"
 #include <unistd.h>
 #include <fcntl.h>
@@ -13,7 +17,7 @@ struct Codec {
     std::vector<short> audio;
     std::vector<short> audio_b;
     std::string diagnostics;
-    explicit Codec(int protocol, int selected_slot): slot(selected_slot) {
+    Codec(int protocol, int selected_slot, DSDcc::DSDMBEDecoder::Ambe2450Vocoder vocoder, void *context): slot(selected_slot) {
         int fd[2];
         if (pipe(fd) != 0) throw 1;
         read_fd = fd[0];
@@ -27,6 +31,7 @@ struct Codec {
         d.enableMbelib(true); d.enableAudioOut(true); d.setUpsampling(1);
         d.setStereo(false); d.setTDMAStereo(false);
         d.setAudioGain(1.0); d.enableCosineFiltering(true);
+        if (vocoder) d.setAmbe2450Vocoder(vocoder, context);
     }
     ~Codec() { if (read_fd >= 0) close(read_fd); }
     void drain() {
@@ -38,7 +43,10 @@ struct Codec {
     }
 };
 extern "C" {
-void *radio_codec_new(int protocol, int slot) { try { return new Codec(protocol,slot); } catch(...) { return nullptr; } }
+// `vocoder` (nullable) replaces mbelib's AMBE+2 synthesis; `context` is passed back to it.
+void *radio_codec_new(int protocol, int slot, DSDcc::DSDMBEDecoder::Ambe2450Vocoder vocoder, void *context) {
+    try { return new Codec(protocol, slot, vocoder, context); } catch(...) { return nullptr; }
+}
 void radio_codec_free(void *p) { delete static_cast<Codec*>(p); }
 // One DSDcc DMR instance decodes both TDMA slots; audio for slot 1 and slot 2 is returned
 // separately. NXDN only produces slot 1.

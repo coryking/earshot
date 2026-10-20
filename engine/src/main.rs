@@ -11,12 +11,12 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-/// Voice synthesis and post-processing. The defaults are the shipped profile (DESIGN-VOCODER.md).
+/// Voice synthesis and post-processing. The defaults are the shipped profile (src/ambe/DESIGN.md).
 #[derive(clap::Args, Clone)]
 struct VoiceArgs {
-    /// AMBE+2 voice decoder: neo (mbelib-neo, the default) or mbelib (the original, for A/B
-    /// and rollback).
-    #[arg(long, default_value = "neo")]
+    /// AMBE+2 voice decoder: ambe (the native port of the MD-380 firmware decoder, the
+    /// default) or mbelib (the original open decoder, for A/B and rollback).
+    #[arg(long, default_value = "ambe")]
     vocoder: Vocoder,
     /// Voice post-processing: high-pass, presence EQ, level normalization (on|off).
     #[arg(long, default_value = "on", value_parser = ["on", "off"])]
@@ -38,11 +38,6 @@ struct VoiceArgs {
     /// Enable the noise gate: closes when audio is this many dB below the talker's level.
     #[arg(long)]
     voice_gate_db: Option<f64>,
-    /// DEV-ONLY (md380-oracle builds, `probe` only): directory the MD380 oracle was installed to
-    /// by oracle/fetch-md380.sh (default: engine/.native-md380).
-    #[cfg(feature = "md380-oracle")]
-    #[arg(long)]
-    oracle_dir: Option<std::path::PathBuf>,
 }
 impl VoiceArgs {
     fn voice_config(&self) -> Result<VoiceConfig> {
@@ -152,11 +147,6 @@ async fn main() -> Result<()> {
             wav,
             voice,
         } => {
-            #[cfg(feature = "md380-oracle")]
-            if voice.vocoder == Vocoder::Md380 {
-                radio_engine::oracle::load(&voice.oracle_dir.clone().unwrap_or_else(radio_engine::oracle::default_dir))
-                    .map_err(|e| anyhow::anyhow!("MD380 oracle: {e}"))?;
-            }
             let options = DecoderOptions {
                 vocoder: voice.vocoder,
                 voice: voice.voice_config()?,
@@ -223,11 +213,6 @@ async fn main() -> Result<()> {
         } => {
             let voice_post = voice.voice_config()?;
             let vocoder = voice.vocoder;
-            #[cfg(feature = "md380-oracle")]
-            anyhow::ensure!(
-                vocoder != Vocoder::Md380,
-                "the MD380 oracle is a test-only tool and cannot serve"
-            );
             eprintln!(
                 "voice: vocoder {}; post-processing {}",
                 vocoder.name(),
