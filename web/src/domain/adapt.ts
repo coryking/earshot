@@ -296,6 +296,8 @@ const LONG_OUTAGE_S = 600;
 export function healthOf(status: EngineStatus | undefined, connected: boolean): Health {
   if (!status)
     return { state: "offline", detail: "Can't reach the radio.", raw: null };
+  if (status.receiver?.fresh === true && status.receiver.state === "stopped" && status.receiver.reason === "operator")
+    return { state: "paused", detail: "Receiving stopped. Start receiving to resume." };
   const link = status.link;
   // "connected" is only the TCP link: until the first CONFIG arrives the engine is still not receiving.
   if (link?.mode === "tcp" && (link.state !== "connected" || status.state !== "receiving")) {

@@ -33,5 +33,19 @@ lives): `state` (`starting`, `running`, `waiting`, `stopped`), `reason`
 `offload/radio-borrow` writes the same file with `state: "borrowed"` while a borrower runs.
 `SIGTERM` stops the producer, verifies the restore and exits; the unit allows 150 s.
 
+The browser's **Start receiving / Stop receiving** uses `POST /api/receiver` on the engine.
+The engine atomically saves `{"receiving":false}` or `true` beside the status file,
+with extension `.control.json` (for `receiver.json`, `receiver.control.json`). Missing means
+receiving is enabled; unreadable or malformed means disabled. The supervisor checks this
+intent while running and between retries. Stop closes the engine's connection gate, stops
+the producer, verifies restoration, releases the lock, and stays at `stopped/operator`.
+Start goes through the normal lock, snapshot and producer startup path. The file survives
+service restarts; if its directory is under `/run`, it does not survive a host reboot.
+
+Status advertises `control_supported: true` and `receiving_requested`. A successful control
+request means intent was saved, so the UI waits for fresh samples after Start or
+`stopped/operator` with restoration readback after Stop. The old `POST /api/stop` remains a
+single producer-session stop and can still be restarted by the supervisor.
+
 The SSH password is `PLUTO_SSH_PASSWORD` or the ADI factory default; it travels in the `SSHPASS`
 environment of the child process only.

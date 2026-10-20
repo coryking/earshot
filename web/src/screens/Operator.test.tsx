@@ -15,7 +15,10 @@ it("keeps repeated Listen armed, disables unsupported window changes, and stops 
     source: { ...snapshot.source, capabilities: { configure_supported: false } } });
   const monitor = vi.spyOn(backend, "monitor").mockResolvedValue();
   vi.spyOn(backend, "listen").mockReturnValue({ close() {} });
-  const stop = vi.spyOn(backend, "stopReceiver").mockResolvedValue("Receive session stopped.");
+  const stop = vi.spyOn(backend, "stopReceiver").mockImplementation(async () => {
+    Object.assign(snapshot.receiver!, { state: "stopped", reason: "operator", receiving_requested: false });
+    return "Receiving stopped.";
+  });
   render(<Providers backend={backend}><OperatorScreen /></Providers>);
   const user = userEvent.setup();
   await waitFor(() => expect(screen.getByRole("textbox", { name: "Center MHz" })).toBeDisabled());
@@ -28,9 +31,7 @@ it("keeps repeated Listen armed, disables unsupported window changes, and stops 
   await user.click(screen.getByRole("button", { name: "Listen" }));
   await waitFor(() => expect(backend.tune).toHaveBeenCalledTimes(1));
   expect(monitor).not.toHaveBeenCalledWith(null);
-  await user.click(screen.getByRole("button", { name: "Stop receiver…" }));
-  expect(await screen.findByText(/A supervisor may start receiving again automatically/)).toBeVisible();
-  await user.click(screen.getByRole("button", { name: "Stop receiver" }));
+  await user.click(screen.getByRole("button", { name: "Stop receiving" }));
   await waitFor(() => expect(stop).toHaveBeenCalledOnce());
   expect(monitor).toHaveBeenLastCalledWith(null);
   expect(monitor.mock.invocationCallOrder.at(-1)).toBeLessThan(stop.mock.invocationCallOrder[0]);

@@ -53,6 +53,8 @@ export interface Backend {
   downloadIq?(channelId: string): Promise<Blob>;
   /** Operator: stop the receiver (not just the listener). */
   stopReceiver(): Promise<string>;
+  /** Persist desired receiving state through the supervisor; samples/restoration confirm it. */
+  startReceiver?(): Promise<string>;
   /** Operator: retune via POST /api/source. */
   configureSource(config: { centerHz: number; rateHz: number; bandwidthHz: number }): Promise<string>;
   blocks(): Promise<WireBlocks | null>;

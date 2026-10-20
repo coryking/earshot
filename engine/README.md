@@ -414,9 +414,15 @@ covers a wider span.
 The Listen and Tune forms and channel rows keep the selected channel armed;
 Stop ends playback. A producer that advertises
 `configure_supported: false` disables the browser's receive-window form; change
-its startup settings instead. Operator receiver stop ends the current receive
-session and stops this browser's player. A supervisor may start RX again, so this
-is not a persistent service stop.
+its startup settings instead. **Start receiving / Stop receiving** in the header and Operator tools controls receiver
+acquisition for everyone. Stop also stops this browser's player. The engine's
+`POST /api/receiver {"receiving":false}` saves supervisor intent beside the receiver status
+file; `true` resumes through normal supervisor startup. The supervisor advertises
+`receiver.control_supported` and `receiving_requested` in status. A stale or older supervisor
+returns 501 instead of claiming success. An accepted request is pending until status confirms
+fresh samples after Start, or `stopped/operator` and restoration readback after Stop.
+Intent survives service restarts (see `supervisor/README.md` for the control file).
+The legacy `POST /api/stop` still stops one producer session and may be restarted.
 
 Both spectrum endpoints use the producer's `psd.center_hz` and `psd.span_hz`, with
 legacy input-center/bandwidth fallback. Center and span share the channel-marker

@@ -68,6 +68,8 @@ export const engineReceiverSchema = z.looseObject({
   /** False when the status file is old, meaning the supervisor is not running. */
   fresh: bool,
   last_restore: str,
+  control_supported: bool,
+  receiving_requested: bool,
 });
 export type EngineReceiver = z.infer<typeof engineReceiverSchema>;
 

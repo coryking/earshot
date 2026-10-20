@@ -7,16 +7,7 @@ import { navigate, useNow } from "@/app/ui";
 import { usePlayerInstance } from "@/app/player-context";
 import { useSaveLabel } from "@/components/Sheets";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogClose,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
+import { ReceiverControls } from "@/components/ReceiverControls";
 import { Input } from "@/components/ui/input";
 import { formatMHz } from "@/domain/adapt";
 import type { Need } from "@/backend/types";
@@ -98,17 +89,6 @@ export function OperatorScreen() {
   const capabilities = s?.source?.capabilities;
   const canConfigure = !(capabilities && typeof capabilities === "object"
     && "configure_supported" in capabilities && capabilities.configure_supported === false);
-  const stop = useMutation({
-    mutationFn: async () => {
-      await player.stop();
-      return backend.stopReceiver();
-    },
-    onSuccess: (message) => {
-      toast.success(message);
-      void client.invalidateQueries({ queryKey: keys.status });
-    },
-    onError: (e) => toast.error(e instanceof Error ? e.message : "Stop failed"),
-  });
 
   return (
     <div className="mx-auto max-w-5xl space-y-4 px-4 pt-3 pb-8">
@@ -171,33 +151,7 @@ export function OperatorScreen() {
               Apply (waits for the producer's acknowledgement)
             </Button>
           </form>
-          <Dialog>
-            <DialogTrigger asChild>
-              <Button variant="outline" className="mt-3 h-10 w-full border-destructive/60 text-destructive hover:bg-destructive/10">
-                Stop receiver…
-              </Button>
-            </DialogTrigger>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Stop this receive session?</DialogTitle>
-                <DialogDescription>
-                  Stops your listening and asks the producer to stop RX and restore its settings.
-                  A supervisor may start receiving again automatically. Your player stays stopped;
-                  use the player's Stop button when you only want to stop listening.
-                </DialogDescription>
-              </DialogHeader>
-              <DialogFooter>
-                <DialogClose asChild>
-                  <Button variant="outline">Cancel</Button>
-                </DialogClose>
-                <DialogClose asChild>
-                  <Button variant="outline" className="border-destructive/60 text-destructive" onClick={() => stop.mutate()}>
-                    Stop receiver
-                  </Button>
-                </DialogClose>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+          <div className="mt-4"><ReceiverControls details /></div>
           <details className="mt-3 text-sm">
             <summary className="cursor-pointer text-muted-foreground">Producer CONFIG readback</summary>
             <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-secondary p-2 text-xs">

@@ -462,6 +462,35 @@ async fn configure_source(State(app): State<App>, Json(config): Json<Value>) -> 
     }
     source_request(&app,json!({"action":"configure","input_center_hz":center,"input_rate_hz":rate,"input_bandwidth_hz":bandwidth})).await
 }
+#[derive(Deserialize)]
+struct ReceiverControl {
+    receiving: bool,
+}
+
+/// Durable supervisor intent, separate from the legacy producer-session STOP.
+async fn receiver_control(State(app): State<App>, Json(control): Json<ReceiverControl>) -> ApiResult {
+    let receiver = app.receiver_status();
+    if !receiver.as_ref().is_some_and(|s| s["fresh"] == true && s["control_supported"] == true) {
+        return Err(api_error(StatusCode::NOT_IMPLEMENTED,
+            "Receiver start/stop requires a running supervisor with receiver control support."));
+    }
+    let path = app.receiver_file.as_ref().unwrap().with_extension("control.json");
+    let tmp = path.with_extension(format!("tmp-{}-{}", std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()));
+    let write = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(json!({"receiving": control.receiving}).to_string().as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, &path)
+    })();
+    if let Err(error) = write {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Cannot save receiver request: {error}")));
+    }
+    Ok(Json(json!({"status": "requested", "receiving": control.receiving})))
+}
+
 async fn stop(State(app): State<App>) -> ApiResult {
     let supported = {
         let mut e = app.engine();
@@ -809,6 +838,7 @@ pub fn router(app: App, web_dir: Option<PathBuf>) -> Router {
         .route("/api/iq/{id}", get(iq_status))
         .route("/api/iq/{id}/capture.sigmf", get(iq_download))
         .route("/api/stop", post(stop))
+        .route("/api/receiver", post(receiver_control))
         .route("/api/source", post(configure_source))
         .route("/api/spectrum", get(spectrum))
         .route("/api/spectrum.bin", get(spectrum_bin))
@@ -1235,6 +1265,39 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.0, StatusCode::NOT_IMPLEMENTED);
     }
+    #[tokio::test]
+    async fn receiver_control_requires_fresh_capability_and_persists_intent_without_starting_audio() {
+        let app = App::new(3);
+        assert_eq!(receiver_control(State(app), Json(ReceiverControl { receiving: false })).await.unwrap_err().0,
+            StatusCode::NOT_IMPLEMENTED);
+        let dir = std::env::temp_dir().join(format!("receiver-control-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let status = dir.join("receiver.json");
+        let control = status.with_extension("control.json");
+        let app = App::configured(crate::runtime::AppConfig {
+            receiver_status: Some(status.clone()), ..crate::runtime::AppConfig::new(3)
+        });
+        for content in [json!({"state":"running"}), json!({"state":"running","control_supported":false})] {
+            std::fs::write(&status, content.to_string()).unwrap();
+            assert_eq!(receiver_control(State(app.clone()), Json(ReceiverControl { receiving: false })).await.unwrap_err().0,
+                StatusCode::NOT_IMPLEMENTED);
+            assert!(!control.exists());
+        }
+        std::fs::write(&status, json!({"state":"running","control_supported":true}).to_string()).unwrap();
+        for receiving in [false, true, false] {
+            let result = receiver_control(State(app.clone()), Json(ReceiverControl { receiving })).await.unwrap();
+            assert_eq!(result.0["status"], "requested");
+            assert_eq!(serde_json::from_str::<Value>(&std::fs::read_to_string(&control).unwrap()).unwrap()["receiving"], receiving);
+            assert!(app.engine().selected.is_none());
+        }
+        let file = std::fs::File::open(&status).unwrap();
+        file.set_modified(UNIX_EPOCH + Duration::from_secs(1)).unwrap();
+        assert_eq!(receiver_control(State(app), Json(ReceiverControl { receiving: true })).await.unwrap_err().0,
+            StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "no leftover temporary control files");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn stop_ack_is_independent_of_configure_capability() {
         let app = App::new(3);

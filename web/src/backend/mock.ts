@@ -473,6 +473,9 @@ export class MockBackend implements Backend {
       decoder_error: null,
       started_at: null,
       last_samples_at: this.now() / 1000,
+      receiver: { state: this.state === "receiving" ? "running" : "stopped", reason: this.state === "receiving" ? null : "operator",
+        detail: null, fresh: true, control_supported: true, receiving_requested: this.state === "receiving",
+        last_restore: "verified: demo receiver stopped" },
       continuity: "demo",
       decoder_capacity: 8,
       // The demo stands in for a calibrated detector, so encrypted carriers count as calls.
@@ -535,6 +538,12 @@ export class MockBackend implements Backend {
     for (const id of [...this.live.keys()]) this.endCall(id, this.now());
     this.emit({ type: "source_state", state: "stopped", error: null, generation: this.generation });
     return "Demo receiver stopped.";
+  }
+
+  async startReceiver() {
+    this.state = "receiving";
+    this.emit({ type: "source_state", state: "receiving", error: null, generation: this.generation });
+    return "Demo receiver started.";
   }
 
   async configureSource(): Promise<string> {

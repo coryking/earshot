@@ -588,6 +588,15 @@ impl Env for RealEnv {
     fn stopping(&self) -> bool {
         STOP.load(Ordering::SeqCst)
     }
+    fn receiving_enabled(&self) -> bool {
+        let path = self.status_file.with_extension("control.json");
+        match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str::<Value>(&text).ok()
+                .and_then(|v| v["receiving"].as_bool()).unwrap_or(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(_) => false,
+        }
+    }
     fn publish(&mut self, status: &Value) {
         if let Err(e) = self.write_status(status) {
             eprintln!("cannot write {}: {e}", self.status_file.display());
@@ -660,6 +669,23 @@ mod tests {
         assert_eq!(producer_args(&args).unwrap(), "--port 9010 --center 460000000 --gain 40 --forward-streams 1");
         let bad = Args::parse_from(["x", "--binary", "/b", "--status-file", "/s", "--forward", "1;reboot"]);
         assert!(producer_args(&bad).is_err());
+    }
+
+    #[test]
+    fn receiving_intent_survives_a_new_environment_and_invalid_files_fail_closed() {
+        let dir = std::env::temp_dir().join(format!("supervisor-control-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let status_file = dir.join("receiver.json");
+        let control = status_file.with_extension("control.json");
+        let env = || RealEnv { status_file: status_file.clone(), engine: None, logged: None };
+        assert!(env().receiving_enabled());
+        std::fs::write(&control, r#"{"receiving":false}"#).unwrap();
+        assert!(!env().receiving_enabled(), "a restarted supervisor retains stop");
+        std::fs::write(&control, "broken").unwrap();
+        assert!(!env().receiving_enabled());
+        std::fs::write(&control, r#"{"receiving":true}"#).unwrap();
+        assert!(env().receiving_enabled());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -237,6 +237,13 @@ describe("health and preferences", () => {
     });
   });
 
+  it("shows an intentional receiver stop without claiming it is reconnecting", () => {
+    const status = { ...base, mode: "disconnected", state: "stopped",
+      receiver: { fresh: true, state: "stopped", reason: "operator" },
+      link: { mode: "tcp", state: "waiting", offline_s: 900 } } as unknown as Parameters<typeof healthOf>[0];
+    expect(healthOf(status, true)).toEqual({ state: "paused", detail: "Receiving stopped. Start receiving to resume." });
+  });
+
   it("says plainly that the receiver is offline and retrying, and for how long", () => {
     const down = (link: object, receiver: object | null = null) =>
       ({ ...base, state: "error", mode: "disconnected", error: "RIQ source disconnected", link: { mode: "tcp", state: "reconnecting", ...link }, receiver }) as unknown as Parameters<typeof healthOf>[0];

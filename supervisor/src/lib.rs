@@ -116,6 +116,8 @@ pub trait Env {
     fn sleep(&mut self, duration: Duration);
     /// A stop was requested (SIGTERM/SIGINT).
     fn stopping(&self) -> bool;
+    /// Operator intent, retained independently of producer crashes and service restarts.
+    fn receiving_enabled(&self) -> bool { true }
     fn publish(&mut self, status: &Value);
     /// Age in seconds of the newest data the engine has received, or `None` when the engine
     /// cannot be asked (not running, not configured): then there is no verdict either way.
@@ -221,6 +223,11 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
     /// final `stopped` status written.
     pub fn run(&mut self) {
         while !self.env.stopping() {
+            if !self.env.receiving_enabled() {
+                self.set("stopped", Some("operator"), "Receiving is stopped. Start receiving to resume.", None);
+                self.env.sleep(self.policy.poll);
+                continue;
+            }
             if !self.lock.try_acquire() {
                 self.set(
                     "waiting",
@@ -286,6 +293,9 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
         if self.env.stopping() {
             return Next::Stop;
         }
+        if !self.env.receiving_enabled() {
+            return Next::Retry(Duration::ZERO);
+        }
         let before = match self.radio.snapshot() {
             Ok(s) => s,
             Err(e) => return self.unreachable_now(&e),
@@ -304,6 +314,9 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
         }
         if self.env.stopping() {
             return Next::Stop;
+        }
+        if !self.env.receiving_enabled() {
+            return Next::Retry(Duration::ZERO);
         }
         self.deployed = true;
         let mut running = match self.radio.start() {
@@ -328,7 +341,7 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
         let mut last_health = started;
         let mut stale_polls = 0u32;
         let ended = loop {
-            if self.env.stopping() {
+            if self.env.stopping() || !self.env.receiving_enabled() {
                 // Close the engine's gate before the producer goes away.
                 self.set("starting", None, "Stopping and putting the radio back.", None);
                 break (running.stop(), "asked to stop");
@@ -373,6 +386,9 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
         self.last_restore = Some(restore.describe());
         if stopping {
             return Next::Stop;
+        }
+        if !self.env.receiving_enabled() {
+            return Next::Retry(Duration::ZERO);
         }
         // A run that never delivered data does not count as healthy, however long it lasted.
         if ran >= self.policy.stable_run.as_secs_f64() && why != "no data arriving" {
@@ -425,7 +441,7 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
 
     fn nap(&mut self, total: Duration) {
         let mut left = total;
-        while !left.is_zero() && !self.env.stopping() {
+        while !left.is_zero() && !self.env.stopping() && self.env.receiving_enabled() {
             let slice = left.min(Duration::from_millis(200));
             self.env.sleep(slice);
             left -= slice;
@@ -438,6 +454,8 @@ impl<R: Radio, L: Lock, E: Env> Supervisor<R, L, E> {
         self.last_publish = now;
         let status = json!({
             "state": self.state,
+            "control_supported": true,
+            "receiving_requested": self.env.receiving_enabled(),
             "reason": self.reason,
             "detail": self.detail,
             "since": self.since,
@@ -481,6 +499,8 @@ mod tests {
         start_errors: u32,
         /// Seconds the snapshot call takes (a slow Pluto).
         snapshot_takes: f64,
+        /// Half-open intervals during which operator receiving is disabled.
+        paused: Vec<(f64, f64)>,
     }
     type Shared = Rc<RefCell<World>>;
 
@@ -594,6 +614,10 @@ mod tests {
             let w = self.0.borrow();
             w.stop_after.is_some_and(|t| w.now >= t)
         }
+        fn receiving_enabled(&self) -> bool {
+            let w = self.0.borrow();
+            !w.paused.iter().any(|(start, end)| w.now >= *start && w.now < *end)
+        }
         fn publish(&mut self, status: &Value) {
             self.0.borrow_mut().statuses.push(status.clone());
         }
@@ -634,6 +658,32 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn operator_stop_restores_and_stays_stopped_until_start() {
+        let mut w = world(20.);
+        w.paused = vec![(3., 12.)];
+        let (mut sup, shared) = rig(w);
+        sup.run();
+        let w = shared.borrow();
+        assert_eq!(count(&w, "start"), 2, "one initial start and one explicit resume: {:?}", w.calls);
+        let paused: Vec<_> = w.statuses.iter().filter(|s| s["reason"] == "operator").collect();
+        assert!(!paused.is_empty());
+        assert!(paused.iter().all(|s| s["receiving_requested"] == false && s["last_restore"].as_str().unwrap().starts_with("verified")));
+        assert!(w.statuses.iter().filter(|s| s["state"] == "running").all(|s| {
+            let t = s["updated"].as_f64().unwrap();
+            t < 3. || t >= 12.
+        }));
+    }
+
+    #[test]
+    fn stopped_intent_at_start_does_not_acquire_or_touch_the_radio() {
+        let mut w = world(8.);
+        w.paused = vec![(0., 100.)];
+        let (mut sup, shared) = rig(w);
+        sup.run();
+        assert!(shared.borrow().calls.is_empty());
     }
 
     #[test]

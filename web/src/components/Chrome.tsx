@@ -1,9 +1,10 @@
 import { Bell, BellRing, Clock3, Command as CommandIcon, Radio, SlidersHorizontal } from "lucide-react";
 import { navigate, openSheet, paletteStore, useRoute, type Route } from "@/app/ui";
 import { Button } from "@/components/ui/button";
+import { ReceiverControls } from "@/components/ReceiverControls";
 import { cn } from "@/lib/utils";
 import { usePrefs } from "@/state/prefs";
-import { useBackend, useHealth } from "@/state/radio";
+import { useBackend, useHealth, useStatus } from "@/state/radio";
 
 const dot = {
   listening: "bg-ok",
@@ -20,6 +21,9 @@ function wordFor(health: ReturnType<typeof useHealth>): string {
 /** Status dot (tap for status) and the alerts bell. Desktop adds tabs and the palette. The area name is the Now title. */
 export function Header({ wide }: { wide: boolean }) {
   const health = useHealth();
+  const status = useStatus();
+  const stopped = status.data?.receiver?.reason === "operator" && status.data.receiver.state === "stopped";
+  const statusWord = stopped ? "Receiver stopped" : wordFor(health);
   const { alertFollowed, alertBusy } = usePrefs();
   const backend = useBackend();
   const alerts = alertFollowed || alertBusy;
@@ -29,11 +33,12 @@ export function Header({ wide }: { wide: boolean }) {
         type="button"
         onClick={() => openSheet({ type: "status" })}
         className="flex min-h-11 items-center gap-2 rounded-lg px-2"
-        aria-label={`Radio status: ${wordFor(health)}`}
+        aria-label={`Radio status: ${statusWord}`}
       >
-        <span className={cn("size-2.5 rounded-full", dot[health.state])} aria-hidden />
-        <span className="text-sm whitespace-nowrap text-muted-foreground">{wordFor(health)}</span>
+        <span className={cn("size-2.5 rounded-full", stopped ? dot.paused : dot[health.state])} aria-hidden />
+        <span className="hidden text-sm whitespace-nowrap text-muted-foreground sm:inline">{statusWord}</span>
       </button>
+      <ReceiverControls />
       {backend.mode === "demo" && (
         <span className="ml-1 shrink-0 rounded-full border border-signal/50 px-2 py-0.5 text-xs text-signal">Demo</span>
       )}
