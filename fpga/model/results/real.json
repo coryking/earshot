@@ -1,7 +1,7 @@
 {
   "seconds": 0.1,
   "frames": 10005,
-  "elapsed_s": 22.794110536575317,
+  "elapsed_s": 10.85035228729248,
   "input_rms_adc": 308.0291008383048,
   "input_peak_adc": 1868.0,
   "bins_evaluated": 381,
@@ -10,10 +10,10 @@
     16.71350819640692,
     43.10480555584614
   ],
-  "core_error_rel_db_worst_bin": -67.84610516588577,
-  "core_snr_loss_db_worst_bin": 7.131382959672857e-07,
-  "out16_error_rel_db_worst_bin": -42.070253081362985,
-  "out16_snr_loss_db_worst_bin": 0.0002696159137359312,
+  "core_error_rel_db_worst_bin": -55.89651896356977,
+  "core_snr_loss_db_worst_bin": 1.1172023906331134e-05,
+  "out16_error_rel_db_worst_bin": -41.89517903185791,
+  "out16_snr_loss_db_worst_bin": 0.0002807064376299777,
   "out16_saturated_samples": 0,
   "bit_exact_fft": true
 }

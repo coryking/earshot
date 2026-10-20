@@ -4,6 +4,6 @@
   "residual_hz": 12225.0,
   "note": "Agreement between PFB+host filter and direct mix+host filter on the same off-air samples; limited by the two resampling paths, not noise.",
   "float_agreement_db": 69.13452603120122,
-  "fixed_agreement_db": 69.13458642392007,
-  "fixed_16bit_agreement_db": 69.07767164859035
+  "fixed_agreement_db": 69.13583677041458,
+  "fixed_16bit_agreement_db": 69.0842885467685
 }

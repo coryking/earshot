@@ -299,8 +299,13 @@ module tb_chan;
       end
       prev = v;
     end
-    // let the output FIFOs drain
-    repeat (20000) @(posedge clk);
+    // let the packetizer finish and the output FIFOs drain to the (slow) sinks
+    for (int i = 0; i < 2000; i++) begin
+      repeat (1000) @(posedge clk);
+      axi_read(reg_addr(5), v);
+      if (v[2:1] == 2'b11 && !v[3]) break;
+    end
+    repeat (200) @(posedge clk);
   endtask
 
   function automatic [15:0] clip_sext(input [15:0] v);
