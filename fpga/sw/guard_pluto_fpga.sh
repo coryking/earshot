@@ -5,7 +5,7 @@ set -euo pipefail
 
 systemctl --user is-active --quiet amateur-radio-live.service || exit 0
 
-PLUTO=${PLUTO:-root@192.168.10.10}
+PLUTO=${PLUTO:-root@pluto.local}
 SSHOPT=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
         -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2
         -o LogLevel=ERROR)

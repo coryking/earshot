@@ -13,7 +13,7 @@ baseband clock/LO are read back and compared. The FIR enables and TX clock are v
 written: the driver keeps the TX clock tied to the RX rate. A mismatch triggers one
 corrective restore through iio_attr and a second readback.
 
-    uv run python offload/capture_wideband.py --uri ip:192.168.10.10 \
+    uv run python offload/capture_wideband.py --uri ip:pluto.local \
         --out output/wideband-iq --buffers 12 --stream-seconds 8
 """
 
@@ -82,7 +82,7 @@ def stats_of(raw: bytes) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    ap.add_argument("--uri", default="ip:192.168.10.10")
+    ap.add_argument("--uri", default="ip:pluto.local")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--rate", type=int, default=25_600_000)
     ap.add_argument("--bandwidth", type=int, default=20_000_000)

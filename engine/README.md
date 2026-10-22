@@ -13,7 +13,7 @@ cd engine
 ./scripts/bootstrap-codecs.sh
 cargo build --release --locked
 ./target/release/radio-engine serve \
-  --source tcp:192.168.10.10:9010 \
+  --source tcp:pluto.local:9010 \
   --web-dir ../web/dist
 ```
 

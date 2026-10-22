@@ -317,7 +317,7 @@ def percentile(values: list[float], q: float) -> float | None:
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    ap.add_argument("--host", default="192.168.10.10")
+    ap.add_argument("--host", default="pluto.local")
     ap.add_argument("--binary", type=Path, required=True, help="ARM pluto-channel-source")
     ap.add_argument("--engine", type=Path, default=Path("engine/target/release/radio-engine"))
     ap.add_argument("--web-dir", type=Path, default=Path("web/dist"))

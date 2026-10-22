@@ -26,7 +26,7 @@ use std::{
 #[derive(Parser, Clone)]
 #[command(about = "Keep the Pluto's channel producer running; restore the radio when it stops. RX only.")]
 struct Args {
-    #[arg(long, default_value = "192.168.10.10")]
+    #[arg(long, default_value = "pluto.local")]
     host: String,
     /// pluto-fpga-source, built by fpga/sw/build.sh. The managed unit first loads
     /// the runtime channelizer PL and checks the DMA reservation (fpga/README.md).
@@ -163,6 +163,7 @@ struct Pluto {
 
 impl Pluto {
     fn new(args: Args, producer_args: String) -> Self {
+        // The shop installs this box's SSH key on the Pluto; the password is only a fallback.
         let password = std::env::var("PLUTO_SSH_PASSWORD").unwrap_or_else(|_| "analog".into());
         Self { args, password, producer_args }
     }
@@ -171,7 +172,7 @@ impl Pluto {
     }
     fn ssh_options() -> [&'static str; 14] {
         [
-            "-o", "PubkeyAuthentication=no",
+            "-o", "PreferredAuthentications=publickey,password",
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
             "-o", "ConnectTimeout=8",

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prepare the current Pluto boot for the FPGA producer. Safe to run again when
-# the channelizer is already loaded; the runtime loader handles USB recovery.
+# the channelizer is already loaded; the runtime loader handles USB recovery
+# when the Pluto is on a USB link.
 #
 #   ensure_pluto_fpga.sh <system_top.bit.bin> <chanctl>
 set -euo pipefail
@@ -17,7 +18,7 @@ if [ "$actual" != "$expected" ]; then
   exit 1
 fi
 
-PLUTO=${PLUTO:-root@192.168.10.10}
+PLUTO=${PLUTO:-root@pluto.local}
 SSHOPT=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
         -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2
         -o LogLevel=ERROR)
@@ -88,7 +89,10 @@ if ! grep -q '"magic":"0x4348414e"' <<< "$info"; then
   echo "Pluto did not return with the channelizer" >&2
   exit 1
 fi
-if [ "$(p cat /sys/kernel/config/usb_gadget/composite_gadget/UDC)" != ci_hdrc.0 ]; then
+# On a USB link the loader must have reattached the gadget. With a device such as
+# a WiFi dongle on the OTG port (role host) there is no gadget.
+if [ "$(p cat /sys/bus/platform/devices/ci_hdrc.0/role)" = gadget ] &&
+   [ "$(p cat /sys/kernel/config/usb_gadget/composite_gadget/UDC)" != ci_hdrc.0 ]; then
   echo "Pluto USB gadget is detached" >&2
   exit 1
 fi

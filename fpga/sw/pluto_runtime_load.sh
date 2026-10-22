@@ -13,7 +13,7 @@
 # Receive settings are saved before and re-applied/read back after. RX only.
 set -euo pipefail
 
-PLUTO=${PLUTO:-root@192.168.10.10}
+PLUTO=${PLUTO:-root@pluto.local}
 LOCK=/tmp/pluto-radio.lock
 STATE=${STATE:-$HOME/.cache/amateur-radio-fpga/pluto-session}
 mkdir -p "$STATE"
@@ -103,6 +103,11 @@ restart_iiod() {
   . /etc/device_config
   start-stop-daemon -S -b -q -m -p /var/run/iiod.pid -x /usr/sbin/iiod -- -D -n \"\$ENDPOINTS\" -F /dev/iio_ffs
 }
+# The gadget exists only while the OTG port faces a USB host. With a device such
+# as a WiFi dongle on that port (role host) the radio is reached over the network
+# and there is no gadget to detach, reattach or wait for.
+gadget=0
+if [ \"\$(cat /sys/bus/platform/devices/ci_hdrc.0/role 2>/dev/null)\" = gadget ]; then gadget=1; fi
 touch /tmp/pl_swap_pending
 # Independent of this script: recover even if a driver operation or USB restart
 # gets stuck. A configured gadget and completed swap are also proof of recovery
@@ -111,7 +116,7 @@ touch /tmp/pl_swap_pending
   sleep 90
   if [ -f /tmp/pl_swap_pending ]; then
     if [ -f /tmp/pl_is_chan ] &&
-       grep -qx configured /sys/class/udc/ci_hdrc.0/state &&
+       { [ \$gadget = 0 ] || grep -qx configured /sys/class/udc/ci_hdrc.0/state; } &&
        grep -q PL_SWAP_DONE /tmp/pl_swap.log; then
       rm -f /tmp/pl_swap_pending
     else
@@ -121,7 +126,7 @@ touch /tmp/pl_swap_pending
   fi
 ) &
 trap 'echo PL_SWAP_FAILED; sync; reboot' EXIT
-echo '' > /sys/kernel/config/usb_gadget/composite_gadget/UDC
+if [ \$gadget = 1 ]; then echo '' > /sys/kernel/config/usb_gadget/composite_gadget/UDC; fi
 killall iiod 2>/dev/null || true
 sleep 1
 killall -TERM pluto-fpga-source chanctl 2>/dev/null || true
@@ -139,7 +144,7 @@ $BIND
 touch /tmp/pl_is_chan
 restart_iiod
 sleep 1
-echo ci_hdrc.0 > /sys/kernel/config/usb_gadget/composite_gadget/UDC
+if [ \$gadget = 1 ]; then echo ci_hdrc.0 > /sys/kernel/config/usb_gadget/composite_gadget/UDC; fi
 trap - EXIT
 echo PL_SWAP_DONE
 EOS
