@@ -33,7 +33,7 @@ Recheck the backup and prepare original DFU files on the Mac:
 
 ```sh
 uv run offload/prepare_recovery.py \
-  /Users/coryking/projects/amateur-radio/output/pluto-backups/20261019T221101Z \
+  /Users/coryking/projects/earshot/output/pluto-backups/20261019T221101Z \
   --yes --json
 ```
 
@@ -99,7 +99,7 @@ firmware payload from the verified backup (the full partition stays useful as
 an archival readback):
 
 ```sh
-cd /Users/coryking/projects/amateur-radio/output/pluto-backups/20261019T221101Z
+cd /Users/coryking/projects/earshot/output/pluto-backups/20261019T221101Z
 cp firmware-original.itb recovery/firmware-original.dfu
 dfu-suffix -a recovery/firmware-original.dfu -v 0456 -p b673
 ```
@@ -108,13 +108,13 @@ Do not download `original-linux.dfu`, the full 30 MiB partition. On this unit it
 failed at 23,044,096 bytes with DFU status 14; the FIT-only payload restored
 successfully. The runtime/DFU ID pair below also accepts the prepared files'
 runtime-ID suffix. These corrections were verified during the recovery in
-[issue #1](https://github.com/coryking/amateur-radio/issues/1#issuecomment-6294107020).
+the original bring-up (tracked privately).
 
 In DFU mode, the following commands restore this unit's original content. They are recovery
 instructions, not a sequence to run for routine experiments:
 
 ```sh
-cd /Users/coryking/projects/amateur-radio/output/pluto-backups/20261019T221101Z/recovery
+cd /Users/coryking/projects/earshot/output/pluto-backups/20261019T221101Z/recovery
 dfu-util -d 0456:b673,0456:b674 -a firmware.dfu -D firmware-original.dfu
 # Restore the following only if their contents were changed/damaged:
 dfu-util -d 0456:b673,0456:b674 -a boot.dfu -D original-boot.dfu

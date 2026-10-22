@@ -1,6 +1,6 @@
 # RF environment: Seattle / King County, WA
 
-Research for the Pluto/AD9363 wideband receiver and the trunk tracker (amateur-radio issue #1).
+Research for the Pluto/AD9363 wideband receiver and the trunk tracker (tracked privately before this repo went public).
 Data retrieved **2026-10-19** (FCC ULS bulk files are dated 2026-10-18; RadioReference pages show "last updated" dates up to 2026-10-18). Branch `rf-research`.
 
 Every number below came from one of the sources in section 11. Anything that is inference, crowd-sourced only, or not cross-checked is marked **[unverified]** or **[inferred]**. Frequencies are in MHz and are *as published or licensed*, not Pluto-corrected (see 6.1 for the Pluto LO error).

@@ -24,7 +24,7 @@ fn main() {
             if root.join(".native/lib").is_dir() {
                 root.join(".native/lib")
             } else {
-                PathBuf::from(env::var("HOME").unwrap()).join("projects/amateur-radio/.tools/lib")
+                PathBuf::from(env::var("HOME").unwrap()).join("projects/earshot/.tools/lib")
             }
         });
     // A worktree may share .native through a symlink. Embed the permanent

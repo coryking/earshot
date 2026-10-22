@@ -1,7 +1,7 @@
 /**
  * Wire types for endpoints the frontend needs but the engine does not serve
- * yet. The contract is written up in engine/README.md § "Frontend needs" and on
- * issue #1. Until the engine answers them, live mode falls back to in-browser
+ * yet. The contract is written up in engine/README.md § "Frontend needs" and in
+ * the private tracker. Until the engine answers them, live mode falls back to in-browser
  * equivalents (the session fallbacks in state/radio.tsx) and demo mode uses the
  * mock. Lists parse per item, so one bad entry never empties a list.
  */

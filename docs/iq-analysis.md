@@ -85,7 +85,7 @@ The live engine does not currently expose the Type-D SCCH metadata demonstrated 
 
 ## Evidence and reproduction
 
-On wigglebutt, captures and outputs are under `/Users/coryking/projects/amateur-radio/`:
+On wigglebutt, captures and outputs are under `/Users/coryking/projects/earshot/`:
 
 - `recordings/mac-downloads-20261020/`: original ten archives, including the off-center 450 ms burst.
 - `recordings/mac-followup-20261020/`: the new 454.3375, 454.2500, and 451.3500 captures.
@@ -98,9 +98,9 @@ Recordings and generated output are ignored by Git. They exist on wigglebutt; th
 The reusable commands are `radio iq-fm`, `radio digital-probe`, and `radio iq-symbols`. Run them from the repository checkout with uv:
 
 ```sh
-uv run radio iq-fm /Users/coryking/projects/amateur-radio/recordings/mac-followup-20261020/iq_454337000Hz.sigmf.tar --target-hz 454337500 --seconds 19.66 -o /tmp/type-d-fm.wav --yes --json
+uv run radio iq-fm /Users/coryking/projects/earshot/recordings/mac-followup-20261020/iq_454337000Hz.sigmf.tar --target-hz 454337500 --seconds 19.66 -o /tmp/type-d-fm.wav --yes --json
 uv run radio digital-probe /tmp/type-d-fm.wav --protocol nxdn48 --json
-uv run radio iq-symbols /Users/coryking/projects/amateur-radio/recordings/mac-downloads-20261020/iq_454306250Hz.sigmf.tar --target-hz 454336927 --start-s 4.2804 --seconds 0.44025 --baud 2400 --json
+uv run radio iq-symbols /Users/coryking/projects/earshot/recordings/mac-downloads-20261020/iq_454306250Hz.sigmf.tar --target-hz 454336927 --start-s 4.2804 --seconds 0.44025 --baud 2400 --json
 ```
 
 Use SigMF capture metadata for the physical center and `--target-hz` for the desired carrier. These files have 100,000 complex samples/s; some initial files have capture discontinuities. The reader rejects a requested segment crossing a capture boundary instead of silently treating a gap as continuous RF.

@@ -12,8 +12,8 @@ is in the main checkout's ignored `.tools/pluto/sysroot-v0.37/staging/`.
 
 ```sh
 offload/arm/build.sh \
-  /Users/coryking/projects/amateur-radio/.tools/pluto/sysroot-v0.37/staging \
-  /Users/coryking/projects/amateur-radio/.tools/pluto/build
+  /Users/coryking/projects/earshot/.tools/pluto/sysroot-v0.37/staging \
+  /Users/coryking/projects/earshot/.tools/pluto/build
 ```
 
 This produces `pluto-pfb` (file/synthetic correctness and compute-only benchmark)

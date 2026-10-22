@@ -387,7 +387,7 @@ npm run build --prefix web
 ## Source synchronization
 
 Source lives in the private [coryking/amateur-radio](https://github.com/coryking/amateur-radio)
-repository. Both the Mac and Wigglebutt use `/Users/coryking/projects/amateur-radio`.
+repository. Both the Mac and Wigglebutt use `/Users/coryking/projects/earshot`.
 Push completed commits to GitHub, then update a clean Wigglebutt checkout with
 `git pull --ff-only`. Keep unfinished work on its own branch/worktree.
 

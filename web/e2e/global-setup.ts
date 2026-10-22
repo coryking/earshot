@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const repo = process.env.RADIO_REPO ?? join(homedir(), "projects/amateur-radio");
+const repo = process.env.RADIO_REPO ?? join(homedir(), "projects/earshot");
 const engine = process.env.RADIO_ENGINE_BIN ?? join(repo, "engine/target/release/radio-engine");
 const ingress = process.env.RADIO_FIXTURE_INGRESS ?? join(repo, "engine/target/release/examples/fixture_ingress");
 const fixture = process.env.RADIO_FIXTURE ?? join(repo, "output/native-handoff/dmr-slot2-25ksps-ci16le.raw");

@@ -274,7 +274,7 @@ engine's wire types (typed in `src/api/engine.ts`, with nulls handled) into it.
 
 The engine today gives live channels, status, global listener selection, live
 PCM audio and JSON spectrum rows. The rest is defined in
-`engine/README.md` § "Frontend needs" and on issue #1. Until the engine
+`engine/README.md` § "Frontend needs" and in the private tracker. Until the engine
 answers those endpoints, live mode uses honest in-browser fallbacks:
 
 - **Names:** labels saved on this device, then starter names from the RF

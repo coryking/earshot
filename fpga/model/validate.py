@@ -33,7 +33,7 @@ from .channelizer import (
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 RESULTS = Path(__file__).with_name("results")
-DATA_ROOT = Path("/Users/coryking/projects/amateur-radio")
+DATA_ROOT = Path("/Users/coryking/projects/earshot")
 FIXTURE = DATA_ROOT / "output/native-handoff/dmr-slot2-25ksps-ci16le.raw"
 SNAPSHOT = DATA_ROOT / "recordings/baseband_454216998Hz_wide-snapshot_20261019T215323Z.wav"
 WIDE30 = DATA_ROOT / "recordings/baseband_454216998Hz_wide-30s_20261019T215324Z.wav"
