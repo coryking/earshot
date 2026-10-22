@@ -1,3 +1,8 @@
 /target/
 /.native/
 /.native-md380/
+
+# Frame corpora cut from off-air captures decode to real transmissions; keep them local.
+tests/data/ambe/fixture.frames
+tests/data/ambe/fixture-concealed.frames
+tests/data/ambe/resets.frames

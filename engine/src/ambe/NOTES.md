@@ -16,9 +16,11 @@ Update the status column as routines land. Addresses are firmware (flash at 0x08
   `capture` records calls of one routine; recordings go in `.native-md380/vectors/<addr>.rec`
   and the `#[cfg(test)]` replay tests in each module consume them (`testvec.rs`).
 - Tables: `scripts/ambe-tables.py` regenerates `tables/*.rs` from `tables/*.spec`.
-- Frame corpora (`tests/data/ambe/`): `fixture.frames` (DSDcc FEC output of the DMR golden
-  fixture, 392 frames), `harvard-00{10,11,30,31}.frames` (Harvard sentences through the MD-380
-  encoder), `random.frames`, `edge.frames` (tone/erasure frames and decoder flag bits).
+- Frame corpora (`tests/data/ambe/`): `harvard-00{10,11,30,31}.frames` (Harvard sentences
+  through the MD-380 encoder), `random.frames`, `edge.frames` (tone/erasure frames and decoder
+  flag bits). `fixture.frames` (DSDcc FEC output of the DMR golden fixture, 392 frames),
+  `fixture-concealed.frames` and `resets.frames` come from an off-air capture, so they are
+  Git-ignored and stay local; the corpus test skips them where they are absent.
 
 ## Entry point and calling convention
 

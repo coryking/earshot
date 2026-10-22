@@ -20,6 +20,10 @@ const EXPECTED: &[(&str, u64)] = &[
     ("harvard-0031", 0x1b6e915e314e1350),
 ];
 
+/// Corpora cut from an off-air capture. They stay local (Git-ignored) because they decode to a
+/// real transmission; the test checks them only where they are present.
+const LOCAL_ONLY: &[&str] = &["fixture", "fixture-concealed", "resets"];
+
 fn fnv1a(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for &b in data {
@@ -31,9 +35,13 @@ fn fnv1a(data: &[u8]) -> u64 {
 
 /// Decode a frame file the way the oracle does: one frame per line, "R" resets, "X <hex> <bits>"
 /// passes decoder flags, '#' comments.
-fn decode_corpus(name: &str) -> Vec<i16> {
+fn decode_corpus(name: &str) -> Option<Vec<i16>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text = std::fs::read_to_string(root.join(format!("tests/data/ambe/{name}.frames"))).unwrap();
+    let path = root.join(format!("tests/data/ambe/{name}.frames"));
+    if LOCAL_ONLY.contains(&name) && !path.is_file() {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).unwrap();
     let mut dec = Decoder::new();
     let mut out = Vec::new();
     for line in text.lines() {
@@ -53,7 +61,7 @@ fn decode_corpus(name: &str) -> Vec<i16> {
         }
         out.extend_from_slice(&dec.decode_flags(&bits, flags));
     }
-    out
+    Some(out)
 }
 
 fn bytes(pcm: &[i16]) -> Vec<u8> {
@@ -69,7 +77,10 @@ fn matches_firmware_on_every_corpus() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut failures = Vec::new();
     for &(name, want) in EXPECTED {
-        let pcm = decode_corpus(name);
+        let Some(pcm) = decode_corpus(name) else {
+            eprintln!("{name}: local-only corpus not present, skipped");
+            continue;
+        };
         let got = fnv1a(&bytes(&pcm));
         if got == want {
             continue;
