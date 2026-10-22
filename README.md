@@ -11,7 +11,12 @@ Under the hood it's an ADALM-Pluto SDR with a custom FPGA image, a Rust engine t
 finds and decodes the voice traffic, and a phone-first web app. It's receive-only. Nothing in
 here transmits.
 
-<!-- screenshots go here -->
+<p>
+  <img src="docs/images/catch-up-phone.png" alt="Catch up on a phone: recent calls by plain channel name, newest first" height="480">
+  <img src="docs/images/explore-desktop.png" alt="Explore on desktop: live waterfall of 451-457 MHz with a channel tuned" height="480">
+</p>
+
+Screenshots are the built-in demo mode (`/?demo`) with sample data.
 
 ## What works today
 
