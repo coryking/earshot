@@ -34,3 +34,4 @@ web/*.tsbuildinfo
 .env
 .env.*
 !.env.example
+.claude/worktrees/

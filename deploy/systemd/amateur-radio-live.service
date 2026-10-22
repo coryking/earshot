@@ -1,0 +1,37 @@
+# earshot receiver supervisor: keeps the Pluto's channel producer running, RX only. The preflight
+# loads the tested FPGA image into the Pluto's runtime PL when needed; the Pluto must boot an
+# image with the DMA reservation (docs/INSTALL.md). It holds /tmp/pluto-radio.lock while a
+# producer runs, restarts it if it dies or stalls, backs off while the Pluto is away, and puts
+# the radio back the way it found it when it stops. To use the Pluto for something else, run
+#     ~/projects/earshot/offload/radio-borrow <command...>
+# Needs ssh, scp, sshpass, iio_info and iio_attr. PLUTO_SSH_PASSWORD (default: ADI's "analog")
+# can be set in live.env; an SSH key on the Pluto is used first.
+[Unit]
+Description=earshot receiver supervisor (Pluto producer, RX only)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=%h/projects/earshot/supervisor/target/release/radio-supervisor
+ConditionPathExists=%h/.cache/amateur-radio-fpga/sw/pluto-fpga-source
+ConditionPathExists=%h/.cache/amateur-radio-fpga/release/pluto_chan-8cea8ae/system_top.bit.bin
+
+[Service]
+Type=simple
+# FPGA_CENTER is the LO in radio-reading Hz (covers about ±10 MHz); FPGA_FORWARD is the bin
+# forwarded at start. Override both in fpga-window.env.
+Environment=FPGA_CENTER=460016998 FPGA_FORWARD=404
+EnvironmentFile=-%h/.config/amateur-radio/live.env
+EnvironmentFile=-%h/.config/amateur-radio/fpga-window.env
+ExecStartPre=/usr/bin/mkdir -p %t/amateur-radio
+ExecStartPre=%h/projects/earshot/fpga/sw/ensure_pluto_fpga.sh %h/.cache/amateur-radio-fpga/release/pluto_chan-8cea8ae/system_top.bit.bin %h/.cache/amateur-radio-fpga/sw/chanctl
+ExecStart=%h/projects/earshot/supervisor/target/release/radio-supervisor --host pluto.local --binary %h/.cache/amateur-radio-fpga/sw/pluto-fpga-source --center ${FPGA_CENTER} --forward ${FPGA_FORWARD} --status-file %t/amateur-radio/receiver.json --engine 127.0.0.1:8810
+Restart=always
+RestartSec=10
+TimeoutStartSec=180
+# SIGTERM goes to the supervisor alone; it stops the producer and checks the radio first.
+KillMode=mixed
+TimeoutStopSec=150
+MemoryMax=512M
+SyslogIdentifier=amateur-radio-live
+
+[Install]
+WantedBy=default.target

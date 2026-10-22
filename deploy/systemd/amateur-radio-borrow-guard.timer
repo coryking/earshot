@@ -1,0 +1,10 @@
+[Unit]
+Description=Check every two minutes for an orphaned radio borrow
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

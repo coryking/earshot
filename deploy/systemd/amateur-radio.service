@@ -1,0 +1,29 @@
+# earshot engine + web UI, loopback-only plain HTTP on 127.0.0.1:8810 (UI, REST and the
+# /api/listen and /api/events WebSockets). No auth of its own: put your own access control in
+# front of it. Reads the producer that amateur-radio-live starts on the Pluto, and reconnects
+# by itself whenever it is lost. Install steps: docs/INSTALL.md.
+[Unit]
+Description=earshot engine + web UI on 127.0.0.1:8810
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=%h/projects/earshot/engine/target/release/radio-engine
+ConditionPathExists=%h/projects/earshot/web/dist/index.html
+
+[Service]
+Type=simple
+# FREQ_PPM is how many ppm high your Pluto reads; measure it against a known carrier.
+Environment=FREQ_PPM=0
+EnvironmentFile=-%h/.config/amateur-radio/engine.env
+WorkingDirectory=%h/projects/earshot/engine
+ExecStartPre=/usr/bin/mkdir -p %h/.local/state/amateur-radio %t/amateur-radio
+ExecStart=%h/projects/earshot/engine/target/release/radio-engine serve --port 8810 --ingest-port 8811 --source tcp:pluto.local:9010 --receiver-status %t/amateur-radio/receiver.json --max-decoders 8 --web-dir %h/projects/earshot/web/dist --freq-correction-ppm ${FREQ_PPM} --labels %h/projects/earshot/engine/data/channel-labels.json --state-dir %h/.local/state/amateur-radio
+Restart=always
+RestartSec=15
+TimeoutStopSec=20
+MemoryHigh=768M
+MemoryMax=1G
+MemorySwapMax=0
+SyslogIdentifier=amateur-radio
+
+[Install]
+WantedBy=default.target

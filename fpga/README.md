@@ -171,12 +171,10 @@ and completed swap also cancel it if the host's check is delayed. A normal Pluto
 runtime image. The installed `amateur-radio-live` preflight reloads it, and its
 one-minute guard restarts the unit after an unexpected Pluto reboot.
 
-On wigglebutt, build the ARM tools and supervisor, and install the home-it-services
-radio units. With the managed units installed:
+Setup, from the boot image to the systemd units, is in
+[`docs/INSTALL.md`](../docs/INSTALL.md). With the units installed:
 
 ```sh
-fpga/sw/build.sh ~/.cache/amateur-radio-fpga/sw
-cargo build --release --locked --manifest-path supervisor/Cargo.toml
 systemctl --user start amateur-radio amateur-radio-live
 systemctl --user status amateur-radio amateur-radio-live
 ```
@@ -196,8 +194,7 @@ window), with +23.3 ppm display correction and an initial forwarded bin near
 the live 454.54375 MHz DMR voice channel. To move the window, put
 `FPGA_CENTER=<radio-reading Hz>` in `~/.config/amateur-radio/fpga-window.env`
 and restart `amateur-radio-live`; use the browser to choose an individual
-frequency. On the tailnet, open
-`https://radio-host.example.ts.net:8449/`, select a channel and
+frequency. Open the web app, select a channel and
 press Listen. The selection stays armed during silence; press Stop listening
 to leave it, then select another frequency. The original boot image and DFU recovery procedure
 are in `offload/RECOVERY.md`; do not flash an unchanged older channelizer image

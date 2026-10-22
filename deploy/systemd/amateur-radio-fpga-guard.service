@@ -1,0 +1,8 @@
+[Unit]
+Description=Restart the earshot receiver after the Pluto loses its runtime FPGA image
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/amateur-radio/live.env
+ExecStart=%h/projects/earshot/fpga/sw/guard_pluto_fpga.sh
+MemoryMax=128M

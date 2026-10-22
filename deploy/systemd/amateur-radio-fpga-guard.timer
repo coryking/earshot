@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the Pluto FPGA image each minute
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=amateur-radio-fpga-guard.service
+
+[Install]
+WantedBy=timers.target

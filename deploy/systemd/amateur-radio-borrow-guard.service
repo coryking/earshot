@@ -1,0 +1,10 @@
+# If a radio-borrow command was killed without cleaning up (SIGKILL), start amateur-radio-live
+# again. Does nothing while any borrower is running or when live is meant to be stopped.
+[Unit]
+Description=Resume amateur-radio-live after a borrower died
+
+[Service]
+Type=oneshot
+ExecStart=%h/projects/earshot/offload/radio-borrow --resume-orphaned
+SyslogIdentifier=amateur-radio-borrow-guard
+MemoryMax=128M

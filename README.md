@@ -62,19 +62,10 @@ The bigger picture of what I'm trying to solve is in
 
 ## Running it
 
-You need a PlutoSDR Rev.B, Rust, Node and [uv](https://docs.astral.sh/uv/). Getting the FPGA
-image onto the Pluto has its own guide in [`fpga/README.md`](fpga/README.md). The engine:
-
-```sh
-cd engine
-./scripts/bootstrap-codecs.sh        # builds DSDcc and mbelib into engine/.native
-cargo build --release --locked
-npm ci --prefix ../web && npm run build --prefix ../web
-./target/release/radio-engine serve --source tcp:pluto.local:9010 --web-dir ../web/dist
-```
-
-It serves on `127.0.0.1:8810` only. Put your own access control in front of it if you want it
-on your phone.
+[`docs/INSTALL.md`](docs/INSTALL.md) goes from a stock Pluto to audio on your phone: host
+build, the Pluto's boot image, the FPGA image (a tested build is on the
+[releases page](https://github.com/coryking/earshot/releases), so you don't need Vivado), and
+systemd units for running it all the time.
 
 To look at the app with no radio at all:
 
@@ -92,7 +83,8 @@ npm ci --prefix web && npm run dev --prefix web    # then open /?demo
 | `supervisor/` | Always-on receiver supervisor |
 | `offload/` | Pluto-side ARM prototype, the RIQ1 protocol, live acceptance tools, Pluto recovery notes |
 | `src/radio_tools/` | The earlier Python analysis CLI and receive console ([docs](docs/radio-tools.md)) |
-| `docs/` | Problem statement, product spec, Seattle RF research |
+| `docs/` | Install guide, problem statement, product spec, Seattle RF research |
+| `deploy/` | Example systemd user units |
 
 ## About the AMBE+2 code
 
